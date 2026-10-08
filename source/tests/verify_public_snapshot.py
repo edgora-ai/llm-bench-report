@@ -51,7 +51,7 @@ def arguments(argv=None):
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--snapshot", type=Path, help="Existing real generated HTML; never rebuilt by this verifier")
     target.add_argument("--url", help="Live HTTPS report on edgora-ai.github.io (actual network fetch, no credentials)")
-    target.add_argument("--site", type=Path, help="Existing static-media-v1 directory; served read-only by an ephemeral local HTTP server")
+    target.add_argument("--site", type=Path, help="Existing static-media-v1/v2 directory; served read-only by an ephemeral local HTTP server")
     parser.add_argument("--baseline-snapshot", type=Path, help="Frozen old inline HTML for measured cold-load comparison, not a replacement fixture")
     parser.add_argument("--baseline-viewer-script", type=Path, help="Exact trusted old viewer source for --baseline-snapshot")
     parser.add_argument("--timing-repeats", type=int, default=3, help="Cold HTTP runs per version under the fixed 20 Mbit/s, 40ms profile")
@@ -62,6 +62,7 @@ def arguments(argv=None):
     parser.add_argument("--date", default="2026-10-08", help="Exact gallery/date coverage and case metadata date")
     parser.add_argument("--case-id", action="append", help="Override case IDs ONLY for explicit older-snapshot development; one or two IDs")
     parser.add_argument("--viewer-script", type=Path, default=ROOT / "web/app.js", help="Trusted report viewer source; inline executable code must match exactly")
+    parser.add_argument("--preview-runtime", type=Path, default=ROOT / "web/preview-runtime.js", help="Independently trusted runtime for exact v2 composition; unused for v1")
     parser.add_argument("--timeout-ms", type=int, default=30000)
     args = parser.parse_args(argv)
     require(args.expected_runs > 0 and args.expected_reviews >= 0 and args.expected_failed >= 0, "Invalid expected counts")
@@ -130,7 +131,7 @@ class ReportHTML(HTMLParser):
             self.current = None
 
 
-def audit_html(html, trusted_script):
+def audit_html(html, trusted_script, trusted_runtime=None):
     parsed = ReportHTML()
     parsed.feed(html)
     parsed.close()
@@ -138,11 +139,22 @@ def audit_html(html, trusted_script):
     require(len(parsed.scripts) == 2, "Report must contain only snapshot JSON and trusted viewer code")
     match = re.fullmatch(r"window\.BENCH_SNAPSHOT=(\{.*\});", parsed.scripts[0], re.S)
     require(match is not None and "<" not in parsed.scripts[0], "Snapshot JSON must be safely escaped, without embedded model markup")
-    require(parsed.scripts[1] == trusted_script, "Inline executable code does not match trusted web/app.js")
     data = json.loads(match.group(1))
+    v2 = data.get('format') == 'static-media-v2'
+    if v2:
+        require(isinstance(trusted_runtime, str) and trusted_runtime, "v2 audit requires independently trusted preview-runtime.js")
+        require(parsed.scripts[1] == trusted_runtime + '\n' + trusted_script, "Inline executable code differs from trusted runtime + viewer composition")
+        # Import only this verifier's trusted sibling, never the report directory.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from make_originals import validate_originals
+        validate_originals(data)
+        require(set(data) <= {'runs', 'tasks', 'evidence', 'format', 'transport', 'originals', 'assets', 'thumbnails', 'offline'}, "Unknown v2 report fields")
+    else:
+        require(parsed.scripts[1] == trusted_script, "Inline executable code does not match trusted web/app.js")
+        require(not {'transport', 'originals'}.intersection(data), "v2 fields in legacy report")
     require(isinstance(data.get("runs"), list) and isinstance(data.get("evidence"), dict), "Snapshot data shape is invalid")
-    static = data.get('format') == 'static-media-v1'
-    require(data.get('format') in (None, 'static-media-v1'), "Unsupported public report format")
+    static = data.get('format') == 'static-media-v1' or (v2 and data['transport'] == 'external')
+    require(data.get('format') in (None, 'static-media-v1', 'static-media-v2'), "Unsupported public report format")
     assets = data.get('assets', {})
     if static:
         require(isinstance(assets, dict) and assets, "Static report needs its media manifest")
@@ -156,6 +168,8 @@ def audit_html(html, trusted_script):
         offline = data.get('offline', {})
         require(offline.get('path') == 'offline.html' and re.fullmatch(r'[a-f0-9]{64}', offline.get('sha256', ''))
                 and isinstance(offline.get('size'), int) and offline['size'] > 0, "Invalid managed offline descriptor")
+    if v2 and not static:
+        require(not {'assets', 'thumbnails', 'offline'}.intersection(data), "Inline v2 contains external media fields")
     for key, value in data['evidence'].items():
         require(isinstance(key, str) and isinstance(value, str), "Invalid evidence mapping")
         if static:
@@ -342,6 +356,11 @@ def cold_load(browser, url, data, args, report, name, enforce_budget, viewport=N
     for image in first_images:
         image['model'] = next((run.get('model') for run in data['runs'] if run['id'] == image.get('run_id')), None)
     first_controls = page.locator('#task-tabs button, [data-view="gallery"]').evaluate_all("items=>items.filter(i=>{const b=i.getBoundingClientRect();return b.top<innerHeight&&b.bottom>0&&!i.disabled}).map(i=>({label:i.textContent,top:i.getBoundingClientRect().top,bottom:i.getBoundingClientRect().bottom}))")
+    first_originals = []
+    if data.get('format') == 'static-media-v2':
+        first_originals = page.locator('.evidence-card [data-run-original]').evaluate_all("items=>items.filter(i=>{const b=i.getBoundingClientRect();return b.top>=0&&b.bottom<=innerHeight&&b.left>=0&&b.right<=innerWidth&&!i.disabled&&i.textContent==='运行原作'}).map(i=>({run_id:i.dataset.runOriginal,top:i.getBoundingClientRect().top,bottom:i.getBoundingClientRect().bottom}))")
+        require(bool(first_originals), 'v2 first viewport lacks a fully visible actionable original button')
+        require(not any('/originals/' in row['url'] for row in requests), 'Original package fetched before explicit action')
     if enforce_budget:
         if viewport['width'] > 600:
             require(bool(first_images), 'Default desktop first viewport must show an actually loaded work image')
@@ -364,7 +383,8 @@ def cold_load(browser, url, data, args, report, name, enforce_budget, viewport=N
                'requests': len(requests), 'image_requests': sum(row['type'] == 'image' for row in requests),
                'video_requests': sum(row['type'] == 'media' for row in requests), 'active_task': active_task,
                'source_sha256': root[0]['source_sha256'], 'source_verified_by': root[0]['source_verified_by'],
-               'viewport': viewport, 'first_viewport_images': first_images, 'first_viewport_controls': first_controls}
+               'viewport': viewport, 'first_viewport_images': first_images, 'first_viewport_controls': first_controls,
+               'first_viewport_originals': first_originals}
     context.close()
     return metrics
 
@@ -562,6 +582,9 @@ def open_run(page, run_id, expect):
     page.locator('[name="task_id"]').select_option('')
     page.locator('[name="purpose"]').select_option('')
     page.locator('[name="q"]').fill(run_id)
+    # Wait for the actual debounced filter commit before opening a dialog;
+    # v2 correctly closes running previews/dialogs when filters later change.
+    expect(page.locator('.run-table tbody tr')).to_have_count(1)
     button = page.locator('.run-name button').filter(has_text=re.compile('^' + run_id + '$'))
     expect(button).to_have_count(1)
     button.click()
@@ -713,7 +736,7 @@ def failed_and_review_checks(page, data, report, expect, new_ui):
 
 
 def explicit_filter_compatibility(browser, url, data, args, report):
-    if data.get('format') != 'static-media-v1':
+    if data.get('format') not in {'static-media-v1', 'static-media-v2'}:
         return
     from playwright.sync_api import expect
     filtered = url.split('#')[0].split('?')[0] + '?purpose=benchmark'
@@ -823,7 +846,7 @@ def verify(args, report):
         else:
             html_path = args.site / 'index.html' if args.site else args.snapshot
             html_bytes = html_path.read_bytes()
-        data = audit_html(html_bytes.decode('utf-8'), trusted)
+        data = audit_html(html_bytes.decode('utf-8'), trusted, args.preview_runtime.read_text(encoding='utf-8') if args.preview_runtime.is_file() else None)
         report['source'].update(sha256=hashlib.sha256(html_bytes).hexdigest(), html_bytes=len(html_bytes), format=data.get('format', 'inline'))
         validate_data(data, args, report)
         browser = playwright.chromium.launch(headless=True, args=['--autoplay-policy=no-user-gesture-required'])
@@ -838,7 +861,7 @@ def verify(args, report):
             with target() as url:
                 metrics = []
                 for _ in range(args.timing_repeats):
-                    sample = cold_load(browser, url, data, args, report, 'current', data.get('format') == 'static-media-v1')
+                    sample = cold_load(browser, url, data, args, report, 'current', data.get('format') in {'static-media-v1', 'static-media-v2'} and data.get('transport', 'external') == 'external')
                     require(sample['source_sha256'] == report['source']['sha256'], 'Browser received a different document than audited preflight')
                     metrics.append(sample)
                 report['cold_load'] = {'profile': NETWORK_PROFILE, 'viewport': {'width': 1440, 'height': 900},
@@ -855,7 +878,7 @@ def verify(args, report):
                     report['cold_load']['baseline_samples'] = old_metrics
                     report['cold_load']['baseline_median_readable_ms'] = median(m['readable_ms'] for m in old_metrics)
                     report['cold_load']['baseline_median_interactive_ms'] = median(m['interactive_ms'] for m in old_metrics)
-                if data.get('format') == 'static-media-v1':
+                if data.get('format') in {'static-media-v1', 'static-media-v2'} and data.get('transport', 'external') == 'external':
                     report['cold_load']['phone_sample'] = cold_load(browser, url, data, args, report, 'current-phone', True,
                                                                     {'width': 400, 'height': 850})
                 browser_suite(browser, url, data, args, report)

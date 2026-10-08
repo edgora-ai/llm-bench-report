@@ -1,8 +1,8 @@
 """Publish a sanitized report and optional allowlisted source to an existing repo.
 
-Accept a self-contained report or a validated static-media package. Only
-sanitized evidence derivatives leave the benchmark machine; source crosses a
-separate allowlist boundary, never a recursive copy of the working directory.
+Accept a self-contained report or a validated static-media package. Evidence
+and reviewed original payloads cross explicit manifest boundaries; project
+source crosses a separate allowlist, never a recursive working-directory copy.
 """
 
 import argparse
@@ -23,6 +23,8 @@ EXTERNAL_ASSET = re.compile(r'<(?:link[^>]+href|script[^>]+src|img[^>]+src)="(?!
 REPORT_MANIFEST = ".report-manifest.json"
 REPORT_ASSETS = ".report-assets.json"
 MEDIA_PATH = re.compile(r"media/([a-f0-9]{64})\.(?:jpg|png|webp|gif|webm|mp4)\Z")
+ORIGINAL_PATH = re.compile(r"originals/([a-f0-9]{64})\.json\Z")
+ASSET_DIRECTORIES = ("media", "originals")
 
 
 def verify(html: str) -> dict:
@@ -44,8 +46,9 @@ def verify(html: str) -> dict:
     match = re.search(r"window\.BENCH_SNAPSHOT=(\{.*?\});</script>", html, re.S)
     if not match:
         raise RuntimeError("refusing to publish: snapshot data is not readable")
-    data = json.loads(match.group(1).replace("\\u003c", "<"))
-    if data.get("format") == "static-media-v1" or any(
+    from make_site import _json
+    data = _json(match.group(1))
+    if any(key in data for key in ("format", "transport", "originals")) or any(
             not isinstance(value, str) or not value.startswith("data:")
             for value in data.get("evidence", {}).values()):
         raise RuntimeError("refusing offline publication: external media requires a verified site directory")
@@ -74,7 +77,7 @@ def stage(html: str, directory: Path, title: str, note: str, source_root=None) -
     (directory / "README.md").write_text(
         f"# {title}\n\n{note}\n\n本仓库的报告由 `llm-bench` 发布步骤自动生成，"
         "报告为只读脱敏合并快照，不含凭据、原始日志或本机路径。"
-        "源码与运行配置分开，私有配置、二进制和原始归档不上传。\n"
+        "源码与运行配置分开，私有配置、二进制和完整运行归档不上传。\n"
         "index.html 随发布更新。日期命名文件是首次创建时的合并数据副本，"
         "不是该日期专属数据；旧版文件保留原字节，不重新包装成日快照。\n\n"
         "[项目源码与复现说明](source/README.md)\n\n"
@@ -95,37 +98,43 @@ def stage(html: str, directory: Path, title: str, note: str, source_root=None) -
 
 def stage_static(bundle: Path, directory: Path, title: str, note: str, source_root=None) -> Path:
     """Stage a verified multi-file report; dates always use the offline input."""
-    from make_site import read_asset_safe, verify_site
+    from make_site import verify_site
 
     manifest = verify_site(bundle)
-    offline = read_asset_safe(bundle, "offline.html").decode("utf-8")
-    verify(offline)
+    captured = checked_report_files(bundle, manifest)
+    offline = captured["offline.html"].decode("utf-8")
+    # v2 inline originals are audited by verify_site, never the legacy publisher.
+    if manifest["version"] == 1:
+        verify(offline)
     directory = stage(offline, directory, title, note, source_root)
-    for relative, info in manifest["files"].items():
-        data = read_asset_safe(bundle, relative)
-        if len(data) != info["size"] or hashlib.sha256(data).hexdigest() != info["sha256"]:
-            raise RuntimeError("Static package changed while staging: " + relative)
+    for relative, data in captured.items():
         target = directory / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     (directory / ".report-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     readme = directory / "README.md"
+    preview_note = ("在线首页按需加载截图与录像，不执行模型HTML。"
+                    if manifest["version"] == 1 else
+                    "在线首页按需加载截图、录像及已审核的原作入口与运行依赖。"
+                    "点击“运行原作”后在不透明源沙箱中执行原程序；不是视频回放。"
+                    "原文件字节不变，执行文档经过隔离与资源装载适配。"
+                    "沙箱限制下载、存储及常规外联，不提供容器级断网或资源配额。")
     readme.write_text(readme.read_text(encoding="utf-8").replace(
-        "[项目源码与复现说明]", "在线首页按需加载截图与录像，不执行模型HTML。\n\n"
+        "[项目源码与复现说明]", preview_note + "\n\n"
         "[下载离线完整版](offline.html)（自包含，首次下载较大）\n\n[项目源码与复现说明]").replace(
         "tests/publish.py <snapshot.html>", "tests/publish.py <site-directory>"), encoding="utf-8")
     return directory
 
 
 def report_manifest(directory):
-    from make_site import read_asset_safe, validate_manifest
+    from make_site import _json, read_asset_safe, validate_manifest
 
     path = directory / REPORT_MANIFEST
     if not path.exists() and not path.is_symlink():
         return None
     try:
-        return validate_manifest(json.loads(read_asset_safe(directory, REPORT_MANIFEST)))
+        return validate_manifest(_json(read_asset_safe(directory, REPORT_MANIFEST)))
     except (ValueError, UnicodeDecodeError) as error:
         raise RuntimeError("Invalid report manifest") from error
 
@@ -142,49 +151,60 @@ def checked_report_files(directory, manifest):
     return captured
 
 
+def asset_digest(relative, version):
+    """Only these versioned namespaces can acquire append-only ownership."""
+    if not isinstance(relative, str):
+        return None
+    match = MEDIA_PATH.fullmatch(relative)
+    if match is None and version == 2:
+        match = ORIGINAL_PATH.fullmatch(relative)
+    return match.group(1) if match else None
+
+
 def owned_media(repo, previous):
-    """Validate the append-only ownership ledger before adding new assets."""
-    from make_site import read_asset_safe
+    """Validate v1 media or v2 media/original ownership before adding assets."""
+    from make_site import _json, read_asset_safe
 
     ledger_path = repo / REPORT_ASSETS
     hashes = {}
     if ledger_path.exists() or ledger_path.is_symlink():
         if previous is None:
             raise RuntimeError("Media ownership ledger has no current report manifest")
-        try:
-            ledger = json.loads(read_asset_safe(repo, REPORT_ASSETS))
-        except (ValueError, UnicodeDecodeError) as error:
-            raise RuntimeError("Invalid media ownership ledger") from error
+        ledger = _json(read_asset_safe(repo, REPORT_ASSETS))
         if (not isinstance(ledger, dict) or set(ledger) != {"version", "sha256"}
-                or type(ledger["version"]) is not int or ledger["version"] != 1
+                or type(ledger["version"]) is not int or ledger["version"] not in {1, 2}
+                or ledger["version"] != previous["version"]
                 or not isinstance(ledger["sha256"], dict)):
             raise RuntimeError("Invalid media ownership ledger")
         hashes = ledger["sha256"]
         for relative, digest in hashes.items():
-            match = MEDIA_PATH.fullmatch(relative)
-            if not match or digest != match.group(1):
-                raise RuntimeError("Invalid managed media path or hash")
+            expected = asset_digest(relative, ledger["version"])
+            if expected is None or digest != expected:
+                raise RuntimeError("Invalid managed asset path or hash")
     elif previous is not None:
         raise RuntimeError("Published report is missing its media ownership ledger")
     if previous is not None:
         for relative, info in previous["files"].items():
-            if relative.startswith("media/") and hashes.get(relative) != info["sha256"]:
-                raise RuntimeError("Current report media is not owned: " + relative)
-    media = repo / "media"
+            if (asset_digest(relative, previous["version"]) is not None
+                    and hashes.get(relative) != info["sha256"]):
+                raise RuntimeError("Current report asset is not owned: " + relative)
     observed = set()
-    if media.exists() or media.is_symlink():
-        if media.is_symlink() or not media.is_dir():
-            raise RuntimeError("Unsafe media destination")
-        for path in media.iterdir():
-            relative = "media/" + path.name
-            if relative not in hashes:
-                raise RuntimeError("Unmanaged media destination: " + relative)
-            data = read_asset_safe(repo, relative)
-            if hashlib.sha256(data).hexdigest() != hashes[relative]:
-                raise RuntimeError("Managed media was modified: " + relative)
-            observed.add(relative)
+    for namespace in ASSET_DIRECTORIES:
+        directory = repo / namespace
+        if directory.exists() or directory.is_symlink():
+            if directory.is_symlink() or not directory.is_dir():
+                raise RuntimeError("Unsafe " + namespace + " destination")
+            for path in directory.iterdir():
+                relative = namespace + "/" + path.name
+                if relative not in hashes:
+                    raise RuntimeError("Unmanaged " + namespace + " destination: " + relative)
+                data = read_asset_safe(repo, relative)
+                if hashlib.sha256(data).hexdigest() != hashes[relative]:
+                    raise RuntimeError("Managed " + namespace + " was modified: " + relative)
+                observed.add(relative)
     if observed != set(hashes):
-        raise RuntimeError("Managed media file is missing")
+        missing = sorted(set(hashes) - observed)[0].split("/", 1)[0]
+        raise RuntimeError("Managed " + missing + " file is missing")
     return hashes
 
 
@@ -201,15 +221,18 @@ def prepare_static_copy(site, repo):
         if ledger.exists() or ledger.is_symlink():
             raise RuntimeError("Media ownership ledger has no current report manifest")
         return None
-    expected_media = {path for path in current["files"] if path.startswith("media/")}
-    media = site / "media"
-    if media.exists() or media.is_symlink():
-        if media.is_symlink() or not media.is_dir():
-            raise RuntimeError("Unsafe staged media directory")
-        if {"media/" + path.name for path in media.iterdir()} != expected_media:
-            raise RuntimeError("Unmanaged or missing staged media")
-    elif expected_media:
-        raise RuntimeError("Missing staged media directory")
+    if previous is not None and current["version"] < previous["version"]:
+        raise RuntimeError("Report format downgrade requires an explicit migration")
+    for namespace in ASSET_DIRECTORIES:
+        expected = {path for path in current["files"] if path.startswith(namespace + "/")}
+        directory = site / namespace
+        if directory.exists() or directory.is_symlink():
+            if directory.is_symlink() or not directory.is_dir():
+                raise RuntimeError("Unsafe staged " + namespace + " directory")
+            if (not expected or {namespace + "/" + path.name for path in directory.iterdir()} != expected):
+                raise RuntimeError("Unmanaged or missing staged " + namespace)
+        elif expected:
+            raise RuntimeError("Missing staged " + namespace + " directory")
     captured = checked_report_files(site, current)
     manifest_bytes = read_asset_safe(site, REPORT_MANIFEST)
     # The publication stage also contains source, README and dated history.
@@ -229,12 +252,12 @@ def prepare_static_copy(site, repo):
     elif (repo / "offline.html").exists() or (repo / "offline.html").is_symlink():
         raise RuntimeError("Unmanaged offline report destination")
     for relative, info in current["files"].items():
-        if relative.startswith("media/"):
+        if asset_digest(relative, current["version"]) is not None:
             if relative in hashes and hashes[relative] != info["sha256"]:
-                raise RuntimeError("Content-addressed media collision")
+                raise RuntimeError("Content-addressed asset collision")
             hashes[relative] = info["sha256"]
     captured[REPORT_MANIFEST] = manifest_bytes
-    captured[REPORT_ASSETS] = (json.dumps({"version": 1, "sha256": hashes},
+    captured[REPORT_ASSETS] = (json.dumps({"version": current["version"], "sha256": hashes},
                                          sort_keys=True, indent=2) + "\n").encode("utf-8")
     return captured
 

@@ -11,7 +11,7 @@
 
 ## 源码与复现前置条件
 
-公开报告位于 [GitHub Pages](https://edgora-ai.github.io/llm-bench-report/)，源码位于报告仓库的 `source/`。公开仓库不含运行归档、数据库、认证、真实provider配置或CLI二进制；不能仅靠公开快照恢复完整原始实验。
+公开报告位于 [GitHub Pages](https://edgora-ai.github.io/llm-bench-report/)，项目源码位于报告仓库的 `source/`。v2报告另外公开经过逐项审核的原作入口和必要依赖，存放在非执行JSON包中。公开仓库不含完整运行归档、数据库、认证、真实provider配置或CLI二进制；不能仅靠公开快照恢复完整原始实验。
 
 需要 Linux、Python ≥3.11、Docker、Node.js（脚本语法验证）及 ffmpeg（截图/视频导出测试）。从仓库根目录进入 `source/`；使用源码目录或 editable installation，当前wheel不保证打包任务、网页及runtime资源。
 
@@ -79,9 +79,13 @@ python3 -m bench.cli stop <job-id>  # 先保存取消意图，再发出SIGINT，
 - `data/batches/<批次>/batch.json`：完整计划清单、顺序随机种子、环境与目录快照。
 - 看板：同题作品对比、结果矩阵、成本与耗时、日期趋势、完整记录；本地看板保留盲评分，公开页面只读。
 
-默认比较 `benchmark`，冒烟和测试fixture不混榜。先在“用途”选择smoke可查看环境联调尝试。**CLI正常退出不等于任务完成**；自动检查与视觉评分分开，未评分显示待评。视频是会话结束后在离线隔离浏览器录制的原始画面，页面不会在看板主站执行；HTML/SVG作为下载附件。评估器自身超时或崩溃记为 `infrastructure_error`，不折算成产物失败；检查集缺失时看板不显示为「全部通过」。
+默认比较 `benchmark`，冒烟和测试fixture不混榜。先在“用途”选择smoke可查看环境联调尝试。**CLI正常退出不等于任务完成**；自动检查与视觉评分分开，未评分显示待评。视频是会话结束后在隔离浏览器录制的画面，不是实时原作。评估器自身超时或崩溃记为 `infrastructure_error`，不折算成产物失败；检查集缺失时看板不显示为「全部通过」。本地认证看板保持HTML/SVG附件下载及原有安全头，实时预览通过导出的v2报告使用。
 
-`artifacts/observatory.html`（或明确指定的版本文件）是自包含、无API、不可写入的脱敏快照。GitHub Pages使用轻量多文件版：元数据和可信查看器内联，缩略图按视口加载，全尺寸截图和录像由操作触发；`offline.html` 保留可下载的单文件完整版。两版run数据与完整媒体派生字节一致，缩略图是额外派生，不修改归档。公开媒体经过压缩，部分录像裁掉无内容边缘，不等于档案原始像素。生成HTML/SVG始终不在报告主站执行。
+`artifacts/observatory.html`（或明确指定的版本文件）是自包含、无API、不可写入的脱敏快照。GitHub Pages使用轻量多文件版：元数据和可信查看器内联，缩略图按视口加载，全尺寸截图和录像由操作触发；`offline.html` 保留可下载的单文件完整版。两版run数据与完整媒体派生字节一致，缩略图是额外派生，不修改归档。公开媒体经过压缩，部分录像裁掉无内容边缘，不等于档案原始像素。
+
+v2作品卡的“运行原作”会在校验包及逐文件SHA-256后启动真实HTML/SVG/Canvas/WebGL。原件字节保持不变；执行文档只增加隔离前缀，并将已登记本地JS/CSS引用适配为携带原字节的data URL，保留脚本顺序和defer。截图、录像、实时原作是独立模式；原作缺文件或报错不会被补齐、改写成成功或偷偷替换成录像。失败但有交付的attempt同样保留。
+
+单作预览及两份原作比较均需明确启动；手机仅运行可见列，关闭或切换销毁实例。原作在双层不透明源沙箱中执行，不进入主站DOM，不获得报告存储、认证或任意网络代理；下载、全屏和部分浏览器功能受限。浏览器策略不等于容器级断网，不能保证WebRTC/DNS等所有通道或硬CPU/内存/GPU配额。运行环境是访问者的浏览器，实际视口和缩放单独显示，不保证与历史评估像素、性能或动画进度一致。“已装载”也不是新的验收结论。
 
 作品按任务、模型/工具及具体run展示；重复与失败记录不被“最好结果”替换。比较默认同题同Prompt，不同或未知执行条件必须明确标注。截图阶段不是精确动画时间，录像联动只是从各自录制起点重播。结果矩阵区分会话结论、入口检查、评估及证据收录；入口检查缺失保持unknown，证据登记不等于加载成功。生成会话耗时不包含排队与后评估，评估耗时缺失时不反推。
 
@@ -133,9 +137,23 @@ python3 tests/publish.py artifacts/site --include-source
 
 `--input-viewer` 必须对应输入快照的可信发布版本；新查看器由当前 `web/` 构建。复用已有快照时不用再次收集API数据、录制或重编码视频。构建器拒绝覆盖内容不同的非空目录，改版使用新的输出目录。已有单文件发布命令仍适用于旧式仓库；已切换多文件的仓库必须传入验证后的site目录，不能用单文件覆盖入口并留下过期资源清单。
 
-`.report-manifest.json` 记录当前报告的精确文件/hash/MIME/大小，`media/` 只放内容寻址的栅格图和录像；`.report-assets.json` 是发布器维护的追加式资源所有权账本。修改过的已管理文件、未知媒体或符号链接均阻止发布，不自动接管、删除或覆盖。已有日期HTML保持原字节，新日期副本来自自包含offline文件，不来自轻量index。日期文件仍是历史合并副本，不是假装的单日数据集。
+如需加入原作，在持有归档的机器上逐项完整审阅入口及必要依赖，另存绑定实际SHA-256的审核JSON后升级已有site；不能把自动扫描无命中直接写成审核通过。审核记录标明真实审阅者，本次工具支持的`reviewer: assistant`不代表用户逐项审阅。
+
+```bash
+python3 tests/make_site.py artifacts/site artifacts/site-originals \
+  --upgrade-site --input-viewer artifacts/share.viewer.js \
+  --archive-root runs --audit artifacts/original-review.json
+python3 tests/publish.py artifacts/site-originals --include-source --dry-run
+python3 tests/publish.py artifacts/site-originals --include-source
+```
+
+审核JSON结构为`{version: 1, reviewer: "assistant", files: {"run-id/index.html": {sha256, decision: "include"或"withhold", reviewed_full: true, reason}}}`，文件名相对于各自output目录。只为确实全文审阅且摘要一致的文件登记`reviewed_full`；缺失审核的原作保留未审核状态，不公开。缺依赖是交付完整性问题，不自动等于隐私拒绝。升级v2输入时另传与输入匹配的`--input-runtime`；公开源码副本没有私有归档或该审核文件，不能凭空恢复这一步。
+
+`.report-manifest.json` 记录当前报告的精确文件/hash/MIME/大小。`media/` 只放内容寻址的栅格图和录像，v2的`originals/`只放已审核原作的内容寻址JSON；原作源码不作为同源裸HTML发布。`.report-assets.json` 是追加式资源所有权账本，v1仅管理媒体，v2无损继承旧媒体并追加原作包。修改或缺失的已管理文件、未知媒体/原作或符号链接均阻止发布，不自动接管、删除或覆盖；不自动降级v2报告。已有日期HTML保持原字节，不会自动获得实时预览；最新首页按日期筛选可使用新能力。新日期副本来自自包含offline文件，不来自轻量index；日期文件仍是历史合并副本，不是假装的单日数据集。
 
 当前发布验收器支持 `python3 tests/verify_public_snapshot.py --help` 和 `--site artifacts/site --output /tmp/report-check`；需要原生Python Playwright与已安装的Chromium，可使用现有隔离runtime镜像执行。它先检查冷缓存首屏请求预算，再进行全图片解码及指定录像播放，两阶段分别统计。历史对照可显式传入 `--baseline-snapshot` 与对应 `--baseline-viewer-script`，不把不同时代的查看器混为一谈。
+
+实时原作另由 `python3 tests/verify_original_previews.py --help` 所示入口验收，逐份记录来源校验、实际运动、控件操作、双作比较及离线结果。独立隔离检查用 `python3 tests/verify_preview_isolation.py --help`，通过可达canary和被动观测验证浏览器策略，不用断网、请求abort或替换API替产品阻断。静态报告的流量检查不能代替隔离证明。额外浏览器在独立测试环境安装，不重建或修改已冻结的评测镜像；实际未覆盖的浏览器和功能须明确列出。
 
 发布器只向已存在且有权限的仓库提交；clone失败不会新建仓库。它在临时clone的发布分支提交，再fast-forward推送指定分支，不使用force。Pages根目录是报告，`source/` 是白名单源码。`source/.source-manifest.json` 只记录源码文件哈希，不与报告资源清单混用，不含私有运行数据。源码目录有未知文件或已管理文件被另外修改时停止，不静默覆盖。
 

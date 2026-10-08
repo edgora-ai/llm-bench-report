@@ -472,5 +472,188 @@ class StaticSiteTests(unittest.TestCase):
             make_snapshot.render_snapshot({"runs": [], "evidence": {}, "bad": float("nan")}, root=self.project)
 
 
+class StaticSiteV2Tests(unittest.TestCase):
+    def setUp(self):
+        from test_originals import OriginalsTests
+        self.legacy = StaticSiteTests()
+        self.legacy.setUp()
+        self.addCleanup(self.legacy.doCleanups)
+        self.original = OriginalsTests()
+        self.original.setUp()
+        self.addCleanup(self.original.doCleanups)
+        old_dir = self.original.directory
+        self.original.runs[0]["id"] = "r1"
+        self.original.directory = old_dir.with_name("r1")
+        old_dir.rename(self.original.directory)
+        self.original.register()
+        self.original.audit["files"] = {key.replace("failed-run/", "r1/"): value for key, value in self.original.audit["files"].items()}
+        self.runtime = self.legacy.project / "web/preview-runtime.js"
+        # A deliberately recognizable synthetic trusted script, not a production
+        # runtime fallback. Production integration is tested with the real file.
+        self.runtime.write_text("window.SYNTHETIC_TRUSTED_RUNTIME = 1;\n")
+        self.destination = self.legacy.root / "v2"
+        self.legacy.build()
+
+    def upgrade(self):
+        return make_site.upgrade_site(self.legacy.site, self.destination, self.legacy.viewer,
+                                      self.original.root, self.original.audit, root=self.legacy.project)
+
+    def audit(self, name="index.html"):
+        return make_site.audit_snapshot((self.destination / name).read_text(), self.legacy.viewer, static=name == "index.html")
+
+    def test_upgrade_preserves_all_media_mappings_metadata_and_original_bytes(self):
+        before = {path.relative_to(self.legacy.site): path.read_bytes() for path in self.legacy.site.rglob("*") if path.is_file()}
+        old = self.legacy.audit()
+        with mock.patch.object(make_site, "_thumbnail", side_effect=AssertionError("upgrade must not thumbnail")):
+            stats = self.upgrade()
+        online, inline = self.audit(), self.audit("offline.html")
+        self.assertEqual(online["format"], "static-media-v2")
+        self.assertEqual(online["transport"], "external")
+        self.assertEqual(inline["transport"], "inline")
+        for key in ("runs", "tasks", "assets", "evidence", "thumbnails"):
+            self.assertEqual(old[key], online[key])
+        self.assertEqual(inline["runs"], old["runs"])
+        for path in old["assets"]:
+            self.assertEqual((self.destination / path).read_bytes(), before[Path(path)])
+        ext = online["originals"]["r1"]["package"]
+        embedded = inline["originals"]["r1"]["package"]
+        self.assertEqual((self.destination / ext["path"]).read_bytes(), base64.b64decode(embedded["base64"]))
+        self.assertEqual(stats["original_packages"], 1)
+        self.assertEqual(stats["original_files"], 6)
+        self.assertEqual(stats["media_files"], len(old["assets"]))
+        self.assertEqual(before, {path.relative_to(self.legacy.site): path.read_bytes() for path in self.legacy.site.rglob("*") if path.is_file()})
+        self.assertEqual(make_site.verify_site(self.destination, self.legacy.viewer)["stats"], stats)
+        html = (self.destination / "index.html").read_text()
+        self.assertEqual(html.count("<script>"), 2)
+        self.assertNotIn("<iframe", html)
+        self.assertIn(self.runtime.read_text() + "\n" + self.legacy.viewer.read_text(), html)
+
+    def test_v2_repeat_deterministic_and_v2_input_upgrade(self):
+        stats = self.upgrade()
+        self.assertEqual(self.upgrade(), stats)
+        second = self.legacy.root / "v2-second"
+        make_site.upgrade_site(self.destination, second, self.legacy.viewer, self.original.root,
+                               self.original.audit, root=self.legacy.project)
+        self.assertEqual({p.relative_to(second): p.read_bytes() for p in second.rglob("*") if p.is_file()},
+                         {p.relative_to(self.destination): p.read_bytes() for p in self.destination.rglob("*") if p.is_file()})
+
+    def test_explicit_runtime_validation_no_extracted_viewer_trust(self):
+        self.upgrade()
+        bad = self.legacy.root / "bad-runtime.js"
+        bad.write_text("window.BAD=1;\n")
+        with self.assertRaisesRegex(RuntimeError, "viewer mismatch"):
+            make_site.verify_site(self.destination, self.legacy.viewer, preview_runtime=bad)
+        original = self.runtime.read_bytes()
+        self.runtime.unlink()
+        with self.assertRaises(RuntimeError):
+            make_site.verify_site(self.destination, self.legacy.viewer)
+        self.runtime.write_bytes(original)
+        make_site.verify_site(self.destination, self.legacy.viewer)
+
+    def rewrite(self, name, value):
+        raw = make_snapshot.render_snapshot(value, root=self.legacy.project).encode()
+        (self.destination / name).write_bytes(raw)
+        manifest = json.loads((self.destination / make_site.MANIFEST).read_bytes())
+        manifest["files"][name].update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        manifest["stats"]["index_bytes" if name == "index.html" else "offline_bytes"] = len(raw)
+        (self.destination / make_site.MANIFEST).write_text(json.dumps(manifest))
+
+    def test_v2_unknown_schema_transport_paths_original_binding(self):
+        self.upgrade()
+        online = self.audit()
+        mutations = [lambda d: d.update(unknown=1), lambda d: d.update(transport="inline"),
+                     lambda d: d["originals"].update(unknown=d["originals"]["r1"]),
+                     lambda d: d["originals"]["r1"].update(entry_sha256="0" * 64),
+                     lambda d: d["originals"]["r1"]["package"].update(path="media/" + "0" * 64 + ".json"),
+                     lambda d: d["originals"]["r1"].update(missing=["invented.js"]),
+                     lambda d: d["runs"][0].update(status="changed-history")]
+        for mutation in mutations:
+            data = copy.deepcopy(online)
+            mutation(data)
+            self.rewrite("index.html", data)
+            with self.assertRaises(RuntimeError):
+                make_site.verify_site(self.destination, self.legacy.viewer)
+        self.rewrite("index.html", online)
+        make_site.verify_site(self.destination, self.legacy.viewer)
+
+    def test_missing_tampered_extra_original_and_mime_are_refused(self):
+        self.upgrade()
+        path = self.destination / self.audit()["originals"]["r1"]["package"]["path"]
+        original = path.read_bytes()
+        path.unlink()
+        with self.assertRaises(RuntimeError):
+            make_site.verify_site(self.destination, self.legacy.viewer)
+        path.write_bytes(original + b"changed")
+        with self.assertRaises(RuntimeError):
+            make_site.verify_site(self.destination, self.legacy.viewer)
+        path.write_bytes(original)
+        extra = self.destination / "originals/unregistered.json"
+        extra.write_bytes(original)
+        with self.assertRaises(RuntimeError):
+            make_site.verify_site(self.destination, self.legacy.viewer)
+        extra.unlink()
+        manifest = json.loads((self.destination / make_site.MANIFEST).read_bytes())
+        manifest["files"][str(path.relative_to(self.destination))]["mime"] = "text/html"
+        with self.assertRaises(RuntimeError):
+            make_site.validate_manifest(manifest)
+
+    def test_missing_dependency_and_not_reviewed_status_preserved(self):
+        self.original.manifest["artifacts"] = [item for item in self.original.manifest["artifacts"] if item["path"] != "output/js/two.js"]
+        self.original.write_manifest()
+        self.upgrade()
+        self.assertEqual(self.audit()["originals"]["r1"]["status"], "missing_dependencies")
+        self.assertEqual(self.audit("offline.html")["originals"]["r1"]["missing"], ["js/two.js"])
+        self.destination = self.legacy.root / "v2-unreviewed"
+        self.original.audit["files"] = {}
+        self.upgrade()
+        self.assertEqual(self.audit()["originals"]["r1"]["status"], "not_reviewed")
+        self.assertFalse((self.destination / "originals").exists())
+
+    def test_missing_runtime_fails_without_output_and_legacy_still_builds(self):
+        self.runtime.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.upgrade()
+        self.assertFalse(self.destination.exists())
+        self.legacy.build()
+
+    def test_v1_manifest_and_index_reject_valid_v2_offline(self):
+        self.upgrade()
+        inline_bytes = (self.destination / "offline.html").read_bytes()
+        online = self.legacy.audit()
+        self.destination = self.legacy.site
+        # Keep a strictly v1 manifest/index and no external originals, but bind
+        # the v1 offline descriptor to the otherwise valid v2 inline report.
+        (self.destination / "offline.html").write_bytes(inline_bytes)
+        offline_info = make_site._file_info(inline_bytes, "text/html", "offline")
+        manifest = json.loads((self.destination / make_site.MANIFEST).read_bytes())
+        manifest["files"]["offline.html"] = offline_info
+        manifest["stats"]["offline_bytes"] = len(inline_bytes)
+        (self.destination / make_site.MANIFEST).write_text(json.dumps(manifest))
+        online["offline"] = {"path": "offline.html", "sha256": offline_info["sha256"], "size": len(inline_bytes)}
+        self.rewrite("index.html", online)
+        with self.assertRaisesRegex(RuntimeError, "offline.*profile|offline.*format"):
+            make_site.verify_site(self.destination, self.legacy.viewer)
+
+    def test_direct_renderer_rejects_every_script_end_delimiter(self):
+        for delimiter in (">", "/", " ", "\t", "\n", "\r", "\f"):
+            for target in (self.runtime, self.legacy.viewer):
+                original = target.read_bytes()
+                try:
+                    target.write_text("/* </ScRiPt" + delimiter + "> */")
+                    for data in ({"format": "static-media-v2", "transport": "inline"},
+                                 *([{}] if target == self.legacy.viewer else [])):
+                        with self.subTest(delimiter=repr(delimiter), target=target.name, format=data.get("format")):
+                            with self.assertRaisesRegex(RuntimeError, "script closing"):
+                                make_snapshot.render_snapshot(data, root=self.legacy.project)
+                finally:
+                    target.write_bytes(original)
+
+    def test_trusted_script_end_delimiter_rejected_json_stays_escaped(self):
+        self.runtime.write_text("const text='</script><script>bad()</script>';\n")
+        with self.assertRaisesRegex(RuntimeError, "script closing"):
+            self.upgrade()
+        self.assertFalse(self.destination.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

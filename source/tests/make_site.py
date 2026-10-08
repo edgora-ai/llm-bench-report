@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build a verified static-media report from an existing trusted offline snapshot.
+"""Build a verified static report from a trusted snapshot or upgrade a verified site.
 
-No API, archives, model output HTML, or video encoder is used. The explicit old
-viewer authenticates the input shell; the current web template renders both the
-small index and a new self-contained offline download.
+Legacy builds use no archives. The explicit --upgrade-site mode reads only
+registered, reviewed original sources and reuses every existing media byte and
+mapping. Neither mode executes originals, calls an API, or encodes video. The
+explicit old viewer authenticates input; the current template renders output.
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ import warnings
 from PIL import Image
 
 from make_snapshot import ROOT, render_snapshot
+from make_originals import (FORMAT_V2, ORIGINAL_PATH, MAX_PACKAGE_BYTES, build_originals,
+                            validate_original_descriptor, validate_original_package, validate_originals)
 
 FORMAT = "static-media-v1"
 MANIFEST = ".report-manifest.json"
@@ -79,7 +82,7 @@ def _directory(path):
         os.close(fd)
 
 
-def read_asset_safe(directory: Path, relative: str) -> bytes:
+def read_asset_safe(directory: Path, relative: str, *, max_bytes=MAX_FILE_BYTES) -> bytes:
     """Read a canonical regular file, rejecting symlinks and special files."""
     _relative(relative)
     path = Path(directory) / relative
@@ -89,8 +92,8 @@ def read_asset_safe(directory: Path, relative: str) -> bytes:
             with os.fdopen(fd, "rb") as handle:
                 before = os.fstat(handle.fileno())
                 _require(stat.S_ISREG(before.st_mode), "asset is not a regular file: " + relative)
-                _require(before.st_size <= MAX_FILE_BYTES, "asset exceeds size limit: " + relative)
-                payload = handle.read(MAX_FILE_BYTES + 1)
+                _require(before.st_size <= max_bytes, "asset exceeds size limit: " + relative)
+                payload = handle.read(max_bytes + 1)
                 after = os.fstat(handle.fileno())
                 _require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                          == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
@@ -242,7 +245,7 @@ class _ReportHTML(HTMLParser):
             self.in_style = False
 
 
-def audit_snapshot(html: str, viewer_script: Path, *, static=False) -> dict:
+def audit_snapshot(html: str, viewer_script: Path, *, static=False, preview_runtime=None) -> dict:
     """Parse JSON, never evaluate input JavaScript; match the viewer byte-for-byte."""
     parsed = _ReportHTML(static)
     parsed.feed(html)
@@ -250,10 +253,21 @@ def audit_snapshot(html: str, viewer_script: Path, *, static=False) -> dict:
     _require(parsed.current is None and len(parsed.scripts) == 2, "expected exactly two scripts")
     match = re.fullmatch(r"window\.BENCH_SNAPSHOT=(\{.*\});", parsed.scripts[0], re.S)
     _require(match is not None and "<" not in parsed.scripts[0], "snapshot JSON must be safely escaped")
-    _require(parsed.scripts[1] == _read(viewer_script).decode("utf-8"), "input viewer mismatch")
     data = _json(match.group(1))
     _require(isinstance(data, dict) and isinstance(data.get("runs"), list)
              and isinstance(data.get("evidence"), dict), "invalid snapshot shape")
+    v2 = data.get("format") == FORMAT_V2
+    if v2:
+        _require(data.get("transport") == ("external" if static else "inline"), "invalid v2 transport/profile")
+        _require(set(data) <= {"runs", "tasks", "evidence", "format", "transport", "originals", "assets", "thumbnails", "offline"}, "unknown v2 report fields")
+    else:
+        _require(data.get("format") == (FORMAT if static else None), "invalid report format/profile")
+        _require(not {"transport", "originals"}.intersection(data), "v2 fields in legacy report")
+    expected_viewer = _read(viewer_script).decode("utf-8")
+    if v2:
+        runtime = Path(preview_runtime) if preview_runtime is not None else Path(viewer_script).with_name("preview-runtime.js")
+        expected_viewer = _read(runtime).decode("utf-8") + "\n" + expected_viewer
+    _require(parsed.scripts[1] == expected_viewer, "input viewer mismatch")
     _require("tasks" not in data or isinstance(data["tasks"], list), "invalid tasks")
     _public_data(data)
     ids, registered = set(), set()
@@ -276,12 +290,14 @@ def audit_snapshot(html: str, viewer_script: Path, *, static=False) -> dict:
         _require(key in registered, "unregistered evidence mapping")
         _require(isinstance(value, str) and bool(MEDIA_PATH.fullmatch(value) if static else DATA_URI.fullmatch(value)), "invalid evidence media")
     if static:
-        _require(data.get("format") == FORMAT and isinstance(data.get("assets"), dict)
+        _require(data.get("format") in {FORMAT, FORMAT_V2} and isinstance(data.get("assets"), dict)
                  and isinstance(data.get("thumbnails"), dict), "invalid static media fields")
         _require(all(ref in data["assets"] for ref in parsed.references), "unlisted markup media")
     else:
-        _require(not {"format", "assets", "thumbnails", "offline"}.intersection(data), "offline input contains static fields")
+        _require(not ({"assets", "thumbnails", "offline"} | (set() if v2 else {"format"})).intersection(data), "offline input contains static fields")
         _require(all(ref in data["evidence"].values() for ref in parsed.references), "unlisted inline media")
+    if v2:
+        validate_originals(data)
     return data
 
 
@@ -385,13 +401,15 @@ def _file_info(payload, mime, role):
 def validate_manifest(manifest: dict) -> dict:
     """Validate the exact manifest schema and canonical content-addressed names."""
     _require(isinstance(manifest, dict) and set(manifest) == {"version", "format", "files", "stats"}, "invalid manifest fields")
-    _require(type(manifest["version"]) is int and manifest["version"] == 1 and manifest["format"] == FORMAT, "unsupported manifest version")
+    _require(type(manifest["version"]) is int and (manifest["version"], manifest["format"]) in ((1, FORMAT), (2, FORMAT_V2)), "unsupported manifest version")
+    v2 = manifest["version"] == 2
     files = manifest["files"]
     _require(isinstance(files, dict) and {"index.html", "offline.html"} <= set(files), "missing entrypoint or offline file")
     for path, info in files.items():
         _relative(path)
         media = MEDIA_PATH.fullmatch(path)
-        _require(media is not None or path in {"index.html", "offline.html"}, "unmanaged manifest file")
+        original = ORIGINAL_PATH.fullmatch(path) if v2 else None
+        _require(media is not None or original is not None or path in {"index.html", "offline.html"}, "unmanaged manifest file")
         _require(isinstance(info, dict) and {"sha256", "mime", "size", "role"} <= set(info)
                  <= {"sha256", "mime", "size", "role", "width", "height"}, "invalid asset metadata")
         _require(isinstance(info["mime"], str) and isinstance(info["role"], str), "invalid MIME/role types")
@@ -406,20 +424,25 @@ def validate_manifest(manifest: dict) -> dict:
             _require(info["role"] in {"evidence", "thumbnail", "evidence+thumbnail"}, "invalid media role")
             _require(not info["mime"].startswith("image/") or "width" in info, "missing raster dimensions")
             _require("thumbnail" not in info["role"] or info["mime"] == "image/jpeg", "thumbnails must be JPEG")
+        elif original:
+            _require(set(info) == {"sha256", "mime", "size", "role"} and info["sha256"] == original.group(1)
+                     and info["mime"] == "application/json" and info["role"] == "original"
+                     and info["size"] <= MAX_PACKAGE_BYTES, "invalid original metadata")
         else:
             _require(info["mime"] == "text/html" and info["role"] == path.removesuffix(".html")
                      and "width" not in info, "invalid HTML metadata")
     stats = manifest["stats"]
-    _require(isinstance(stats, dict) and set(stats) == STATS_KEYS
+    stats_keys = STATS_KEYS | ({"original_packages", "original_bytes", "original_files"} if v2 else set())
+    _require(isinstance(stats, dict) and set(stats) == stats_keys
              and all(type(value) is int and value >= 0 for value in stats.values()), "invalid manifest statistics")
     _require(stats["index_bytes"] == files["index.html"]["size"] <= INDEX_BUDGET
              and stats["offline_bytes"] == files["offline.html"]["size"], "invalid HTML size statistics or entrypoint budget")
     return manifest
 
 
-def _stats(data, files):
+def _stats(data, files, packages=None):
     media = {path: info for path, info in files.items() if MEDIA_PATH.fullmatch(path)}
-    return {"runs": len(data["runs"]), "benchmark_runs": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
+    result = {"runs": len(data["runs"]), "benchmark_runs": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
             "reviews": sum(len(run.get("reviews") or []) for run in data["runs"]),
             "evidence": len(data["evidence"]), "unique_evidence": len(set(data["evidence"].values())),
             "images": sum(media[path]["mime"].startswith("image/") for path in data["evidence"].values()),
@@ -427,13 +450,21 @@ def _stats(data, files):
             "thumbnails": len(data["thumbnails"]), "media_files": len(media),
             "media_bytes": sum(info["size"] for info in media.values()),
             "index_bytes": files["index.html"]["size"], "offline_bytes": files["offline.html"]["size"]}
+    if data.get("format") == FORMAT_V2:
+        originals = {path: info for path, info in files.items() if ORIGINAL_PATH.fullmatch(path)}
+        _require(packages is not None, "original statistics require validated packages")
+        result.update(original_packages=len(originals), original_bytes=sum(info["size"] for info in originals.values()),
+                      original_files=sum(len(package["files"]) for package in packages.values()))
+    return result
 
 
-def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js") -> dict:
+def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js", *, preview_runtime=None) -> dict:
     """Verify a standalone bundle completely; extra files/directories fail closed."""
     manifest = validate_manifest(_json(read_asset_safe(directory, MANIFEST)))
     files, directories = _inventory(directory)
     expected_dirs = {"media"} if any(MEDIA_PATH.fullmatch(path) for path in manifest["files"]) else set()
+    if any(ORIGINAL_PATH.fullmatch(path) for path in manifest["files"]):
+        expected_dirs.add("originals")
     _require(files == set(manifest["files"]) | {MANIFEST} and directories == expected_dirs, "missing or unmanaged bundle files")
     payloads = {}
     for path, info in manifest["files"].items():
@@ -444,14 +475,35 @@ def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js") -> d
             _require(all(actual.get(key) == value for key, value in info.items() if key != "role"
                          and (key not in {"width", "height"} or key in actual)), "media metadata mismatch: " + path)
         payloads[path] = payload
-    data = audit_snapshot(payloads["index.html"].decode("utf-8"), viewer_script, static=True)
-    offline = audit_snapshot(payloads["offline.html"].decode("utf-8"), viewer_script)
+    data = audit_snapshot(payloads["index.html"].decode("utf-8"), viewer_script, static=True, preview_runtime=preview_runtime)
+    offline = audit_snapshot(payloads["offline.html"].decode("utf-8"), viewer_script, preview_runtime=preview_runtime)
+    _require(data.get("format") == manifest["format"], "manifest/report format mismatch")
+    if manifest["format"] == FORMAT:
+        _require(not {"format", "transport", "originals"}.intersection(offline), "offline profile mismatch: v1 requires legacy inline data")
+        _require(not {"transport", "originals"}.intersection(data), "v2 fields in legacy report")
+    packages = None
+    if manifest["format"] == FORMAT_V2:
+        _require(offline.get("format") == FORMAT_V2, "offline format mismatch")
+        packages = validate_originals(data, payloads)
+        validate_originals(offline)
+        original_paths = {descriptor["package"]["path"] for descriptor in data["originals"].values() if descriptor["package"]}
+        _require(original_paths == {path for path in manifest["files"] if ORIGINAL_PATH.fullmatch(path)}, "unreferenced original package")
+        for run_id, descriptor in data["originals"].items():
+            inline = offline["originals"][run_id]
+            _require({key: value for key, value in descriptor.items() if key != "package"} ==
+                     {key: value for key, value in inline.items() if key != "package"}, "original descriptors differ")
+            if descriptor["package"]:
+                expected = descriptor["package"]
+                actual = inline["package"]
+                _require(actual["sha256"] == expected["sha256"] and actual["size"] == expected["size"]
+                         and base64.b64decode(actual["base64"], validate=True) == payloads[expected["path"]], "online/inline original bytes differ")
     assets = {path: info for path, info in manifest["files"].items() if MEDIA_PATH.fullmatch(path)}
     _require(data["assets"] == assets, "index assets differ from manifest")
     offline_info = manifest["files"]["offline.html"]
     _require(data.get("offline") == {"path": "offline.html", "sha256": offline_info["sha256"], "size": offline_info["size"]}, "offline descriptor mismatch")
-    original = {key: value for key, value in data.items() if key not in {"format", "evidence", "thumbnails", "assets", "offline"}}
-    _require(original == {key: value for key, value in offline.items() if key != "evidence"}, "index/offline metadata differ")
+    excluded = {"format", "evidence", "thumbnails", "assets", "offline", "transport", "originals"}
+    original = {key: value for key, value in data.items() if key not in excluded}
+    _require(original == {key: value for key, value in offline.items() if key not in excluded}, "index/offline metadata differ")
     _require(set(data["evidence"]) == set(offline["evidence"]), "index/offline evidence keys differ")
     for key, path in data["evidence"].items():
         _require(path in assets, "missing evidence asset")
@@ -470,7 +522,7 @@ def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js") -> d
     for path, info in assets.items():
         role = "evidence+thumbnail" if path in evidence_paths & thumbnail_paths else "evidence" if path in evidence_paths else "thumbnail"
         _require(info["role"] == role, "media role mismatch")
-    _require(manifest["stats"] == _stats(data, manifest["files"]), "manifest statistics mismatch")
+    _require(manifest["stats"] == _stats(data, manifest["files"], packages), "manifest statistics mismatch")
     return manifest
 
 
@@ -516,6 +568,11 @@ def build_site(snapshot: Path, destination: Path, input_viewer: Path, root: Path
     files = {**assets, "index.html": _file_info(payloads["index.html"], "text/html", "index"), "offline.html": offline_info}
     manifest = validate_manifest({"version": 1, "format": FORMAT, "files": dict(sorted(files.items())), "stats": _stats(data, files)})
     payloads[MANIFEST] = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return _write_site_payloads(destination, payloads, manifest, viewer)
+
+
+def _write_site_payloads(destination, payloads, manifest, viewer):
+    destination = Path(destination)
     _relative(destination.name)
     with _directory(destination.parent) as parent:
         if destination.exists() or destination.is_symlink():
@@ -530,20 +587,21 @@ def build_site(snapshot: Path, destination: Path, input_viewer: Path, root: Path
         staged = True
         try:
             stage_fd = os.open(stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-            media_fd = None
+            children = {}
             try:
-                if assets:
-                    os.mkdir("media", dir_fd=stage_fd)
-                    media_fd = os.open("media", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=stage_fd)
+                for folder in ("media", "originals"):
+                    if any(path.startswith(folder + "/") for path in payloads):
+                        os.mkdir(folder, dir_fd=stage_fd)
+                        children[folder] = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=stage_fd)
                 for path, payload in payloads.items():
-                    target_fd = media_fd if path.startswith("media/") else stage_fd
+                    target_fd = children[path.split("/")[0]] if "/" in path else stage_fd
                     fd = os.open(Path(path).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o644, dir_fd=target_fd)
                     with os.fdopen(fd, "wb") as handle:
                         handle.write(payload)
             finally:
-                if media_fd is not None:
-                    os.close(media_fd)
+                for child_fd in children.values():
+                    os.close(child_fd)
                 os.close(stage_fd)
             verify_site(destination.parent / stage_name, viewer)
             # Directory-relative rename cannot follow a swapped parent symlink or
@@ -556,14 +614,65 @@ def build_site(snapshot: Path, destination: Path, input_viewer: Path, root: Path
     return dict(manifest["stats"])
 
 
+def upgrade_site(source: Path, destination: Path, input_viewer: Path, archive_root: Path,
+                 audit, root: Path = ROOT, *, input_runtime=None) -> dict:
+    """Upgrade a verified bundle without re-encoding or re-thumbnailing media.
+
+    All input bytes are captured and rechecked against the verified manifest
+    before any destination write. The original site is never changed.
+    """
+    source, root = Path(source), Path(root)
+    manifest = verify_site(source, input_viewer, preview_runtime=input_runtime)
+    captured = {path: read_asset_safe(source, path) for path in manifest["files"]}
+    for path, raw in captured.items():
+        info = manifest["files"][path]
+        _require(len(raw) == info["size"] and hashlib.sha256(raw).hexdigest() == info["sha256"], "input changed after verification")
+    old = audit_snapshot(captured["index.html"].decode("utf-8"), input_viewer, static=True, preview_runtime=input_runtime)
+    old_inline = audit_snapshot(captured["offline.html"].decode("utf-8"), input_viewer, preview_runtime=input_runtime)
+    originals, packages = build_originals(old["runs"], archive_root, audit)
+    inline_originals = {}
+    for run_id, descriptor in originals.items():
+        inline = dict(descriptor)
+        if descriptor["package"]:
+            info = descriptor["package"]
+            inline["package"] = {"sha256": info["sha256"], "size": info["size"],
+                                 "base64": base64.b64encode(packages[info["path"]]).decode("ascii")}
+        inline_originals[run_id] = inline
+    inline = {**old_inline, "format": FORMAT_V2, "transport": "inline", "originals": inline_originals}
+    payloads = {path: raw for path, raw in captured.items() if MEDIA_PATH.fullmatch(path)}
+    payloads.update(packages)
+    payloads["offline.html"] = render_snapshot(inline, root=root).encode("utf-8")
+    offline_info = _file_info(payloads["offline.html"], "text/html", "offline")
+    data = {**old, "format": FORMAT_V2, "transport": "external", "originals": originals,
+            "offline": {"path": "offline.html", "sha256": offline_info["sha256"], "size": offline_info["size"]}}
+    payloads["index.html"] = render_snapshot(data, root=root).encode("utf-8")
+    files = {**old["assets"], **{path: _file_info(raw, "application/json", "original") for path, raw in packages.items()},
+             "index.html": _file_info(payloads["index.html"], "text/html", "index"), "offline.html": offline_info}
+    validated = validate_originals(data, payloads)
+    output = validate_manifest({"version": 2, "format": FORMAT_V2, "files": dict(sorted(files.items())),
+                                "stats": _stats(data, files, validated)})
+    payloads[MANIFEST] = (json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return _write_site_payloads(destination, payloads, output, root / "web/app.js")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", type=Path, help="existing self-contained snapshot; never executed")
     parser.add_argument("destination", type=Path, help="empty standalone site directory (parent must exist)")
     parser.add_argument("--input-viewer", type=Path, required=True, help="trusted app.js matching the input snapshot's published version")
+    parser.add_argument("--upgrade-site", action="store_true", help="input is an existing verified site; preserve all media bytes and mappings")
+    parser.add_argument("--archive-root", type=Path, help="read-only runs directory for reviewed originals")
+    parser.add_argument("--audit", type=Path, help="hash-bound full-content assistant review JSON")
+    parser.add_argument("--input-runtime", type=Path, help="trusted runtime when input is already v2")
     args = parser.parse_args(argv)
     try:
-        stats = build_site(args.snapshot, args.destination, args.input_viewer)
+        if args.upgrade_site:
+            _require(args.archive_root is not None and args.audit is not None, "upgrade requires --archive-root and --audit")
+            stats = upgrade_site(args.snapshot, args.destination, args.input_viewer, args.archive_root,
+                                 args.audit, input_runtime=args.input_runtime)
+        else:
+            _require(args.archive_root is None and args.audit is None and args.input_runtime is None, "original options require --upgrade-site")
+            stats = build_site(args.snapshot, args.destination, args.input_viewer)
     except (RuntimeError, OSError, UnicodeError) as error:
         parser.exit(1, str(error) + "\n")
     print(json.dumps({"destination": str(args.destination), **stats}, ensure_ascii=False))

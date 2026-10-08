@@ -45,6 +45,30 @@ class StaticPublicationTests(unittest.TestCase):
         site = publish.stage_static(bundle, self.root / f"stage-{self.counter}", "Fixture report", "Fixture note")
         return site, bundle
 
+    def stage_original(self, label="first"):
+        _, source = self.stage()
+        archives = self.root / f"archives-{self.counter}"
+        run = archives / "2026-09-30/fixture"
+        output = run / "output"
+        output.mkdir(parents=True)
+        raw = ('<!doctype html><html><head><meta charset="utf-8"></head>'
+               '<body><p>Fixture ' + label + '</p></body></html>').encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        (output / "index.html").write_bytes(raw)
+        (run / "manifest.json").write_text(json.dumps({
+            "id": "fixture", "date": "2026-09-30", "artifacts": [
+                {"path": "output/index.html", "kind": "output", "sha256": digest, "size": len(raw)}]}))
+        (run / "checksums.json").write_text(json.dumps({"output/index.html": digest}))
+        audit = self.root / f"review-{self.counter}.json"
+        audit.write_text(json.dumps({"version": 1, "reviewer": "assistant", "files": {
+            "fixture/index.html": {"sha256": digest, "decision": "include", "reviewed_full": True,
+                                   "reason": "full synthetic fixture review"}}}))
+        bundle = self.root / f"original-bundle-{self.counter}"
+        make_site.upgrade_site(source, bundle, publish.ROOT / "web/app.js", archives, audit)
+        site = publish.stage_static(bundle, self.root / f"original-stage-{self.counter}",
+                                    "Fixture originals", "Synthetic data only")
+        return site, bundle
+
     def files(self):
         return {p.relative_to(self.repo).as_posix(): p.read_bytes()
                 for p in self.repo.rglob("*") if p.is_file()}
@@ -231,6 +255,155 @@ class StaticPublicationTests(unittest.TestCase):
         before = self.files()
         with self.assertRaisesRegex(RuntimeError, "ownership ledger has no current report manifest"):
             publish.copy_site(legacy, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_unknown_original_destination_is_not_adopted(self):
+        site, _ = self.stage()
+        (self.repo / "originals").mkdir()
+        data = b'{"fixture":"unmanaged"}'
+        digest = hashlib.sha256(data).hexdigest()
+        (self.repo / "originals" / (digest + ".json")).write_bytes(data)
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Unmanaged originals destination"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_extra_staged_original_is_refused(self):
+        site, _ = self.stage()
+        (site / "originals").mkdir()
+        (site / "originals/unmanaged.json").write_text("{}")
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Unmanaged or missing staged originals"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_duplicate_ledger_keys_are_rejected(self):
+        site, _ = self.stage()
+        publish.copy_site(site, self.repo)
+        ledger_path = self.repo / publish.REPORT_ASSETS
+        ledger = ledger_path.read_text()
+        ledger_path.write_text(ledger.replace('"version": 1', '"version": 1, "version": 1'))
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "duplicate JSON key"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_v2_inline_cannot_use_legacy_publication(self):
+        data = {"format": "static-media-v2", "transport": "inline", "runs": [],
+                "tasks": [], "evidence": {}, "originals": {}}
+        html = '<script>window.BENCH_SNAPSHOT=' + json.dumps(data) + ';</script>'
+        with self.assertRaisesRegex(RuntimeError, "verified site directory"):
+            publish.verify(html)
+
+    def test_v1_to_v2_migration_retains_media_dates_and_is_idempotent(self):
+        first, _ = self.stage()
+        publish.copy_site(first, self.repo)
+        old = json.loads((self.repo / publish.REPORT_ASSETS).read_text())["sha256"]
+        old_bytes = {path: (self.repo / path).read_bytes() for path in old}
+        site, bundle = self.stage_original()
+        managed = publish.copy_site(site, self.repo)
+        ledger = json.loads((self.repo / publish.REPORT_ASSETS).read_text())
+        self.assertEqual(ledger["version"], 2)
+        self.assertTrue(set(old) < set(ledger["sha256"]))
+        original_paths = [path for path in ledger["sha256"] if path.startswith("originals/")]
+        self.assertEqual(len(original_paths), 1)
+        for path, raw in old_bytes.items():
+            self.assertEqual((self.repo / path).read_bytes(), raw)
+        for path in make_site.verify_site(bundle)["files"]:
+            self.assertEqual((self.repo / path).read_bytes(), (bundle / path).read_bytes())
+        self.assertIn(original_paths[0], managed)
+        self.assertEqual((self.repo / "2026-09-30.html").read_bytes(), b"immutable historical report")
+        before = self.files()
+        publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+        self.assertIn("运行原作", (site / "README.md").read_text())
+        with self.assertRaisesRegex(RuntimeError, "verified site directory"):
+            publish.verify((site / "offline.html").read_text())
+
+    def test_v2_update_retains_previous_original_payload(self):
+        first, _ = self.stage_original("first")
+        publish.copy_site(first, self.repo)
+        old = {path: raw for path, raw in self.files().items() if path.startswith("originals/")}
+        second, _ = self.stage_original("second")
+        publish.copy_site(second, self.repo)
+        for path, raw in old.items():
+            self.assertEqual((self.repo / path).read_bytes(), raw)
+        ledger = json.loads((self.repo / publish.REPORT_ASSETS).read_text())
+        self.assertEqual(sum(path.startswith("originals/") for path in ledger["sha256"]), 2)
+
+    def test_changed_or_missing_original_prevents_report_update(self):
+        site, _ = self.stage_original()
+        publish.copy_site(site, self.repo)
+        original = next((self.repo / "originals").iterdir())
+        original.write_bytes(b"changed original data")
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Managed originals was modified"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+        original.unlink()
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Managed originals file is missing"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_identical_unowned_original_is_not_adopted(self):
+        site, _ = self.stage_original()
+        original = next((site / "originals").iterdir())
+        (self.repo / "originals").mkdir()
+        (self.repo / "originals" / original.name).write_bytes(original.read_bytes())
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Unmanaged originals destination"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_v2_downgrade_and_wrong_ledger_version_are_refused(self):
+        site, _ = self.stage_original()
+        publish.copy_site(site, self.repo)
+        legacy, _ = self.stage()
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "format downgrade"):
+            publish.copy_site(legacy, self.repo)
+        self.assertEqual(self.files(), before)
+        ledger_path = self.repo / publish.REPORT_ASSETS
+        ledger = json.loads(ledger_path.read_text())
+        ledger["version"] = 1
+        ledger_path.write_text(json.dumps(ledger))
+        before = self.files()
+        with self.assertRaisesRegex(RuntimeError, "Invalid media ownership ledger"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual(self.files(), before)
+
+    def test_original_directory_symlink_is_refused(self):
+        site, _ = self.stage_original()
+        outside = self.root / "outside-originals"
+        outside.mkdir()
+        (outside / "sentinel").write_text("unchanged")
+        (self.repo / "originals").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "Unsafe originals destination"):
+            publish.copy_site(site, self.repo)
+        self.assertEqual((outside / "sentinel").read_text(), "unchanged")
+        self.assertEqual((self.repo / "index.html").read_bytes(), b"original public report")
+
+    def test_mixed_v1_index_v2_offline_is_refused_before_publication(self):
+        site, _ = self.stage()
+        _, original_bundle = self.stage_original()
+        offline = (original_bundle / "offline.html").read_bytes()
+        (site / "offline.html").write_bytes(offline)
+        (site / "2026-09-30.html").write_bytes(offline)
+        data = make_site.audit_snapshot((site / "index.html").read_text(),
+                                        publish.ROOT / "web/app.js", static=True)
+        data["offline"].update(size=len(offline), sha256=hashlib.sha256(offline).hexdigest())
+        index = make_snapshot.render_snapshot(data).encode("utf-8")
+        (site / "index.html").write_bytes(index)
+        manifest_path = site / publish.REPORT_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        for path, raw in (("index.html", index), ("offline.html", offline)):
+            manifest["files"][path].update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        manifest["stats"].update(index_bytes=len(index), offline_bytes=len(offline))
+        manifest_path.write_text(json.dumps(manifest))
+        before = self.files()
+        with self.assertRaises(RuntimeError):
+            publish.copy_site(site, self.repo)
         self.assertEqual(self.files(), before)
 
     def test_git_stages_exact_media_files_not_a_directory(self):

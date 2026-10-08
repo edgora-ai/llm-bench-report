@@ -16,7 +16,12 @@
     { id: 'video', name: '桌面录像', file: 'animation.webm' }
   ];
   const narrowScreen = matchMedia('(max-width: 600px)');
+  const previewPanels = new Set();
+  let compareRequest = 0;
+  let compareMode = 'media';
+  let comparePair = [];
   const state = { runs: [], tasks: [], options: {}, view: 'gallery', filters: {}, selected: new Set(), selectionRuns: new Map(), compareLimit: 2, mixed: false, compareRuns: [], compareStage: 'desktop', compareIndex: 0, galleryStage: 'desktop', defaultTaskPending: false, authenticated: false, loaded: false, request: 0, detailRequest: 0, controller: null, trendMetric: 'duration_ms', trendPage: 0, blindQueue: [], blindIndex: 0, blindSignature: '', texture: false, loading: false };
+  const staticMedia = snapshot && (source.format === 'static-media-v1' || (source.format === 'static-media-v2' && source.transport === 'external'));
   const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const valueOf = (run, key) => key === 'duration_ms' ? run.duration_ms : key === 'evaluation_duration_ms' ? run.evaluation?.duration_ms : run.metrics?.[key];
   const text = value => value == null || value === '' ? 'unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -91,6 +96,7 @@
     $$('[data-export]').forEach(button => { button.disabled = snapshot || !state.authenticated || !state.loaded; });
   }
   function clearSession() {
+    cancelPreviewContext();
     ++state.request; if (state.controller) state.controller.abort(); setLoading(false);
     state.authenticated = false; state.loaded = false; state.runs = []; state.options = {}; state.tasks = []; state.selected.clear(); state.selectionRuns.clear(); state.compareRuns = []; state.blindQueue = []; state.blindSignature = '';
     ['detail-dialog', 'compare-dialog', 'zoom-dialog'].forEach(id => { releaseMedia($(`#${id}`)); $(`#${id}`).close(); });
@@ -122,6 +128,7 @@
     return { tools: unique('tool'), models: unique('model'), tasks: state.tasks.length ? state.tasks : [...new Map(runs.map(run => [run.task_id, { id: run.task_id, name: run.task_name || run.task_id }])).values()], prompt_versions: unique('prompt_version'), purposes: unique('purpose'), statuses: unique('status'), dates: unique('date') };
   }
   async function loadData(withOptions = false) {
+    cancelPreviewContext();
     const request = ++state.request;
     if (state.controller) state.controller.abort();
     state.controller = new AbortController();
@@ -491,15 +498,15 @@
     const video = /\.(webm|mp4)$/i.test(path);
     if (!snapshot) return fileURL(run, path);
     const key = `${run.id}/${path}`;
-    const mapping = source.format === 'static-media-v1' && thumbnail && !video ? source.thumbnails : source.evidence;
+    const mapping = staticMedia && thumbnail && !video ? source.thumbnails : source.evidence;
     if (!Object.prototype.hasOwnProperty.call(mapping || {}, key)) return null;
     const uri = mapping[key];
-    if (source.format === 'static-media-v1') {
+    if (staticMedia) {
       const asset = staticAsset(uri, video);
       if (!asset || (thumbnail && finite(asset.width) && asset.width > 480)) return null;
       return uri;
     }
-    if (source.format != null) return null;
+    if (source.format != null && !(source.format === 'static-media-v2' && source.transport === 'inline')) return null;
     // Legacy offline data URIs only. An arbitrary relative URL never becomes an evidence URL.
     return typeof uri === 'string' && (video ? /^data:video\/(?:webm|mp4);base64,[A-Za-z0-9+/]+={0,2}$/i : /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i).test(uri) ? uri : null;
   }
@@ -510,8 +517,87 @@
     }
   }, { rootMargin: '80px 0px', threshold: 0.01 }) : null;
   function releaseMedia(root) {
+    for (const panel of [...previewPanels]) if (root.contains(panel.node)) panel.destroy();
     $$('img', root).forEach(image => thumbnailObserver?.unobserve(image));
     $$('video', root).forEach(video => { video.pause(); video.removeAttribute('src'); $$('source', video).forEach(item => item.remove()); video.load(); });
+  }
+  const originalStatusNames = { ready: '已封装 · 尚未运行', missing_dependencies: '缺少依赖 · 可查看残缺交付', no_entrypoint: '未交付入口', not_reviewed: '尚未完成公开审核', withheld: '原作未公开', unsupported: '装载方式不支持' };
+  function originalDescriptor(run) { return source?.format === 'static-media-v2' ? source.originals?.[run.id] : null; }
+  function originalAvailable(run) { const descriptor = originalDescriptor(run); return !!window.BenchPreview && !!descriptor?.package && ['ready', 'missing_dependencies'].includes(descriptor.status); }
+  function originalGuidance(run) {
+    if (!snapshot) return '本地认证看板不执行原作。请导出 / 构建包含原作的 v2 报告后查看；附件下载保持可用。';
+    if (source.format !== 'static-media-v2') return '此旧版报告不含实时原作运行器。请使用包含原作的 v2 导出报告；现有截图和录像仍可查看。';
+    const descriptor = originalDescriptor(run);
+    if (!descriptor) return '此运行未提供原作描述符；请检查 v2 导出报告。';
+    if (!window.BenchPreview) return '此报告未包含原作运行器；请重新构建完整的 v2 报告。';
+    if (['ready', 'missing_dependencies'].includes(descriptor.status) && !descriptor.package) return '原作封装缺失：此描述符未包含可运行包，请重新构建 v2 报告。';
+    return `${originalStatusNames[descriptor.status] || '原作描述符状态未知'}${descriptor.missing?.length ? ` · 缺失：${descriptor.missing.map(text).join('、')}` : ''}`;
+  }
+  function originalButton(run) {
+    return el('button', { type: 'button', class: 'run-original primary', 'data-run-original': run.id, text: originalAvailable(run) ? '运行原作' : '原作说明', title: originalGuidance(run), onclick: () => openOriginal(run) });
+  }
+  function stopPreviews(except = null) { for (const panel of previewPanels) if (panel !== except) panel.stop(); }
+  function cancelPreviewContext() {
+    stopPreviews(); ++state.detailRequest; ++compareRequest;
+    for (const id of ['original-dialog', 'detail-dialog', 'compare-dialog', 'zoom-dialog']) { const dialog = $(`#${id}`); if (dialog.open) { releaseMedia(dialog); dialog.close(); } }
+  }
+  function previewPanel(run, { comparison = false, canRunTogether = () => false } = {}) {
+    const descriptor = originalDescriptor(run);
+    const status = el('p', { class: 'preview-state', role: 'status', text: originalGuidance(run) });
+    const dimensions = el('p', { class: 'preview-dimensions', text: '视口尚未创建 · 不请求原作包' });
+    const diagnostics = el('ul', { class: 'preview-diagnostics', 'aria-label': '原作诊断（非验收）' });
+    const host = el('div', { class: 'preview-host', 'data-preview-host': run.id });
+    let runtime = null, generation = 0, destroyed = false, viewport = 'fit';
+    const start = el('button', { type: 'button', 'data-preview-start': run.id, class: 'primary', text: '启动原作', disabled: !originalAvailable(run), onclick: () => panel.start() });
+    const stop = el('button', { type: 'button', 'data-preview-stop': run.id, text: '停止', disabled: true, onclick: () => panel.stop() });
+    const restart = el('button', { type: 'button', 'data-preview-restart': run.id, text: '重新启动', disabled: true, onclick: () => panel.start() });
+    const selector = el('select', { 'aria-label': `原作视口 ${run.id}`, 'data-preview-viewport': run.id, onchange: event => { viewport = event.target.value === 'fit' ? 'fit' : event.target.value === 'desktop' ? { width: 1440, height: 900 } : { width: 400, height: 800 }; runtime?.setViewport(viewport); } }, [el('option', { value: 'fit', text: '适应窗口' }), el('option', { value: 'desktop', text: '1440 × 900' }), el('option', { value: 'mobile', text: '400 × 800' })]);
+    const node = el('section', { class: 'original-preview', 'data-original-run': run.id, 'data-preview-state': 'idle' }, [
+      el('div', { class: 'preview-controls' }, [start, stop, restart, el('label', {}, ['渲染视口', selector]), ...(comparison ? [el('button', { type: 'button', 'data-original-fullwidth': run.id, text: '单作全宽', onclick: () => openOriginal(run) })] : [])]),
+      status, el('p', { class: 'preview-guidance footnote', text: originalGuidance(run) }), dimensions, host,
+      el('p', { class: 'preview-provenance mono', text: `run ${run.id} · 入口 ${descriptor?.entrypoint || 'unknown'} · SHA256 ${descriptor?.entry_sha256 || 'unknown'}` }),
+      el('p', { class: 'footnote', text: `生成会话：${text(generationStatus(run))} · 入口检查：${entrypointStatus(run)} · 评估：${text(run.evaluation?.status)}。实时装载不改变历史结论。` }),
+      el('p', { class: 'footnote', text: '隔离与资源装载适配；交互由原作执行，无通用暂停或动画同步。当前浏览器 / GPU / DPR / 动效偏好可能不同于历史评估。浏览器沙箱不等同于 CPU / 内存硬配额或绝对零外联。' }), diagnostics
+    ]);
+    const panel = { node,
+      async start(allowPair = false) {
+        if (destroyed || !node.isConnected || node.closest('[hidden]') || !node.closest('dialog[open]') || !originalAvailable(run) || document.hidden) return;
+        if (!(allowPair || canRunTogether()) || narrowScreen.matches) stopPreviews(panel);
+        runtime?.destroy(); runtime = null; const token = ++generation; diagnostics.replaceChildren();
+        start.disabled = true; stop.disabled = false; restart.disabled = false;
+        const current = () => !destroyed && token === generation && node.isConnected;
+        try {
+          runtime = window.BenchPreview.create(host, { runId: run.id, descriptor, transport: source.transport, viewport,
+            onState: value => {
+              if (!current()) return;
+              node.dataset.previewState = value.status; status.textContent = value.message || value.status;
+              if (value.status === 'loaded') status.textContent += ' · 已装载不代表验收通过';
+              if (Number.isFinite(value.width) && Number.isFinite(value.height) && Number.isFinite(value.scale)) dimensions.textContent = `实际渲染视口 ${value.width} × ${value.height} CSS px · 显示缩放 ${Math.round(value.scale * 100)}%`;
+              if (['error', 'stopped', 'unavailable'].includes(value.status)) { start.disabled = false; stop.disabled = true; }
+            },
+            onDiagnostic: value => { if (current() && diagnostics.children.length < 20) diagnostics.append(el('li', { text: `原作诊断（非验收）：${`${value?.kind || 'error'} · ${text(value?.message ?? value)}`.slice(0, 800)}` })); }
+          });
+          await runtime.start();
+        } catch (error) {
+          if (current()) { runtime?.destroy(); runtime = null; node.dataset.previewState = 'error'; status.textContent = `预览启动错误：${error.message}`; start.disabled = false; stop.disabled = true; }
+        }
+      },
+      stop() {
+        ++generation; runtime?.destroy(); runtime = null; host.replaceChildren();
+        if (node.dataset.previewState !== 'idle') { node.dataset.previewState = 'stopped'; status.textContent = '已停止 · 沙箱和待处理启动已销毁；不会自动恢复'; }
+        start.disabled = !originalAvailable(run); stop.disabled = true; restart.disabled = !originalAvailable(run);
+      },
+      destroy() { panel.stop(); destroyed = true; previewPanels.delete(panel); }
+    };
+    if (!originalAvailable(run)) { $('.preview-controls', node).hidden = true; dimensions.hidden = true; host.hidden = true; }
+    previewPanels.add(panel); return panel;
+  }
+  function openOriginal(run) {
+    cancelPreviewContext();
+    const dialog = $('#original-dialog'), content = $('#original-content'); releaseMedia(content);
+    $('#original-title').textContent = `${text(run.model)} · 原作实时预览`;
+    const panel = previewPanel(run); content.replaceChildren(panel.node); dialog.showModal(); dialog.scrollTop = 0;
+    if (originalAvailable(run)) panel.start();
   }
   function stagePath(run, stage) { const file = stages.find(item => item.id === stage)?.file; return file ? evidencePaths(run).find(path => path.split('/').at(-1) === file) : null; }
   function stageSelector(value, onChange, attrs = {}) {
@@ -526,7 +612,7 @@
     const uri = path ? mediaURI(run, path, thumbnail) : null;
     if (!uri) {
       figure.dataset.mediaState = 'missing';
-      frame.append(el('div', { class: 'stage-missing' }, [el('span', { class: 'missing-mark', text: '—', 'aria-hidden': 'true' }), el('p', { text: path ? thumbnail && snapshot && source.format === 'static-media-v1' ? '未提供安全缩略图' : '未包含可安全预览的证据' : '此阶段暂无证据' })]));
+      frame.append(el('div', { class: 'stage-missing' }, [el('span', { class: 'missing-mark', text: '—', 'aria-hidden': 'true' }), el('p', { text: path ? thumbnail && snapshot && staticMedia ? '未提供安全缩略图' : '未包含可安全预览的证据' : '此阶段暂无证据' })]));
       if (path) status.textContent = thumbnail && mediaURI(run, path) ? '可通过“放大”主动读取全尺寸图；不自动回退。' : '未包含 / 映射无效；登记不代表可读取。';
       return figure;
     }
@@ -553,6 +639,7 @@
     return figure;
   }
   function openZoom(run, path, anonymous = false) {
+    stopPreviews();
     if (!path || /\.(webm|mp4)$/i.test(path) || !mediaURI(run, path)) { notify('当前阶段没有可放大的安全图像。'); return; }
     const dialog = $('#zoom-dialog'), content = $('#zoom-content'); releaseMedia(content);
     $('#zoom-title').textContent = anonymous ? '匿名图像 · 放大' : `${text(run.model)} · ${path.split('/').at(-1)}`;
@@ -572,7 +659,7 @@
   function galleryCard(run) {
     const path = stagePath(run, state.galleryStage);
     return el('article', { class: `evidence-card${evidencePaths(run).length ? '' : ' no-registered-media'}`, 'data-run-id': run.id }, [
-      el('div', { class: 'card-heading' }, [el('h3', { text: text(run.model) }), el('span', { class: 'chip', text: `${text(run.tool)} · ${text(run.prompt_version)}` })]),
+      el('div', { class: 'card-heading' }, [el('div', { class: 'card-title' }, [el('h3', { text: text(run.model) }), el('span', { class: 'chip', text: `${text(run.tool)} · ${text(run.prompt_version)}` })]), originalButton(run)]),
       media(run, path),
       el('div', { class: 'caption' }, [el('p', { class: 'run-identity', text: `${dateOf(run) || 'unknown'} · ${text(run.task_name || run.task_id)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` }),
         el('div', { class: 'run-facts' }, [el('span', {}, ['会话 ', statusChip(generationStatus(run))]), el('span', { text: `入口 ${entrypointStatus(run)}` }), el('span', { text: `评估 ${text(run.evaluation?.status)}` }), el('span', { text: checksText(run) })]),
@@ -589,7 +676,7 @@
       const entries = withoutMedia.map(entrypointStatus);
       const history = el('details', { id: 'no-media-history', class: 'no-media-history', open: withoutMedia.length === state.runs.length ? '' : null }, [
         el('summary', {}, [el('strong', { text: `${withoutMedia.length} / ${state.runs.length} 次无媒体登记 · 展开每次尝试` }), el('span', { class: 'history-states' }, [el('span', { 'data-history-status': 'session', text: `会话 ${counts(generationStatus)}` }), el('span', { 'data-history-status': 'entrypoint', text: `入口 pass ${entries.filter(value => value === 'pass').length} / fail ${entries.filter(value => value === 'fail').length} / unknown ${entries.filter(value => value === 'unknown').length}` }), el('span', { 'data-history-status': 'evaluation', text: `评估 ${counts(run => run.evaluation?.status)}` })])]),
-        el('p', { class: 'footnote', text: '这里只收折未登记可预览栅格 / 录像的尝试，不按会话成败筛选。无媒体不等于入口失败，HTML / SVG 不执行。每次运行仍可选中、查详情及全部附件。' }),
+        el('p', { class: 'footnote', text: '这里只收折未登记可预览栅格 / 录像的尝试，不按会话成败筛选。无媒体不等于入口失败；实时原作另由标题入口主动启动。每次运行仍可选中、查详情及全部附件。' }),
         el('div', { class: 'gallery no-media-list' }, [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).flatMap(([, runs]) => stableRuns(runs).filter(run => !evidencePaths(run).length).map(galleryCard)))
       ]);
       root.append(history);
@@ -611,13 +698,14 @@
   function metadata(pairs) { return el('dl', { class: 'metadata' }, pairs.flatMap(([name, value]) => [el('dt', { text: name }), el('dd', { text: text(value) })])); }
   function detailBlock(title, children, full = false) { return el('section', { class: `detail-block${full ? ' full-width' : ''}` }, [el('h3', { text: title }), ...children]); }
   async function openDetail(id, stage = 'desktop') {
+    stopPreviews();
     const request = ++state.detailRequest;
     const dialog = $('#detail-dialog'), content = $('#detail-content'); releaseMedia(content);
     content.replaceChildren(el('p', { class: 'muted', text: '正在读取运行详情…' })); if (!dialog.open) dialog.showModal();
     try {
       const run = await getRun(id); if (!dialog.open || request !== state.detailRequest) return;
       $('#detail-title').textContent = text(run.id);
-      const blocks = [detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), selectButton(run)], true)];
+      const blocks = [detailBlock('原作实时预览', [originalButton(run), el('p', { class: 'footnote', text: originalGuidance(run) })], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), selectButton(run)], true)];
       blocks.push(detailBlock('实验条件 / Prompt', [metadata([
         ['运行状态', statusNames[run.status] || run.status], ['生成结论', run.generation_status || run.status], ['已记录 attempt（缺失为 unknown）', run.attempt], ['重试来源', run.retry_of], ['归档完整性', run.archive_status], ['评估结束', run.evaluation_finished_at], ['批次', run.batch_id], ['日期', dateOf(run)], ['工具 / 模型', `${text(run.tool)} / ${text(run.model)}`], ['任务', `${text(run.task_name)} (${text(run.task_id)})`], ['Purpose', run.purpose], ['Prompt 版本', run.prompt_version], ['条件指纹', run.condition_fingerprint], ['推理强度', effortText(run)], ['Prompt hash', run.prompt_hash || run.prompt?.sha256 || run.prompt?.hash], ['归档路径', run.archive_dir], ['开始 / 结束', `${text(run.started_at)} / ${text(run.finished_at)}`], ['错误', run.error]
       ]), el('details', {}, [el('summary', { text: 'Prompt 原文 / 元信息（如 manifest 提供）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: text(run.prompt || run.prompt_text) }))]) ]));
@@ -664,16 +752,19 @@
     document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
   async function openComparison() {
+    stopPreviews();
+    const request = ++compareRequest;
     if (state.selected.size < 2 || state.selected.size > selectionLimit() || comparisonIssue(selectedRuns())) { updateSelection(); return; }
     const dialog = $('#compare-dialog'), content = $('#compare-content'); releaseMedia(content); content.replaceChildren(el('p', { class: 'muted', text: '正在读取所选运行…' }));
     if (!dialog.open) dialog.showModal();
+    compareMode = 'media'; comparePair = []; $('#compare-mode').value = compareMode;
     state.compareStage = 'desktop'; state.compareIndex = 0; $('#compare-stage').value = state.compareStage;
     const ids = [...state.selected];
     try {
       const runs = await Promise.all(ids.map(getRun));
-      if (!dialog.open || ids.join('|') !== [...state.selected].join('|')) return;
+      if (!dialog.open || request !== compareRequest || ids.join('|') !== [...state.selected].join('|')) return;
       state.compareRuns = runs; runs.forEach(run => state.selectionRuns.set(run.id, run)); renderComparison();
-    } catch (error) { if (dialog.open) content.replaceChildren(el('p', { class: 'error', text: error.message })); }
+    } catch (error) { if (dialog.open && request === compareRequest) content.replaceChildren(el('p', { class: 'error', text: error.message })); }
   }
   function compareFacts(run) {
     return metadata([
@@ -684,7 +775,10 @@
   }
   function showCompareSide(index) {
     state.compareIndex = index;
-    $$('#compare-content .compare-column').forEach((column, i) => { column.hidden = narrowScreen.matches && i !== index; });
+    $$('#compare-content .compare-column').forEach((column, i) => {
+      column.hidden = narrowScreen.matches && i !== index;
+      if (column.hidden) { for (const panel of previewPanels) if (column.contains(panel.node)) panel.stop(); $$('video', column).forEach(video => video.pause()); }
+    });
     $$('#compare-ab [data-compare-index]').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.compareIndex) === index)));
   }
   function renderComparison() {
@@ -692,13 +786,20 @@
     const runs = state.compareRuns.filter(run => state.selected.has(run.id)), rows = conditionDifferences(runs), differences = rows.filter(row => row.status !== '一致');
     $('#compare-video-status').textContent = '';
     $('#compare-ab').replaceChildren();
-    $('#compare-video-controls').hidden = state.compareStage !== 'video';
-    const issue = comparisonIssue(runs), tooMany = runs.length > selectionLimit();
+    const live = compareMode === 'original';
+    $('#compare-stage-label').hidden = live;
+    $('#compare-stage-note').hidden = live;
+    $('#compare-live-note').hidden = !live;
+    $('#compare-video-controls').hidden = live || state.compareStage !== 'video';
+    $('#start-original-pair').hidden = true;
+    $('#compare-pair-picker').replaceChildren();
+    const issue = comparisonIssue(runs), tooMany = !live && runs.length > selectionLimit();
     $('#compare-condition-warning').textContent = [state.mixed ? '跨条件查看 · 仅观察证据，不生成合并排名。' : '同题 / 同 Prompt 比较；模型身份不同不等于条件相同。', differences.length ? `不同或 unknown：${differences.map(row => `${row.name}（${row.status}）`).join('、')}。` : '已列条件一致；这不代表像素级对齐或质量结论。'].join(' ');
     $('#compare-conditions').replaceChildren(el('summary', { text: `查看逐项条件 · ${differences.length} 项不同 / unknown（不使用含模型身份的趋势指纹判定）` }), table(['条件', '判定', ...runs.map((run, i) => `${String.fromCharCode(65 + i)} · ${text(run.model)}`)], rows.map(row => [row.name, row.status, ...row.values.map(text)]), 'condition-table'));
     if (tooMany || issue || runs.length < 2) {
       content.append(el('div', { class: 'comparison-recovery' }, [el('h3', { text: tooMany ? `选择已全部保留；当前最多 ${selectionLimit()} 次` : '请调整比较对象或条件' }), el('p', { text: issue || '请明确选择保留哪两次；不会自动移除或替换运行。' }), ...runs.map(run => el('div', {}, [el('p', { class: 'mono', text: `${text(run.model)} · ${run.id}` }), el('button', { text: '移除此运行', onclick: () => { toggleSelection(run); renderComparison(); } })]))])); return;
     }
+    if (live) { renderOriginalComparison(runs, content); return; }
     content.style.setProperty('--columns', runs.length);
     $('#compare-ab').replaceChildren(...runs.map((run, i) => el('button', { 'data-compare-index': i, 'aria-pressed': String(state.compareIndex === i), text: `${String.fromCharCode(65 + i)} · ${text(run.model)}`, onclick: () => showCompareSide(i) })));
     content.replaceChildren(...runs.map((run, i) => {
@@ -712,9 +813,32 @@
     }));
     state.compareIndex = Math.min(state.compareIndex, runs.length - 1); showCompareSide(state.compareIndex);
   }
+  function renderOriginalComparison(runs, content) {
+    comparePair = comparePair.filter(id => runs.some(run => run.id === id));
+    if (runs.length === 2) comparePair = runs.map(run => run.id);
+    const picker = $('#compare-pair-picker');
+    if (runs.length > 2) {
+      picker.append(el('p', { class: 'footnote', text: `媒体比较的 ${runs.length} 次选择全部保留。实时模式最多两份，请明确勾选两份原作；不会自动取前两份。` }), ...runs.map(run => el('label', { class: 'checkbox-label' }, [el('input', { type: 'checkbox', 'data-original-pair': run.id, checked: comparePair.includes(run.id), onchange: event => {
+        if (event.target.checked && comparePair.length >= 2) { event.target.checked = false; notify('实时原作最多两份；请先取消一份原作选择。', true); return; }
+        comparePair = event.target.checked ? [...comparePair, run.id] : comparePair.filter(id => id !== run.id); renderComparison();
+      } }), `${text(run.model)} · ${run.id}`])));
+    }
+    if (comparePair.length !== 2) { content.append(el('p', { class: 'comparison-recovery', text: '先在上方明确选择两份原作。未请求原作包，未创建运行实例。' })); return; }
+    const pair = comparePair.map(id => runs.find(run => run.id === id));
+    state.compareIndex = Math.min(state.compareIndex, 1); content.style.setProperty('--columns', 2);
+    const pairPanels = []; let pairStarted = false;
+    content.replaceChildren(...pair.map((run, i) => {
+      const panel = previewPanel(run, { comparison: true, canRunTogether: () => pairStarted }); pairPanels.push(panel);
+      return el('article', { class: 'compare-column', 'data-run-id': run.id }, [el('div', { class: 'compare-identity' }, [el('p', { class: 'eyebrow', text: `${String.fromCharCode(65 + i)} / ${text(run.tool)}` }), el('h3', { text: text(run.model) }), el('p', { class: 'mono run-id', text: run.id })]), panel.node, el('div', { class: 'compare-facts' }, compareFacts(run))]);
+    }));
+    $('#compare-ab').replaceChildren(...pair.map((run, i) => el('button', { 'data-compare-index': i, 'aria-pressed': String(state.compareIndex === i), text: `${String.fromCharCode(65 + i)} · ${text(run.model)}`, onclick: () => showCompareSide(i) })));
+    const startPair = $('#start-original-pair'); startPair.hidden = narrowScreen.matches; startPair.disabled = !pair.every(originalAvailable);
+    startPair.onclick = () => { if (narrowScreen.matches || compareMode !== 'original' || !$('#compare-dialog').open || comparisonIssue(pair)) return; stopPreviews(); pairStarted = true; pairPanels.forEach(panel => panel.start(true)); };
+    showCompareSide(state.compareIndex);
+  }
   async function controlComparisonVideos(action) {
-    if (state.compareStage !== 'video') return;
-    const figures = $$('#compare-content .media-evidence'), playable = figures.filter(figure => typeof figure.playEvidence === 'function');
+    if (compareMode !== 'media' || state.compareStage !== 'video') return;
+    const figures = $$('#compare-content .compare-column:not([hidden]) .media-evidence'), playable = figures.filter(figure => typeof figure.playEvidence === 'function');
     if (action === 'pause') { playable.forEach(figure => figure.pauseEvidence()); $('#compare-video-status').textContent = `已暂停 ${playable.length} 列；缺失 / 不可读取 ${figures.length - playable.length} 列。`; return; }
     const results = await Promise.allSettled(playable.map(figure => figure.playEvidence(action === 'restart')));
     const failures = results.filter(result => result.status === 'rejected').length;
@@ -768,6 +892,7 @@
     root.append(el('div', { class: 'blind-layout' }, [evidence, form]));
   }
   function setView(view) {
+    cancelPreviewContext();
     state.view = ['batch', 'trend', 'gallery', 'matrix', 'blind', 'evidence'].includes(view) ? view : 'gallery';
     $$('[data-view]').forEach(button => { const active = button.dataset.view === state.view; button.classList.toggle('active', active); if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
     // Entering anonymous review must not leave an identifying dialog open.
@@ -782,6 +907,7 @@
   }
   let filterTimer;
   function handleFilter(event) {
+    cancelPreviewContext();
     for (const key of filterKeys) state.filters[key] = $(`[name="${key}"]`, $('#filters')).value;
     clearTimeout(filterTimer);
     if (state.filters.date_from && state.filters.date_to && state.filters.date_from > state.filters.date_to) { notify('开始日期不能晚于结束日期。', true); return; }
@@ -797,6 +923,7 @@
   $('#refresh-button').addEventListener('click', () => loadData(true));
   $('#auth-button').addEventListener('click', async () => {
     if (!state.authenticated) { openAuth(); return; }
+    cancelPreviewContext();
     try {
       await api('/api/logout', { method: 'POST', body: '{}' });
       clearSession(); notify('已退出登录，实验数据已从当前视图清除。');
@@ -810,7 +937,14 @@
     try { await api('/api/login', { method: 'POST', body: JSON.stringify({ token }) }); state.authenticated = true; $('#auth-dialog').close(); updateAuth(); await loadData(true); } catch (error) { $('#login-error').textContent = error.message; } finally { button.disabled = false; }
   });
   $$('[data-close]').forEach(button => button.addEventListener('click', () => { const dialog = $(`#${button.dataset.close}`); releaseMedia(dialog); dialog.close(); }));
-  ['detail-dialog', 'compare-dialog', 'zoom-dialog'].forEach(id => $(`#${id}`).addEventListener('close', () => { releaseMedia($(`#${id}`)); if (id === 'detail-dialog') ++state.detailRequest; }));
+  ['detail-dialog', 'compare-dialog', 'zoom-dialog', 'original-dialog'].forEach(id => {
+    const dialog = $(`#${id}`);
+    dialog.addEventListener('cancel', () => releaseMedia(dialog));
+    dialog.addEventListener('close', () => { if (dialog.open) return; releaseMedia(dialog); if (id === 'detail-dialog') ++state.detailRequest; if (id === 'compare-dialog') ++compareRequest; });
+  });
+  $('#compare-mode').addEventListener('change', event => { stopPreviews(); compareMode = event.target.value; renderComparison(); });
+  window.addEventListener('pagehide', () => { stopPreviews(); ++compareRequest; ++state.detailRequest; });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { stopPreviews(); ++compareRequest; ++state.detailRequest; } });
   $('#clear-selection').addEventListener('click', () => { state.selected.clear(); state.selectionRuns.clear(); updateSelection(); });
   $('#compare-button').addEventListener('click', openComparison);
   $('#compare-limit').addEventListener('change', event => { state.compareLimit = Number(event.target.value); updateSelection(); });
@@ -831,7 +965,7 @@
   state.defaultTaskPending = !filterKeys.some(key => params.has(key)) && ['', '#gallery'].includes(location.hash);
   for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : '');
   const offline = source?.offline;
-  if (snapshot && source.format === 'static-media-v1' && offline?.path === 'offline.html' && /^[a-f0-9]{64}$/.test(offline.sha256) && Number.isSafeInteger(offline.size) && offline.size > 0) { $('#offline-download').href = 'offline.html'; $('#offline-download').hidden = false; $('#offline-download').title = `离线完整版 · ${number(offline.size)} bytes · SHA256 ${offline.sha256}`; }
+  if (snapshot && staticMedia && offline?.path === 'offline.html' && /^[a-f0-9]{64}$/.test(offline.sha256) && Number.isSafeInteger(offline.size) && offline.size > 0) { $('#offline-download').href = 'offline.html'; $('#offline-download').hidden = false; $('#offline-download').title = `离线完整版 · ${number(offline.size)} bytes · SHA256 ${offline.sha256}`; }
   try { const theme = localStorage.getItem('bench-theme'); if (['light', 'dark'].includes(theme)) document.documentElement.dataset.theme = theme; } catch (error) { console.warn('主题偏好不可读取；使用系统主题。', error.name); }
   $('#mode-label').textContent = snapshot ? '脱敏快照 · 只读' : '真实运行 · 可追溯';
   updateAuth(); setView(location.hash.slice(1)); loadData(true);

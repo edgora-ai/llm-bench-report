@@ -277,9 +277,18 @@ def render_snapshot(data, root=ROOT):
     html = html.replace('<link rel="stylesheet" href="/styles.css">',
                         '<style>' + (root / "web/styles.css").read_text(encoding="utf-8") + '</style>')
     html = re.sub(r'^[ \t]*<script src="/app\.js" defer></script>[ \t]*$', "", html, flags=re.M)
+    viewer = (root / "web/app.js").read_bytes().decode("utf-8")
+    if data.get("format") == "static-media-v2":
+        if data.get("transport") not in {"external", "inline"}:
+            raise RuntimeError("invalid v2 transport")
+        viewer = (root / "web/preview-runtime.js").read_bytes().decode("utf-8") + "\n" + viewer
+    elif "format" in data and data["format"] != "static-media-v1":
+        raise RuntimeError("unknown snapshot format")
+    # Reject an unsafe trusted composition rather than changing executable bytes.
+    if re.search(r"</script[\t\n\f\r />]", viewer, re.I):
+        raise RuntimeError("trusted viewer contains an HTML script closing delimiter")
     html = html.replace("</body>", '<script>window.BENCH_SNAPSHOT=' + blob.replace("<", "\\u003c")
-                        + ';</script><script>' + (root / "web/app.js").read_text(encoding="utf-8")
-                        + '</script></body>')
+                        + ';</script><script>' + viewer + '</script></body>')
     for pattern in (r'<link[^>]+href="/styles\.css"', r'<script[^>]+src="/app\.js"'):
         if re.search(pattern, html):
             raise RuntimeError(f"snapshot still references external asset: {pattern}")
