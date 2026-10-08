@@ -3,6 +3,7 @@
 import argparse
 import base64
 import copy
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -104,6 +105,50 @@ window.inlineText=b;
     return passed
 
 
+def encoded_transport_checks(page, resources, descriptor, decoded):
+    path = '/' + descriptor['package']['path']
+    compressed = gzip.compress(decoded)
+    assert len(compressed) != len(decoded), 'fixture must distinguish wire and decoded sizes'
+    results = []
+    cases = [
+        ('gzip', {'body': compressed, 'encoding': 'gzip'}, None),
+        ('gzip_without_length', {'body': compressed, 'encoding': 'gzip', 'omit_length': True}, None),
+        ('identity', {'body': decoded, 'encoding': 'identity'}, None),
+        ('gzip_decoded_oversize', {'body': gzip.compress(decoded + b' '), 'encoding': 'gzip'}, 'Package response too large'),
+        ('gzip_decoded_truncated', {'body': gzip.compress(decoded[:-1]), 'encoding': 'gzip'}, 'Package response truncated'),
+        ('gzip_decoded_hash_mismatch', {'body': gzip.compress(decoded[:-1] + b' '), 'encoding': 'gzip'}, 'Package digest mismatch'),
+        ('identity_header_mismatch', {'body': decoded, 'length': len(decoded) + 1}, 'Package response size mismatch'),
+    ]
+    for name, response, expected_error in cases:
+        resources[path] = response
+        page.evaluate("d=>{window.transport=BenchPreview.create(document.querySelector('#a'),{runId:'synthetic-fixture',descriptor:d,transport:'external'});void transport.start()}", descriptor)
+        page.wait_for_function("['loaded','error'].includes(transport.getState().status)")
+        state = page.evaluate('transport.getState()')
+        if expected_error:
+            assert state['status'] == 'error' and state['message'] == expected_error, (name, state)
+            assert len(page.frames) == 1, name + ' created an executable frame'
+        else:
+            assert state['status'] == 'loaded', (name, state)
+            inner = [f for f in page.frames if f.parent_frame and f.parent_frame.parent_frame][0]
+            assert inner.locator('#order').inner_text() == '1,2,3,4'
+        page.evaluate('transport.destroy()')
+        results.append(name)
+    gate, arrived = threading.Event(), threading.Event()
+    resources[path] = {'body': compressed, 'encoding': 'gzip', 'gate': gate, 'arrived': arrived}
+    page.evaluate("d=>{window.transport=BenchPreview.create(document.querySelector('#a'),{runId:'synthetic-fixture',descriptor:d,transport:'external'});void transport.start()}", descriptor)
+    # Some engines withhold the response event until gzip decoding begins. Synchronize
+    # on the owned HTTP server, not browser instrumentation, while the body is gated.
+    assert arrived.wait(2), 'gzip request did not reach the controlled HTTP server'
+    assert page.evaluate('transport.getState().status') == 'fetching', 'gzip cancellation fixture was not in flight'
+    page.evaluate('transport.stop()')
+    gate.set()
+    page.wait_for_timeout(200)
+    assert len(page.frames) == 1 and page.evaluate('transport.getState().status') == 'stopped', 'gzip cancellation resurrected frame'
+    page.evaluate('transport.destroy()')
+    resources[path] = decoded
+    return {'wire_size': len(compressed), 'decoded_size': len(decoded), 'cases': results + ['gzip_cancel']}
+
+
 def wait_for_movement(page, element, initial):
     # Read-only polling avoids both slow first-frame startup and periodic sample aliasing.
     for _ in range(40):
@@ -178,6 +223,7 @@ def runtime_checks(page, args, resources, hits, base):
     page.wait_for_function("external.getState().status==='loaded'")
     assert hits[checkpoint:] == ['/' + external['package']['path']]
     page.evaluate('external.destroy()')
+    transport_results = encoded_transport_checks(page, resources, external, raw)
     # Tampered packages still have a valid outer package hash, exercising inner validation.
     failures = []
     variants = []
@@ -226,7 +272,7 @@ def runtime_checks(page, args, resources, hits, base):
         page.evaluate('probe.destroy()')
         navigation_results.append(name)
     fidelity_results = fidelity_checks(page, resources, base)
-    return {'native_fidelity': fidelity_results, 'runtime_passive_canary_navigation_cases': navigation_results, 'movement_controls': 'pass', 'classic_defer_utf8_patches': 'pass', 'lazy_fetch_cancel_destroy': 'pass',
+    return {'encoded_transport': transport_results, 'native_fidelity': fidelity_results, 'runtime_passive_canary_navigation_cases': navigation_results, 'movement_controls': 'pass', 'classic_defer_utf8_patches': 'pass', 'lazy_fetch_cancel_destroy': 'pass',
             'viewport_fit_and_fixed': 'pass', 'message_spoof_rejected': 'pass', 'diagnostic_messages': diagnostic_messages,
             'rejected': failures}
 
@@ -236,17 +282,30 @@ def main():
     from playwright.sync_api import sync_playwright
     hits = []
     resources = {}
+    disconnects = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             hits.append(self.path)
-            raw = resources.get(self.path, b'<!doctype html><html><head><meta charset="utf-8"></head><body><main id="secret">parent-secret</main><div id="a"></div><div id="b"></div></body></html>')
+            resource = resources.get(self.path, b'<!doctype html><html><head><meta charset="utf-8"></head><body><main id="secret">parent-secret</main><div id="a"></div><div id="b"></div></body></html>')
+            response = resource if isinstance(resource, dict) else {'body': resource}
+            raw = response['body']
             self.send_response(200)
             content_type = 'application/json' if self.path.endswith('.json') else 'text/javascript' if self.path.endswith('.js') else 'text/html; charset=utf-8'
             self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(raw)))
+            if not response.get('omit_length'):
+                self.send_header('Content-Length', str(response.get('length', len(raw))))
+            if response.get('encoding'):
+                self.send_header('Content-Encoding', response['encoding'])
             self.end_headers()
-            self.wfile.write(raw)
+            if response.get('arrived'):
+                response['arrived'].set()
+            if response.get('gate'):
+                response['gate'].wait(5)
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                disconnects.append(self.path)
         def do_POST(self):
             self.do_GET()
         def log_message(self, *unused):

@@ -51,12 +51,12 @@
     "tests/test_static_site.py": "dc8ae7baeef2f56acd60e4c0bcd2d8fd7c81eecd6a541d37137232874faec79e",
     "tests/test_storage_server.py": "cd7287d54a1bae7ffe9070f8b63c962e42aa32d2181935d027738dc4a18c3055",
     "tests/verify_archives.py": "d2ed56199c21745912831a1f687a2d3fdca2773f0254dcd1ea8297b58d0d6fc2",
-    "tests/verify_original_previews.py": "79b2b813002d15c84894d6e4afae06254d4063d57a1a060adae62224a2f3ef44",
-    "tests/verify_preview_isolation.py": "77f20a7027941712e1c2447b396ba722769c6ee12abb3a58c83b7892ef505f01",
+    "tests/verify_original_previews.py": "e86710c7c2d9ee1e253dbb14ee0a947ba158fbe79551af11e376a64375e5e644",
+    "tests/verify_preview_isolation.py": "eb793129bfffb8cbf1a3fc4867e5e947c6abb0b4a4efa52e51f997b5ccba24a3",
     "tests/verify_public_snapshot.py": "55d57b430d74c5ab148ab1073dc0396bbe287a64f5add29e0b87250dd297a70c",
     "web/app.js": "a1bed248471c653753cbeb11404b19ac234e56883111f90a20034eb92b050d12",
     "web/index.html": "26ac735ffdac37e93a1b0a1b63bf2f19e9f20dc2e60ac61a715268473788844b",
-    "web/preview-runtime.js": "95a11b8fc6caaa4dd8374946c127aa2c0cbca678a5570ee0fbf75d5b8593139d",
+    "web/preview-runtime.js": "50f44020c5464433c28c9a27a944b83588002c435e7ce33508866afb249b67cf",
     "web/styles.css": "e8d335298a9429ac7b722c6905297c417323f5b22c7f0aa0a3570cf6d25d12c7"
   },
   "version": 1

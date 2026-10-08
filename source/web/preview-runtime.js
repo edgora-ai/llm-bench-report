@@ -266,7 +266,10 @@
     const response = await fetch(url.href, {credentials: 'omit', redirect: 'error', signal, cache: 'no-store', referrerPolicy: 'no-referrer'});
     if (!response.ok) fail('Package HTTP ' + response.status);
     const length = response.headers.get('Content-Length');
-    if (length !== null && (!/^\d+$/.test(length) || Number(length) !== p.size)) fail('Package response size mismatch');
+    const encoding = (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase();
+    // Fetch decodes compressed bodies, but Content-Length describes encoded wire bytes.
+    // Only identity responses permit an early comparison to the decoded package size.
+    if (length !== null && (!/^\d+$/.test(length) || ((!encoding || encoding === 'identity') && Number(length) !== p.size))) fail('Package response size mismatch');
     if (!response.body) fail('Browser lacks bounded streaming fetch');
     const reader = response.body.getReader(), chunks = [];
     let size = 0;

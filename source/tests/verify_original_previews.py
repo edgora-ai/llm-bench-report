@@ -152,7 +152,8 @@ class Observer:
         self.requests.append({'url': request.url, 'method': request.method, 'type': request.resource_type, 'phase': self.phase})
     def response(self, response):
         self.responses.append({'url': response.url, 'status': response.status, 'mime': response.headers.get('content-type', ''),
-                               'size':response.headers.get('content-length'), 'owned_server_sha256':response.headers.get('x-verified-body-sha256'), 'phase': self.phase})
+                               'size':response.headers.get('content-length'), 'encoding':response.headers.get('content-encoding','').strip().lower(),
+                               'owned_server_sha256':response.headers.get('x-verified-body-sha256'), 'phase': self.phase})
     def finished(self, request):
         if re.search(r'/originals/[a-f0-9]{64}\.json$', urlsplit(request.url).path):
             try:
@@ -491,8 +492,11 @@ def all_originals(browser, url, reference_url, data, packages, args, report, eng
             else:
                 info=data['originals'][run_id]['package']
                 responses=[r for r in observer.responses if r['url']==expected_url]
+                # Content-Length describes encoded wire bytes when compression
+                # is used. Decoded browser bytes still require exact size+SHA below.
                 require(responses and all(r['status']==200 and r['mime'].split(';')[0]=='application/json'
-                        and (r['size'] is None or int(r['size'])==info['size']) for r in responses), 'Actual package status/MIME/length mismatch')
+                        and (r['size'] is None or r['encoding'] not in {'','identity'} or int(r['size'])==info['size'])
+                        for r in responses), 'Actual package status/MIME/identity-length mismatch')
                 if args.site:
                     require(all(r['owned_server_sha256']==info['sha256'] for r in responses), 'Owned HTTP server sent unexpected package bytes')
                 for item in observer.package_bodies:
