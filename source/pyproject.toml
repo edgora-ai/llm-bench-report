@@ -1,0 +1,19 @@
+[project]
+name = "llm-bench"
+version = "0.1.0"
+description = "Evidence-first isolated coding-agent benchmarks"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["numpy>=1.26,<3", "Pillow>=10.2,<12", "playwright==1.62.0"]
+
+[project.scripts]
+llm-bench = "bench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bench*"]

@@ -1,0 +1,22 @@
+# Copy to ignored config/bench.toml and fill in your own local paths.
+# No provider credentials belong in this file or in the public repository.
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[runtime]
+image = "llm-bench-runtime:v4"
+profile = "isolated-agent-v2-effort"
+effort = "maximum"
+internal_host = "127.0.0.1"
+
+[paths]
+database = "data/bench.sqlite3"
+token_file = "data/dashboard-token"
+# Create this ignored file with your own Claude provider settings before a run.
+claude_settings = "config/claude-provider.json"
+# Populate the catalogue before generation; do not assume aliases are supported.
+models_cache = "data/discovery/latest-models.json"
+# For direct OpenCode access, put the word direct in this ignored selection file.
+opencode_egress_config = "config/opencode-egress.conf"
+opencode_egress_list = "config/opencode-egress.list"

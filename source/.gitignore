@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+containers/assets/
+data/
+runs/
+runtime/*/
+.venv/
+artifacts/
+config/*
+!config/bench.example.toml
+.env
+.env.*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

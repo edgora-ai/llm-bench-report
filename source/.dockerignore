@@ -1,0 +1,9 @@
+*
+!containers/
+!containers/runtime.Dockerfile
+!containers/assets/
+!containers/assets/claude
+!containers/assets/opencode
+!runtime/
+!runtime/launch.py
+!runtime/evaluate_worker.py

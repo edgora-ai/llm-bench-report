@@ -1,0 +1,6 @@
+{
+  "id": "blackhole", "name": "黑洞模拟动画", "version": "standard-v1", "rubric_version": "visual-v1",
+  "original_prompt": "做一个黑洞的模拟动画页面",
+  "prompt": "做一个黑洞的模拟动画页面。\n\n在当前工作目录自主完成，交付入口为 index.html。可使用原创 SVG、Canvas 或 WebGL，以及本地 HTML/CSS/JavaScript。所有依赖和素材必须自包含，不使用远程字体、CDN、外部图片或资料。页面可离线打开。不要联网搜索，不要调用图片生成工具、子代理或其他模型。\n\n你可以使用当前提供的文件、终端和预置 Playwright 浏览器工具自主检查和迭代。不等待人工补充，不需要提交计划或请求批准。完成后简短说明交付了什么。",
+  "dimensions": {"compliance":"任务与离线交付要求", "recognizability":"黑洞主题及场景结构", "motion":"模拟动态与运动连贯性", "visual_detail":"空间层次、视觉构图与细节", "interaction":"可用性与响应式（不强制增加控制器）", "completeness":"最终交付完整性"}
+}

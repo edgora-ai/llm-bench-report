@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>模型实验台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">跳到实验数据</a>
+  <header class="topbar">
+    <a class="brand" href="#batch" aria-label="模型实验台首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>模型实验台<small>MODEL / BENCH</small></span></a>
+    <div class="header-actions"><span id="mode-label" class="mode-label">真实运行 · 可追溯</span><button id="theme-toggle" class="icon-button" aria-label="切换明暗主题">明 / 暗</button><button id="refresh-button">刷新数据</button><button id="auth-button">登录</button></div>
+  </header>
+  <main class="shell">
+    <section class="masthead"><div><p class="eyebrow">EXPERIMENT WORKSPACE / 01</p><h1>对照，而不猜测。</h1><p class="intro">把每一次运行，放回它的条件、计量与证据之中。</p></div><div class="masthead-note"><span class="signal-dot"></span><span>完成 ≠ 验收通过<br><small>缺失计量始终保留为 unknown</small></span></div></section>
+    <section class="summary" id="summary" aria-label="当前筛选数据覆盖度"></section>
+    <nav class="tabs" aria-label="实验视图"><button data-view="batch" class="active" aria-current="page">批次对照<span>01</span></button><button data-view="trend">日期趋势<span>02</span></button><button data-view="gallery">产物图库<span>03</span></button><button data-view="blind">盲评分<span>04</span></button><button data-view="evidence">运行证据<span>05</span></button></nav>
+    <form id="filters" class="filters" aria-label="全局筛选">
+      <label>开始日期<input name="date_from" type="date"></label><label>结束日期<input name="date_to" type="date"></label>
+      <label>工具<select name="tool"><option value="">全部工具</option></select></label><label>模型<select name="model"><option value="">全部模型</option></select></label><label>任务<select name="task_id"><option value="">全部任务</option></select></label><label>Prompt 版本<select name="prompt_version"><option value="">全部版本</option></select></label><label>Purpose<select name="purpose"><option value="">全部用途</option><option value="benchmark">benchmark</option></select></label><label>运行状态<select name="status"><option value="">全部状态</option></select></label><label class="search-field">搜索<input name="q" type="search" placeholder="运行 ID、批次、任务…" autocomplete="off"></label><button type="button" id="reset-filters">重置</button>
+    </form>
+    <div class="workspace-bar"><p id="result-label" aria-live="polite">正在连接实验数据…</p><div><button id="texture-toggle" aria-pressed="false">图表纹理</button><button data-export="csv">导出 CSV</button><button data-export="json">导出 JSON</button></div></div>
+    <p id="notice" class="notice" role="status" hidden></p>
+    <section id="workspace" tabindex="-1" aria-label="实验数据"><div id="view-content"></div></section>
+    <footer><span>证据优先 · 不自动生成综合质量分</span><span id="updated-at">尚未加载</span></footer>
+  </main>
+  <div id="comparison-tray" class="comparison-tray" hidden><span id="selection-label"></span><div><button id="clear-selection">清空</button><button id="compare-button" class="primary">并排对照</button></div></div>
+  <dialog id="auth-dialog" aria-labelledby="auth-title"><form id="login-form"><div class="dialog-heading"><p class="eyebrow">PRIVATE WORKSPACE</p><h2 id="auth-title">连接实验台</h2></div><p class="muted">Token 仅用于本次登录。会话由后端 HttpOnly Cookie 管理，不写入浏览器存储。</p><label>访问 Token<input id="login-token" name="token" type="password" required autocomplete="off" spellcheck="false"></label><p id="login-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-login">取消</button><button type="submit" class="primary">登录并加载</button></div></form></dialog>
+  <dialog id="detail-dialog" class="wide-dialog" aria-labelledby="detail-title"><div class="dialog-top"><h2 id="detail-title">运行详情</h2><button data-close="detail-dialog" aria-label="关闭运行详情">关闭 ×</button></div><div id="detail-content"></div></dialog>
+  <dialog id="compare-dialog" class="compare-dialog" aria-labelledby="compare-title"><div class="dialog-top"><div><p class="eyebrow">SIDE BY SIDE / EVIDENCE ONLY</p><h2 id="compare-title">并排对照</h2></div><div><button id="restart-videos">视频统一重新开始</button><button data-close="compare-dialog" aria-label="关闭并排对照">关闭 ×</button></div></div><p class="muted">保留运行条件；只展示安全的图像与视频证据，不执行生成的 HTML。</p><div id="compare-content" class="compare-grid"></div></dialog>
+  <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+</body>
+</html>
