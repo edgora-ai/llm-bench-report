@@ -49,6 +49,16 @@ class PublishBoundaryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError, msg=needle):
                 publish.verify(page)
 
+    def test_task_identifiers_are_not_credential_signatures(self):
+        page = snapshot_html(MINIMAL, extra='<div id="task-switcher" class="task-card"></div>')
+        self.assertEqual(publish.verify(page)["runs"], 0)
+
+    def test_relative_media_cannot_use_the_offline_publication_path(self):
+        for data in ({"runs": [], "evidence": {"r/a.png": "media/abc.jpg"}},
+                     {"runs": [], "evidence": {}, "format": "static-media-v1"}):
+            with self.assertRaisesRegex(RuntimeError, "verified site directory"):
+                publish.verify(snapshot_html(json.dumps(data)))
+
     def test_an_external_asset_is_refused(self):
         # A published page that fetches its script or stylesheet is not the
         # self-contained artifact this project promises to hand over.

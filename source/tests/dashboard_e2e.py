@@ -85,60 +85,145 @@ def fixture() -> dict:
             'started_at': date + 'T10:00:00Z', 'finished_at': date + 'T10:01:00Z',
             'status': 'completed' if index < 6 else 'failed', 'duration_ms': 12000 + index * 7100,
             'metrics': {'cost_usd': None if index == 2 else round(.013 + index * .012, 4), 'cost_source': 'fixture explicit', 'input_tokens': 1300 + index * 500, 'output_tokens': 2400 + index * 500, 'total_tokens': None if index == 3 else 3700 + index * 1000},
-            'artifacts': [{'path': 'evidence/fixture.png', 'size': 6400, 'sha256': 'fixture-not-real-hash', 'kind': 'evidence'}, {'path': 'generated/index.html', 'size': 123, 'kind': 'generated'}, {'path': 'logs/test.log', 'kind': 'log', 'size': 100}],
+            'artifacts': [{'path': 'evidence/desktop.png', 'size': 6400, 'sha256': 'fixture-not-real-hash', 'kind': 'evidence'}, {'path': 'generated/index.html', 'size': 123, 'kind': 'generated'}, {'path': 'logs/test.log', 'kind': 'log', 'size': 100}],
             'checks': [{'name': 'fixture-check', 'status': 'pass' if index % 2 == 0 else 'fail', 'detail': '<script>fixture unsafe text</script>'}],
-            'evaluation': {'status': 'infrastructure_error' if index == 5 else 'fixture', 'evidence': ['evidence/fixture.png', 'generated/index.html', 'evidence/unsafe.svg']},
+            'evaluation': {'status': 'infrastructure_error' if index == 5 else 'fixture', 'evidence': ['evidence/desktop.png', 'generated/index.html', 'evidence/unsafe.svg']},
             'reviews': [], 'prompt_hash': 'fixture-prompt-hash', 'archive_dir': '/fixture/not-real',
             'conditions': {'task_id': 'fixture-task', 'prompt_hash': 'fixture-prompt-hash', **efforts},
         }
         runs.append(run)
-        evidence[run_id + '/evidence/fixture.png'] = fixture_png()
-    return {'runs': runs, 'tasks': [{'id': 'fixture-task', 'name': '明确标注的测试任务'}], 'evidence': evidence}
+        evidence[run_id + '/evidence/desktop.png'] = fixture_png()
+    # Explicit histories and missing facts: never infer retries or entry delivery.
+    runs[6].update(attempt=0, checks=[{'name': 'entrypoint', 'status': 'fail', 'detail': 'Explicit fixture: no entrypoint'}])
+    runs[6]['evaluation'] = {'status': 'completed', 'evidence': []}
+    runs[4].update(attempt=1, retry_of=runs[6]['id'])
+    runs[4]['checks'] = [{'name': 'entrypoint', 'status': 'pass', 'detail': 'Explicit fixture retry'}]
+    runs[5]['checks'] = [{'name': 'provider_route', 'status': 'pass', 'detail': 'Infrastructure failure is not delivery'}]
+    runs[0]['status'] = 'failed'
+    runs[0]['checks'] = [{'name': 'entrypoint', 'status': 'pass', 'detail': 'Page exists despite failed CLI session'}]
+    for index in (0, 1, 2, 3, 4, 7):
+        runs[index]['evaluation']['status'] = 'completed'
+    # A registered image missing from the public package remains a placeholder.
+    evidence.pop(runs[3]['id'] + '/evidence/desktop.png')
+    for index in (8, 9):
+        run = json.loads(json.dumps(runs[1]))
+        run.update(id=f'fixture-only-{index + 1:02}', task_id='fixture-task-2',
+                   task_name='另一道明确标注的测试任务', model=f'Model Second {index}',
+                   purpose='benchmark', checks=[], conditions={}, reviews=[])
+        run['evaluation'] = {'status': 'completed' if index == 8 else 'not_evaluated',
+                             'evidence': ['evidence/desktop.png'] if index == 8 else []}
+        runs.append(run)
+        if index == 8:
+            evidence[run['id'] + '/evidence/desktop.png'] = fixture_png()
+    return {'runs': runs, 'tasks': [{'id': 'fixture-task', 'name': '明确标注的测试任务'},
+                                  {'id': 'fixture-task-2', 'name': '另一道明确标注的测试任务'}], 'evidence': evidence}
 
 
 def check_overflow(page) -> None:
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Page body horizontally overflows'
+    assert page.evaluate("[...document.querySelectorAll('dialog[open]')].every(d=>d.scrollWidth<=d.clientWidth+1)"), 'Dialog horizontally overflows'
 
 
 def screenshot_matrix(page, output: Path, prefix: str) -> None:
-    for width, height, size in [(1440, 1000, 'desktop'), (400, 900, 'mobile')]:
+    for width, height, size in [(1440, 900, 'desktop'), (400, 850, 'mobile')]:
         page.set_viewport_size({'width': width, 'height': height})
         for theme in ['light', 'dark']:
             page.evaluate('(theme) => { document.documentElement.dataset.theme = theme; }', theme)
+            page.evaluate("""async()=>{getComputedStyle(document.body).backgroundColor;
+                await Promise.allSettled(document.getAnimations().filter(a=>a.playState==='running'&&a.effect.getTiming().iterations!==Infinity).map(a=>a.finished));
+                await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));}""")
             check_overflow(page)
             page.screenshot(path=str(output / f'{prefix}-{size}-{theme}.png'), full_page=True)
 
 
+def expand_filters(page):
+    page.locator('#filters details').evaluate_all('items=>items.forEach(d=>d.open=true)')
+
+
+def ledger(page, task=''):
+    page.locator('[data-view="evidence"]').click()
+    expand_filters(page)
+    page.locator('[name="task_id"]').select_option(task)
+
+
+def choose_fixture_run(page, run_id):
+    button = page.locator(f'.evidence-card [data-select-run="{run_id}"]')
+    if not button.is_visible():
+        history = page.locator('#no-media-history')
+        assert history.count() == 1 and not history.get_attribute('open'), 'Hidden run must belong to the explicit no-media history'
+        history.locator('summary').click()
+    button.click()
+
+
 def snapshot_checks(browser, output: Path) -> None:
-    context = browser.new_context(viewport={'width': 1440, 'height': 1000})
+    context = browser.new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
-    errors, api_calls = [], []
+    errors, unexpected = [], []
     page.on('pageerror', lambda error: errors.append(str(error)))
     data = fixture()
     html = (ROOT / 'web/index.html').read_text()
     payload = json.dumps(data, ensure_ascii=False).replace('<', '\\u003c')
     html = html.replace('<script src="/app.js" defer></script>', '<script>window.BENCH_SNAPSHOT=' + payload + ';</script><script src="/app.js" defer></script>')
     def route_handler(route):
-        path = urlparse(route.request.url).path
-        if path.startswith('/api/'):
-            api_calls.append(path)
+        parsed = urlparse(route.request.url)
+        if parsed.hostname != 'bench-fixture.test' or route.request.method != 'GET':
+            unexpected.append(route.request.url)
             route.abort()
-        elif path == '/':
+        elif parsed.path == '/':
             route.fulfill(status=200, content_type='text/html', body=html)
-        elif path in ['/app.js', '/styles.css']:
-            route.fulfill(status=200, content_type='text/javascript' if path.endswith('.js') else 'text/css', body=(ROOT / 'web' / path[1:]).read_text())
+        elif parsed.path in ['/app.js', '/styles.css']:
+            route.fulfill(status=200, content_type='text/javascript' if parsed.path.endswith('.js') else 'text/css', body=(ROOT / 'web' / parsed.path[1:]).read_text())
         else:
+            unexpected.append(parsed.path)
             route.abort()
-    page.route('https://bench-fixture.test/**', route_handler)
+    context.route('**/*', route_handler)
     page.goto('https://bench-fixture.test/')
     page.wait_for_load_state('networkidle')
-    expect(page.locator('#result-label')).to_contain_text('7 运行')
+    expect(page.locator('[name="task_id"]')).to_have_value('fixture-task')
+    expect(page.locator('.evidence-card[data-run-id]')).to_have_count(7)
     expect(page.locator('#auth-button')).to_be_disabled()
     expect(page.locator('[data-export="json"]')).to_be_disabled()
-    assert not page.locator('#auth-dialog').is_visible()
-    expect(page.locator('#summary')).to_contain_text('unknown')
-    screenshot_matrix(page, output, 'snapshot-fixture')
-    page.set_viewport_size({'width': 1440, 'height': 1000})
+    expect(page.locator('#auth-dialog')).not_to_be_visible()
+    expect(page.locator('#summary')).to_contain_text('模型 × 任务组合')
+    assert page.locator('video[src]').count() == 0
+    screenshot_matrix(page, output, 'snapshot-gallery')
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.locator('#task-tabs [data-task-id="fixture-task-2"]').click()
+    expect(page.locator('.evidence-card[data-run-id]')).to_have_count(2)
+    expect(page.locator('[name="task_id"]')).to_have_value('fixture-task-2')
+    expect(page.locator('#task-context')).to_contain_text('任务')
+    page.locator('#task-tabs [data-task-id="fixture-task"]').click()
+    # All attempts stay reachable, including no-entry first failure and retry.
+    expect(page.locator('[data-run-id="fixture-only-07"]')).to_contain_text('失败')
+    expect(page.locator('[data-run-id="fixture-only-05"]')).to_contain_text('重试')
+    expect(page.locator('[data-run-id="fixture-only-04"]')).to_contain_text('未')
+    ledger(page, 'fixture-task')
+    expect(page.locator('.run-name button')).to_have_count(7)
+    row = lambda run_id: page.locator('.run-table tbody tr').filter(has=page.get_by_role('button', name=run_id, exact=True))
+    expect(row('fixture-only-01')).to_contain_text('失败')
+    expect(row('fixture-only-01')).to_contain_text('1/1 通过')
+    expect(row('fixture-only-06')).to_contain_text('未验收')
+    expect(row('fixture-only-07')).to_contain_text('0/1 通过')
+    page.locator('[name="purpose"]').select_option('')
+    expect(page.locator('.run-name button')).to_have_count(8)
+    page.locator('[name="status"]').select_option('failed')
+    expect(page.locator('.run-name button')).to_have_count(3)
+    page.locator('#reset-filters').click()
+    ledger(page, 'fixture-task')
+    page.locator('[name="date_to"]').fill('2026-09-25')
+    page.locator('[name="q"]').fill('fixture-prompt-hash')
+    expect(page.locator('.run-name button')).to_have_count(4)
+    page.locator('#reset-filters').click()
+    ledger(page, 'fixture-task')
+    for run_id, text in [('fixture-only-01', 'max（已设为该模型最高档）'),
+                         ('fixture-only-02', 'xhigh（请求 max，该模型上限 xhigh）'),
+                         ('fixture-only-03', '不可控'), ('fixture-only-04', '未记录')]:
+        page.get_by_role('button', name=run_id, exact=True).click()
+        expect(page.locator('#detail-content')).to_contain_text(text)
+        expect(page.locator('#detail-content')).to_contain_text('不包含、不请求文本日志')
+        assert page.locator('#detail-content script, #detail-content iframe').count() == 0
+        page.locator('[data-close="detail-dialog"]').click()
+    page.locator('[data-view="batch"]').click()
     page.locator('.chart .mark').first.focus()
     expect(page.locator('#chart-tooltip')).to_be_visible()
     page.keyboard.press('Escape')
@@ -146,106 +231,89 @@ def snapshot_checks(browser, output: Path) -> None:
     page.locator('#texture-toggle').click()
     expect(page.locator('#texture-toggle')).to_have_attribute('aria-pressed', 'true')
     page.locator('#texture-toggle').click()
-    for key, selected in [('tool', 'fixture-tool'), ('task_id', 'fixture-task'), ('prompt_version', 'fixture-v1')]:
-        page.locator(f'[name="{key}"]').select_option(selected)
-        expect(page.locator('#result-label')).to_contain_text('7 运行')
-    page.locator('[name="purpose"]').select_option('')
-    expect(page.locator('#result-label')).to_contain_text('8 运行')
-    page.locator('[name="status"]').select_option('failed')
-    expect(page.locator('#result-label')).to_contain_text('2 运行')
-    page.locator('[name="model"]').select_option('Model Quartz')
-    expect(page.locator('#result-label')).to_contain_text('1 运行')
-    page.locator('#reset-filters').click()
-    # A collapsed check set from a failed evaluator is not a passing ratio.
-    expect(page.locator('.run-table tbody tr').nth(5)).to_contain_text('未验收')
-    assert not page.locator('.run-table tbody tr').nth(5).inner_text().count('1/1 通过')
-    expect(page.locator('#result-label')).to_contain_text('7 运行')
-    page.locator('[name="date_to"]').fill('2026-09-25')
-    expect(page.locator('#result-label')).to_contain_text('4 运行')
-    page.locator('[name="date_from"]').fill('2026-09-25')
-    expect(page.locator('#result-label')).to_contain_text('4 运行')
-    page.locator('[name="q"]').fill('fixture-prompt-hash')
-    expect(page.locator('.run-table tbody tr')).to_have_count(4)
-    page.locator('#reset-filters').click()
-    expect(page.locator('#result-label')).to_contain_text('7 运行')
     page.locator('[name="model"]').select_option('Model Atlas')
-    expect(page.locator('#result-label')).to_contain_text('2 运行')
-    assert page.locator('.run-table tbody tr').count() == 2
     page.locator('[data-view="trend"]').click()
-    expect(page.locator('#view-content')).to_contain_text('指纹 fixture-condition-0')
-    # The absent middle date is unknown rather than bridged or zero-filled.
     page.locator('.chart-table summary').first.click()
     expect(page.locator('.chart-table')).to_contain_text('2026-09-26')
     expect(page.locator('.chart-table')).to_contain_text('unknown')
-    page.locator('[data-view="batch"]').click()
-    # Generate a tiny, explicitly synthetic WebM without adding a dependency or disk asset.
-    webm = page.evaluate('''() => new Promise((resolve, reject) => {
-      const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 100;
-      const ctx = canvas.getContext('2d'); ctx.fillStyle = '#2a78d6'; ctx.fillRect(0, 0, 160, 100);
-      const stream = canvas.captureStream(10), chunks = [];
-      const recorder = new MediaRecorder(stream, {mimeType: 'video/webm'});
-      recorder.ondataavailable = event => chunks.push(event.data);
-      recorder.onerror = reject;
-      recorder.onstop = () => { const reader = new FileReader(); reader.onload = () => { stream.getTracks().forEach(track => track.stop()); resolve(reader.result); }; reader.onerror = reject; reader.readAsDataURL(new Blob(chunks, {type: 'video/webm'})); };
-      recorder.start(); setTimeout(() => { ctx.fillStyle = '#dbe9fc'; ctx.fillRect(30, 30, 80, 40); }, 80);
-      setTimeout(() => recorder.stop(), 280);
-    })''')
-    page.evaluate('''uri => { window.BENCH_SNAPSHOT.runs.forEach(run => {
-      run.evaluation.evidence.push('evidence/fixture.webm');
-      window.BENCH_SNAPSHOT.evidence[run.id + '/evidence/fixture.webm'] = uri;
-    }); }''', webm)
-    page.locator('.run-table tbody input[type="checkbox"]').nth(0).check()
-    page.locator('.run-table tbody input[type="checkbox"]').nth(1).check()
+    page.locator('#reset-filters').click()
+    page.locator('[data-view="gallery"]').click()
+    # Small synthetic fixture video; no model code or real artifact is executed.
+    webm = page.evaluate("""() => new Promise((resolve,reject)=>{
+        const canvas=document.createElement('canvas');canvas.width=160;canvas.height=100;
+        const ctx=canvas.getContext('2d');ctx.fillStyle='#2a78d6';ctx.fillRect(0,0,160,100);
+        const stream=canvas.captureStream(10),chunks=[];
+        const recorder=new MediaRecorder(stream,{mimeType:'video/webm'});
+        recorder.ondataavailable=e=>chunks.push(e.data);recorder.onerror=reject;
+        recorder.onstop=()=>{const r=new FileReader();r.onload=()=>{stream.getTracks().forEach(t=>t.stop());resolve(r.result)};r.onerror=reject;r.readAsDataURL(new Blob(chunks,{type:'video/webm'}))};
+        recorder.start();setTimeout(()=>{ctx.fillStyle='#dbe9fc';ctx.fillRect(20,20,90,50)},100);
+        setTimeout(()=>recorder.stop(),1200);
+    })""")
+    page.evaluate("""uri=>window.BENCH_SNAPSHOT.runs.filter(r=>['fixture-only-01','fixture-only-02'].includes(r.id)).forEach(r=>{
+        r.evaluation.evidence.push('evidence/animation.webm');window.BENCH_SNAPSHOT.evidence[r.id+'/evidence/animation.webm']=uri;
+    })""", webm)
+    page.locator('#task-tabs [data-task-id="fixture-task"]').click()
+    choose_fixture_run(page, 'fixture-only-01')
+    choose_fixture_run(page, 'fixture-only-02')
+    expect(page.locator('#selection-label')).to_contain_text('1')
+    expect(page.locator('#notice')).to_be_visible()
+    page.locator('#mixed-comparison').check()
+    page.locator('#task-tabs [data-task-id="fixture-task-2"]').click()
+    choose_fixture_run(page, 'fixture-only-09')
+    expect(page.locator('#selection-label')).to_contain_text('1')
+    expect(page.locator('#notice')).to_contain_text('任务')
+    page.locator('#task-tabs [data-task-id="fixture-task"]').click()
+    choose_fixture_run(page, 'fixture-only-02')
+    expect(page.locator('#selection-label')).to_contain_text('2')
+    page.locator('#compare-limit').select_option('4')
+    choose_fixture_run(page, 'fixture-only-03')
+    choose_fixture_run(page, 'fixture-only-04')
+    expect(page.locator('#selection-label')).to_contain_text('4')
+    page.set_viewport_size({'width':400,'height':850})
+    expect(page.locator('#compare-button')).to_be_disabled()
+    expect(page.locator('#selection-label')).to_contain_text('4')
+    page.set_viewport_size({'width':1440,'height':900})
+    choose_fixture_run(page, 'fixture-only-03')
+    choose_fixture_run(page, 'fixture-only-04')
     page.locator('#compare-button').click()
     expect(page.locator('#compare-dialog')).to_be_visible()
-    assert page.locator('#compare-content img').count() == 2
-    expect(page.locator('#compare-content video')).to_have_count(2)
-    page.wait_for_function('Array.from(document.querySelectorAll("#compare-content video")).every(video => video.readyState >= 2)')
-    page.evaluate('document.querySelectorAll("#compare-content video").forEach(video => { video.currentTime = .1; })')
-    page.locator('#restart-videos').click()
-    page.wait_for_function('Array.from(document.querySelectorAll("#compare-content video")).every(video => !video.paused && video.currentTime < .15)')
-    assert page.locator('iframe, object, embed').count() == 0
-    page.locator('[data-close="compare-dialog"]').click()
-    # Effort must be visible in the detail dialog and must distinguish the
-    # three controlled states from a pre-effort archive with no record. The
-    # filters above narrowed the table, so reset before indexing rows.
-    page.locator('#reset-filters').click()
-    expect(page.locator('.run-name button')).to_have_count(7)
-    for index, expected in [(0, 'max（已设为该模型最高档）'),
-                            (1, 'xhigh（请求 max，该模型上限 xhigh）'),
-                            (2, '不可控：模型无档位阶梯，强度由模型内部固定'),
-                            (3, '未记录（旧归档无此条件）')]:
-        page.locator('.run-name button').nth(index).click()
-        expect(page.locator('#detail-content')).to_contain_text('推理强度')
-        expect(page.locator('#detail-content')).to_contain_text(expected)
-        page.locator('[data-close="detail-dialog"]').click()
-    page.locator('.run-name button').first.click()
-    expect(page.locator('#detail-content')).to_contain_text('fixture-prompt-hash')
-    expect(page.locator('#detail-content')).to_contain_text('不包含、不请求文本日志')
-    assert page.locator('#detail-content button').filter(has_text='快照不可下载').count() == 3
-    assert page.locator('#detail-content script').count() == 0
-    page.locator('[data-close="detail-dialog"]').click()
-    page.locator('#reset-filters').click()
-    expect(page.locator('#result-label')).to_contain_text('7 运行')
-    page.locator('[name="q"]').fill('does-not-exist-fixture')
-    expect(page.locator('#view-content')).to_contain_text('当前条件下，没有运行')
-    page.locator('#reset-filters').click()
-    expect(page.locator('#result-label')).to_contain_text('7 运行')
-    page.locator('[data-view="gallery"]').click()
-    expect(page.locator('#view-content .gallery img')).to_have_count(7)
-    for width in [1440, 400]:
-        page.set_viewport_size({'width': width, 'height': 900})
+    expect(page.locator('#compare-condition-warning')).to_be_visible()
+    expect(page.locator('#compare-content img')).to_have_count(2)
+    page.locator('#compare-stage').select_option('final')
+    assert page.locator('#compare-content img').count() == 0, 'Missing stage must not silently substitute desktop'
+    page.locator('#compare-stage').select_option('desktop')
+    screenshot_matrix(page, output, 'snapshot-compare')
+    for index in (0,1):
+        page.locator(f'#compare-ab [data-compare-index="{index}"]').click()
+        assert page.locator('#compare-content img:visible').count() == 1
         check_overflow(page)
+        page.locator('#compare-content [data-open-stage]:visible').first.click()
+        expect(page.locator('#zoom-dialog')).to_be_visible()
+        page.wait_for_function("[...document.querySelectorAll('#zoom-content img')].some(i=>i.complete&&i.naturalWidth>0)")
+        check_overflow(page)
+        page.locator('[data-close="zoom-dialog"]').click()
+    page.set_viewport_size({'width':1440,'height':900})
+    page.locator('#compare-stage').select_option('video')
+    assert page.locator('#compare-content video[src]').count() == 0
+    page.locator('#play-videos').click()
+    page.wait_for_function("[...document.querySelectorAll('#compare-content video')].length===2&&[...document.querySelectorAll('#compare-content video')].every(v=>v.readyState>=2&&v.currentTime>0&&!v.paused)")
+    page.locator('#pause-videos').click()
+    assert page.locator('#compare-content video').evaluate_all('vs=>vs.every(v=>v.paused)')
+    page.locator('#restart-videos').click()
+    page.wait_for_function("[...document.querySelectorAll('#compare-content video')].every(v=>!v.paused&&v.currentTime<1)")
+    page.locator('[data-close="compare-dialog"]').click()
+    assert page.locator('#compare-content video[src]').count() == 0
+    page.locator('#clear-selection').click()
+    page.locator('[data-view="matrix"]').click()
+    expect(page.locator('#view-content')).to_contain_text('unknown')
+    screenshot_matrix(page, output, 'snapshot-matrix')
     page.locator('[data-view="blind"]').click()
     expect(page.locator('#view-content')).to_contain_text('写入已禁用')
-    expect(page.locator('#summary')).to_be_hidden()
-    expect(page.locator('#filters')).to_be_hidden()
-    # No transient token or other per-viewer state beyond theme is stored.
-    assert page.evaluate('Object.keys(localStorage).every(key => key === "bench-theme")')
+    assert page.evaluate('Object.keys(localStorage).every(key=>key==="bench-theme")')
     assert not errors, errors
-    assert not api_calls, api_calls
-    print('PASS snapshot: no API requests; filters, unknowns, gaps, safe evidence, details, comparison, read-only controls; desktop/400px light+dark')
+    assert not unexpected, unexpected
     context.close()
+    print('PASS inline fixture: task gates, attempt history, independent failure/evaluation, unknowns, missing media/stages, effort, 2-4 desktop/2 phone, A/B, on-demand video, strict overflow, readonly')
 
 
 def live_checks(browser, args, output: Path) -> None:
@@ -256,6 +324,8 @@ def live_checks(browser, args, output: Path) -> None:
     assert context.request.get(base + '/').status == 200, 'Public root must return 200'
     assert context.request.get(base + '/api/runs').status == 401, 'Runs must reject unauthenticated requests'
     assert context.request.get(base + '/api/options').status == 401
+    assert context.request.get(base + '/api/runs/fixture-only-01/file?path=evidence/desktop.png').status == 401
+    assert context.request.post(base + '/api/login', headers={'Origin': base}, data={'token': 'fixture-wrong-token'}).status == 401
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -270,6 +340,16 @@ def live_checks(browser, args, output: Path) -> None:
     assert any(cookie['httpOnly'] for cookie in cookies), 'Session cookie must be HttpOnly'
     assert args.token not in page.evaluate('JSON.stringify(localStorage)')
     assert context.request.get(base + '/api/runs').status == 200
+    assert context.request.post(base + '/api/runs/fixture-only-01/reviews', headers={'Origin': 'https://cross-origin.invalid'}, data={'reviewer': 'must-not-write'}).status == 403
+    if getattr(args, 'isolated_server', None):
+        expired = browser.new_context()
+        assert expired.request.post(base + '/api/login', headers={'Origin': base}, data={'token': args.token}).status == 200
+        session = next(cookie['value'] for cookie in expired.cookies() if cookie['name'] == 'bench_session')
+        with args.isolated_server._session_lock:
+            args.isolated_server._sessions[session] = 0
+        assert expired.request.get(base + '/api/runs').status == 401
+        expired.close()
+    ledger(page)
     if args.purpose != 'benchmark':
         page.locator('[name="purpose"]').select_option(args.purpose)
     initial = context.request.get(base + '/api/runs', params={'purpose': args.purpose}).json()['runs']
@@ -333,7 +413,7 @@ def live_checks(browser, args, output: Path) -> None:
     # Readback after full frontend reload plus searchable retrieval.
     page.reload()
     expect(page.locator('#updated-at')).to_contain_text('更新于')
-    page.locator('[data-view="evidence"]').click()
+    ledger(page)
     page.locator('[name="q"]').fill(run_id)
     expect(page.locator('#result-label')).to_contain_text('1 运行')
     search = context.request.get(base + '/api/runs', params={'purpose': args.purpose, 'q': run_id}).json()['runs']
@@ -378,27 +458,28 @@ def isolated_checks(browser, args, output: Path) -> None:
             run['purpose'] = 'fixture'
             run['tool'] = 'opencode'
             run['archive_dir'] = f'runs/{run["date"]}/{run["id"]}'
-            run['evaluation']['evidence'] = ['evidence/fixture.png']
+            run['evaluation']['evidence'] = ['evidence/desktop.png']
             archive = root / run['archive_dir']
             (archive / 'evidence').mkdir(parents=True)
             (archive / 'generated').mkdir()
             (archive / 'logs').mkdir()
-            (archive / 'evidence/fixture.png').write_bytes(base64.b64decode(data['evidence'][run['id'] + '/evidence/fixture.png'].split(',')[1]))
+            (archive / 'evidence/desktop.png').write_bytes(base64.b64decode(data['evidence'].get(run['id'] + '/evidence/desktop.png', fixture_png()).split(',')[1]))
             (archive / 'generated/index.html').write_text('<script>window.__UNSAFE_GENERATED_HTML_EXECUTED=true</script>')
             (archive / 'logs/test.log').write_text('<script>not executable</script> explicit fixture log')
             (archive / 'manifest.json').write_text(json.dumps(run))
             store.upsert_run(run)
         with sqlite3.connect(db_path) as database:
-            assert database.execute('SELECT COUNT(*) FROM runs WHERE purpose=?', ('fixture',)).fetchone()[0] == 8
+            assert database.execute('SELECT COUNT(*) FROM runs WHERE purpose=?', ('fixture',)).fetchone()[0] == len(data['runs'])
         assert store.get_run('fixture-only-01')['purpose'] == 'fixture'
         assert len(store.list_runs({'purpose': 'fixture', 'q': 'fixture-only-01'})) == 1
-        print('PASS seed storage flow: 8 explicit fixture runs -> direct SQLite count -> get_run -> indexed search')
+        print(f"PASS seed storage flow: {len(data['runs'])} explicit fixture runs -> direct SQLite count -> get_run -> indexed search")
         server = make_server(root, db_path, '127.0.0.1', 0, 'fixture-only-token')
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         args.base_url = f'http://127.0.0.1:{server.server_port}'
         args.token, args.purpose = 'fixture-only-token', 'fixture'
         args.isolated_root, args.isolated_db = root, db_path
+        args.isolated_server = server
         try:
             live_checks(browser, args, output)
         finally:

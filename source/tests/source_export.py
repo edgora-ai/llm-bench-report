@@ -27,7 +27,7 @@ REQUIRED_FILES = (
 OPTIONAL_HELPERS = (
     "publish.py", "make_snapshot.py", "dashboard_e2e.py", "evaluate_e2e.py",
     "gateway_e2e.py", "verify_archives.py", "reconcile_batches.py",
-    "source_export.py", "verify_public_snapshot.py",
+    "source_export.py", "verify_public_snapshot.py", "make_site.py",
 )
 
 # Signature lengths distinguish real tokens from documented prefixes and

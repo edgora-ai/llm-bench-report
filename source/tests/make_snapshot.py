@@ -267,6 +267,25 @@ def _error_class(message):
     return "other"
 
 
+def render_snapshot(data, root=ROOT):
+    """Render public data with the trusted web template, without I/O to archives/API."""
+    root = Path(root)
+    blob = json.dumps(data, ensure_ascii=False, allow_nan=False)
+    html = (root / "web/index.html").read_text(encoding="utf-8")
+    # Inline assets and place the viewer after the DOM it queries. Keep exactly
+    # the original two-script contract; model text is JSON, never executable HTML.
+    html = html.replace('<link rel="stylesheet" href="/styles.css">',
+                        '<style>' + (root / "web/styles.css").read_text(encoding="utf-8") + '</style>')
+    html = re.sub(r'^[ \t]*<script src="/app\.js" defer></script>[ \t]*$', "", html, flags=re.M)
+    html = html.replace("</body>", '<script>window.BENCH_SNAPSHOT=' + blob.replace("<", "\\u003c")
+                        + ';</script><script>' + (root / "web/app.js").read_text(encoding="utf-8")
+                        + '</script></body>')
+    for pattern in (r'<link[^>]+href="/styles\.css"', r'<script[^>]+src="/app\.js"'):
+        if re.search(pattern, html):
+            raise RuntimeError(f"snapshot still references external asset: {pattern}")
+    return html
+
+
 def main():
     token = (ROOT / "data/dashboard-token").read_text().strip()
     opener = build_opener(HTTPCookieProcessor())
@@ -291,26 +310,7 @@ def main():
             raise RuntimeError(f"snapshot leaks a host detail: {forbidden}")
 
     destination = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / "artifacts/observatory.html")
-    html = (ROOT / "web/index.html").read_text()
-    # Inline the stylesheet and script: a snapshot that still points at /app.js
-    # only renders when served by the dashboard, so it cannot be opened or
-    # handed over on its own. A self-contained file is the whole point.
-    html = html.replace('<link rel="stylesheet" href="/styles.css">',
-                        '<style>' + (ROOT / "web/styles.css").read_text() + '</style>')
-    # An inline script runs during parsing, before the DOM it queries exists.
-    # A <script defer> has no inline equivalent, so move the whole script to
-    # the end of <body> instead of wrapping app.js in a closure or a
-    # DOMContentLoaded handler, either of which would change its scope.
-    html = re.sub(r'^[ \t]*<script src="/app\.js" defer></script>[ \t]*$', "", html, flags=re.M)
-    html = html.replace("</body>", '<script>window.BENCH_SNAPSHOT=' + blob.replace("<", "\\u003c")
-                        + ';</script><script>' + (ROOT / "web/app.js").read_text()
-                        + '</script></body>')
-    # Match the link/script tags specifically: model outputs legitimately
-    # contain files named app.js and styles.css, and a substring check would
-    # reject a valid snapshot over them.
-    for pattern in (r'<link[^>]+href="/styles\.css"', r'<script[^>]+src="/app\.js"'):
-        if re.search(pattern, html):
-            raise RuntimeError(f"snapshot still references external asset: {pattern}")
+    html = render_snapshot(data, root=ROOT)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(html, encoding="utf-8")
     # The destination may sit outside the project (a staging copy for a
