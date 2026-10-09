@@ -14,6 +14,7 @@ import argparse
 from collections import Counter
 from contextlib import contextmanager
 import hashlib
+import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from html.parser import HTMLParser
@@ -64,6 +65,9 @@ def arguments(argv=None):
     parser.add_argument("--viewer-script", type=Path, default=ROOT / "web/app.js", help="Trusted report viewer source; inline executable code must match exactly")
     parser.add_argument("--preview-runtime", type=Path, default=ROOT / "web/preview-runtime.js", help="Independently trusted runtime for exact v2 composition; unused for v1")
     parser.add_argument("--timeout-ms", type=int, default=30000)
+    parser.add_argument("--performance-only", action="store_true", help="Bounded Chromium v2 real-HTTP gzip cold loads; skip original/media census and full regressions")
+    parser.add_argument("--ux-only", action="store_true", help="Focused current-product search/history/options/mobile comparison regressions, no original census")
+    parser.add_argument("--baseline-site", type=Path, help="Frozen external v2 site for paired performance/UX checks; needs its separately trusted --baseline-viewer-script")
     args = parser.parse_args(argv)
     require(args.expected_runs > 0 and args.expected_reviews >= 0 and args.expected_failed >= 0, "Invalid expected counts")
     require(re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date), "Date must be YYYY-MM-DD")
@@ -81,7 +85,18 @@ def arguments(argv=None):
         args.snapshot = args.snapshot.resolve(strict=True)
         require(args.snapshot.is_file() and args.snapshot.suffix.lower() == ".html", "Snapshot must be an existing HTML file")
     require(1 <= args.timing_repeats <= 5, "Timing repeats must be between one and five")
-    require(bool(args.baseline_snapshot) == bool(args.baseline_viewer_script), "Baseline HTML and its trusted old viewer must be provided together")
+    require(not (args.performance_only and args.ux_only), "Choose performance-only or ux-only")
+    require(not (args.baseline_snapshot and args.baseline_site), "Choose one baseline format")
+    require(bool(args.baseline_snapshot or args.baseline_site) == bool(args.baseline_viewer_script), "Baseline and its independently trusted viewer must be provided together")
+    if args.performance_only or args.ux_only:
+        require(args.site is not None and args.timing_repeats <= 3, "Focused modes need --site and at most three repeats")
+        require(not args.baseline_snapshot, "Focused comparisons require frozen v2 --baseline-site, not legacy inline HTML")
+    elif args.baseline_site:
+        require(False, "--baseline-site is supported only by focused modes")
+    if args.baseline_site:
+        args.baseline_site = args.baseline_site.resolve(strict=True)
+        require(args.baseline_site.is_dir() and (args.baseline_site / 'index.html').is_file(), "Baseline site must contain index.html")
+        args.baseline_viewer_script = args.baseline_viewer_script.resolve(strict=True)
     if args.baseline_snapshot:
         args.baseline_snapshot = args.baseline_snapshot.resolve(strict=True)
         args.baseline_viewer_script = args.baseline_viewer_script.resolve(strict=True)
@@ -131,7 +146,33 @@ class ReportHTML(HTMLParser):
             self.current = None
 
 
-def audit_html(html, trusted_script, trusted_runtime=None):
+def audit_external_original_descriptors(data):
+    """Descriptor-only focused audit; never import renderer/image-builder dependencies."""
+    require(data.get('transport') == 'external', 'Focused audit requires external originals')
+    originals = data.get('originals')
+    require(isinstance(originals, dict) and set(originals) == {run['id'] for run in data['runs']}, 'Original descriptor coverage')
+    sha = lambda value: isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value)
+    for descriptor in originals.values():
+        require(isinstance(descriptor, dict) and set(descriptor) == {'status', 'entrypoint', 'entry_sha256', 'missing', 'policy', 'package'}, 'Original descriptor schema')
+        status = descriptor['status']
+        require(status in {'ready', 'missing_dependencies', 'no_entrypoint', 'not_reviewed', 'withheld', 'unsupported'} and descriptor['policy'] == 'opaque-srcdoc-v1', 'Original status/policy')
+        missing = descriptor['missing']
+        require(isinstance(missing, list) and all(isinstance(path, str) and path and all(re.fullmatch(r'[A-Za-z0-9_.-]+', part) and part not in {'.', '..'} for part in path.split('/')) for path in missing), 'Unsafe missing-dependency paths')
+        require(missing == sorted(set(missing)), 'Noncanonical missing-dependency list')
+        if status == 'no_entrypoint':
+            require(descriptor['entrypoint'] is None and descriptor['entry_sha256'] is None and not missing, 'Absent entrypoint descriptor')
+        else:
+            require(descriptor['entrypoint'] == 'index.html' and sha(descriptor['entry_sha256']), 'Original entrypoint descriptor')
+        ready = status in {'ready', 'missing_dependencies'}
+        info = descriptor['package']
+        require((info is not None) == ready, 'Original status/package mismatch')
+        if ready:
+            require((status == 'missing_dependencies') == bool(missing), 'Original missing-dependency status mismatch')
+            require(isinstance(info, dict) and set(info) == {'sha256', 'size', 'path'} and sha(info['sha256']), 'Original package descriptor schema')
+            require(type(info['size']) is int and 0 < info['size'] <= 4 * 1024 * 1024 and info['path'] == 'originals/' + info['sha256'] + '.json', 'Original package size/path')
+
+
+def audit_html(html, trusted_script, trusted_runtime=None, descriptors_only=False):
     parsed = ReportHTML()
     parsed.feed(html)
     parsed.close()
@@ -144,10 +185,13 @@ def audit_html(html, trusted_script, trusted_runtime=None):
     if v2:
         require(isinstance(trusted_runtime, str) and trusted_runtime, "v2 audit requires independently trusted preview-runtime.js")
         require(parsed.scripts[1] == trusted_runtime + '\n' + trusted_script, "Inline executable code differs from trusted runtime + viewer composition")
-        # Import only this verifier's trusted sibling, never the report directory.
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from make_originals import validate_originals
-        validate_originals(data)
+        if descriptors_only:
+            audit_external_original_descriptors(data)
+        else:
+            # Import only this verifier's trusted sibling, never the report directory.
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from make_originals import validate_originals
+            validate_originals(data)
         require(set(data) <= {'runs', 'tasks', 'evidence', 'format', 'transport', 'originals', 'assets', 'thumbnails', 'offline'}, "Unknown v2 report fields")
     else:
         require(parsed.scripts[1] == trusted_script, "Inline executable code does not match trusted web/app.js")
@@ -193,7 +237,7 @@ def audit_html(html, trusted_script, trusted_runtime=None):
 
 
 @contextmanager
-def serve_report(html_path, data):
+def serve_report(html_path, data, gzip_html=False):
     """Serve only the already-audited entry, declared media, and offline file."""
     html_path = html_path.resolve(strict=True)
     root = html_path.parent
@@ -204,6 +248,9 @@ def serve_report(html_path, data):
         files[name] = {**meta, 'path': path}
     if data.get('offline'):
         files['offline.html'] = {**data['offline'], 'mime': 'text/html', 'path': root / 'offline.html'}
+    # Compress once, outside the measured request. Media is already compressed.
+    entry_bytes = html_path.read_bytes() if gzip_html else None
+    entry_gzip = gzip.compress(entry_bytes, compresslevel=6, mtime=0) if gzip_html else None
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             name = unquote(urlsplit(self.path).path).lstrip('/') or 'index.html'
@@ -215,11 +262,20 @@ def serve_report(html_path, data):
             if item.get('sha256') and hashlib.sha256(body).hexdigest() != item['sha256']:
                 self.send_error(409, 'Declared asset hash mismatch')
                 return
+            if gzip_html and name == 'index.html' and body != entry_bytes:
+                self.send_error(409, 'Audited document changed')
+                return
             self.send_response(200)
             self.send_header('Content-Type', item['mime'])
+            source_hash = hashlib.sha256(body).hexdigest()
+            if gzip_html and name == 'index.html':
+                self.send_header('Vary', 'Accept-Encoding')
+                if 'gzip' in self.headers.get('Accept-Encoding', '').lower():
+                    body = entry_gzip
+                    self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('X-Report-SHA256', hashlib.sha256(body).hexdigest())
+            self.send_header('X-Report-SHA256', source_hash)
             if name == 'offline.html':
                 self.send_header('Content-Disposition', 'attachment; filename="offline.html"')
             self.end_headers()
@@ -592,6 +648,12 @@ def open_run(page, run_id, expect):
     expect(page.locator('#detail-title')).to_have_text(run_id)
 
 
+def expand_no_media_history(page):
+    history = page.locator('#no-media-history')
+    if history.count() and not history.evaluate('d=>d.open'):
+        history.locator('summary').click()
+
+
 def new_gallery_checks(page, data, args, report, expect):
     page.locator('[data-view="gallery"]').click()
     all_filters(page)
@@ -603,6 +665,8 @@ def new_gallery_checks(page, data, args, report, expect):
             page.locator('[name="date_to"]').fill(args.date if dated else '')
             runs = [run for run in data['runs'] if (not purpose or run.get('purpose') == purpose)
                     and (not dated or run_date(run) == args.date)]
+            expect(page.locator('#result-label')).to_contain_text(f'{len(runs)} 运行')
+            expand_no_media_history(page)
             cards = page.locator('.evidence-card[data-run-id]')
             expect(cards).to_have_count(len(runs))
             require(set(cards.evaluate_all('cards=>cards.map(c=>c.dataset.runId)')) == {run['id'] for run in runs}, 'Gallery must preserve every filtered attempt including failures')
@@ -615,6 +679,8 @@ def new_gallery_checks(page, data, args, report, expect):
         page.locator(f'#task-tabs [data-task-id="{task_id}"]').click()
         expect(page.locator('[name="task_id"]')).to_have_value(task_id)
         expected = [run for run in data['runs'] if run.get('task_id') == task_id and run.get('purpose') == 'benchmark']
+        expect(page.locator('#result-label')).to_contain_text(f'{len(expected)} 运行')
+        expand_no_media_history(page)
         expect(page.locator('.evidence-card[data-run-id]')).to_have_count(len(expected))
         require(page.locator('#task-context').inner_text().strip(), 'Task requirements/context missing')
     page.locator('#reset-filters').click()
@@ -752,6 +818,7 @@ def explicit_filter_compatibility(browser, url, data, args, report):
         if fragment:
             expect(page.locator('.run-table tbody tr')).to_have_count(expected)
         else:
+            expand_no_media_history(page)
             expect(page.locator('.evidence-card[data-run-id]')).to_have_count(expected)
         guard.finish(page)
         context.close()
@@ -827,7 +894,314 @@ def browser_suite(browser, url, data, args, report):
         context.close()
 
 
+PERFORMANCE_PROFILES = {
+    'original20Mbps40ms': {'network': NETWORK_PROFILE, 'cpu': 1},
+    'slow1.6Mbps150ms4xCPU': {'network': {'latency': 150, 'downloadThroughput': 1_600_000 / 8,
+        'uploadThroughput': 750_000 / 8, 'offline': False}, 'cpu': 4},
+}
+PERFORMANCE_VIEWPORTS = {'desktop': {'width': 1440, 'height': 900}, 'phone': {'width': 400, 'height': 850}}
+PERFORMANCE_OBSERVER = """(() => {
+    const metrics=window.__loadMetrics={longtasks:[],readable:null,firstVisibleImage:null};
+    new PerformanceObserver(list=>list.getEntries().forEach(e=>metrics.longtasks.push({start:e.startTime,duration:e.duration}))).observe({type:'longtask',buffered:true});
+    const visible=node=>{if(!node||!node.getClientRects().length)return false;
+        const r=node.getBoundingClientRect(),s=getComputedStyle(node);
+        return r.width>0&&r.height>0&&r.top<innerHeight&&r.bottom>0&&r.left<innerWidth&&r.right>0&&s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity)>0;};
+    const tick=()=>{
+        if(metrics.readable===null&&document.querySelector('#workspace')?.getAttribute('aria-busy')==='false'&&
+            visible(document.querySelector('#result-label'))&&document.querySelector('#result-label').textContent.includes('运行'))metrics.readable=performance.now();
+        if(metrics.firstVisibleImage===null){const image=[...document.querySelectorAll('.evidence-card img')].find(i=>i.complete&&i.naturalWidth>0&&visible(i));
+            if(image)metrics.firstVisibleImage={ms:performance.now(),src:image.currentSrc,run_id:image.closest('[data-run-id]')?.dataset.runId};}
+        requestAnimationFrame(tick);
+    };requestAnimationFrame(tick);
+})();"""
+
+
+def performance_summary(samples):
+    keys = ('ttfb_ms', 'readable_ms', 'interactive_ms', 'first_actually_visible_image_ms', 'dom_nodes',
+            'longtask_count', 'longtask_total_ms', 'transfer_bytes', 'filter_total_ms', 'filter_after_debounce_ms')
+    result = {}
+    for key in keys:
+        values = [row[key] for row in samples if row.get(key) is not None]
+        result[key] = {'median': round(median(values), 2) if values else None, 'observed': len(values)}
+    return result
+
+
+def performance_sample(browser, url, data, args, name, profile_name, viewport_name, repeat):
+    """Real gzip HTTP + CDP throttling; never BrowserGuard routes or API monkeypatches."""
+    profile = PERFORMANCE_PROFILES[profile_name]
+    context = browser.new_context(viewport=PERFORMANCE_VIEWPORTS[viewport_name], color_scheme='light', service_workers='block')
+    context.set_default_timeout(args.timeout_ms)
+    errors, requests, document_responses = [], [], []
+    try:
+        context.add_init_script(PERFORMANCE_OBSERVER)
+        page = context.new_page()
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.on('console', lambda message: errors.append(message.text) if message.type == 'error' else None)
+        page.on('request', lambda request: requests.append({'url': request.url, 'method': request.method, 'type': request.resource_type}))
+        page.on('response', lambda response: document_responses.append(response) if response.request.resource_type == 'document' else None)
+        session = context.new_cdp_session(page)
+        session.send('Network.enable')
+        session.send('Network.setCacheDisabled', {'cacheDisabled': True})
+        session.send('Network.emulateNetworkConditions', profile['network'])
+        session.send('Emulation.setCPUThrottlingRate', {'rate': profile['cpu']})
+        response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        require(response.status == 200 and response.headers.get('content-encoding') == 'gzip', 'Cold load must receive actual HTTP200 gzip document')
+        source_hash = hashlib.sha256((args.site / 'index.html').read_bytes()).hexdigest() if name == 'current' else hashlib.sha256((args.baseline_site / 'index.html').read_bytes()).hexdigest()
+        require(response.headers.get('x-report-sha256') == source_hash, 'Measured document differs from audited source')
+        page.wait_for_function('window.__loadMetrics?.readable!==null')
+        # Exercise a real viewer event, then wait two animation frames for its render.
+        # No synthetic API implementation is installed. This is an observed ready
+        # control response, not a claim about the browser's formal TTI metric.
+        page.locator('[data-view="gallery"]').click()
+        interactive = page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(performance.now()))))')
+        page.wait_for_load_state('networkidle', timeout=60000)
+        page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+        metrics = page.evaluate("""() => {const m=window.__loadMetrics,n=performance.getEntriesByType('navigation')[0];
+            return {ttfb_ms:n.responseStart,server_ttfb_ms:n.responseStart-n.requestStart,readable_ms:m.readable,
+                first_actually_visible_image_ms:m.firstVisibleImage?.ms??null,first_visible_image:m.firstVisibleImage,
+                dom_nodes:document.getElementsByTagName('*').length,longtasks:m.longtasks.slice(),
+                transfer_bytes:n.transferSize+performance.getEntriesByType('resource').reduce((s,r)=>s+r.transferSize,0),
+                document_encoded_bytes:n.encodedBodySize,document_decoded_bytes:n.decodedBodySize,
+                active_task:document.querySelector('[name="task_id"]').value,scroll_x:scrollX,scroll_y:scrollY,
+                initial_viewport_image_elements:[...document.querySelectorAll('.evidence-card img')].filter(i=>{const r=i.getBoundingClientRect();return i.getClientRects().length&&r.top<innerHeight&&r.bottom>0&&r.left<innerWidth&&r.right>0}).length};}""")
+        metrics.update(version=name, profile=profile_name, viewport=viewport_name, repeat=repeat, interactive_ms=interactive,
+                       source_sha256=source_hash, longtask_count=len(metrics['longtasks']),
+                       longtask_total_ms=sum(task['duration'] for task in metrics['longtasks']))
+        if metrics['first_actually_visible_image_ms'] is None:
+            metrics['first_image_note'] = 'No loaded image intersected the unscrolled viewport before network idle; no scroll performed'
+        cold_requests = list(requests)
+        require(metrics['scroll_x'] == 0 and metrics['scroll_y'] == 0, 'Interactive probe scrolled the initial viewport; image timing invalid')
+        require(len(document_responses) == 1, 'Cold run needs exactly one document response')
+        require(not any('/originals/' in row['url'] for row in cold_requests), 'Cold load fetched an original package')
+        # Separate warm filter response, including the documented 250ms debounce.
+        candidate = next((run for run in data['runs'] if run.get('task_id') == metrics['active_task']
+                          and run.get('purpose') == 'benchmark' and evidence_paths(run)), None)
+        require(candidate is not None, 'No media-bearing default-task run for filter measurement')
+        query = candidate['id']
+        all_filters(page)  # Filter measurement starts after the cold viewport capture.
+        page.evaluate("""() => {document.querySelector('[name="q"]').addEventListener('input',()=>{
+            window.__filterStart=performance.now();window.__filterTaskIndex=window.__loadMetrics.longtasks.length;},{capture:true,once:true});}""")
+        page.locator('[name="q"]').fill(query)
+        page.wait_for_function("""q=>new URL(location.href).searchParams.get('q')===q&&
+            document.querySelector('#workspace').getAttribute('aria-busy')==='false'&&
+            document.querySelectorAll('.evidence-card[data-run-id]').length===1&&document.querySelector('.evidence-card').dataset.runId===q""", arg=query)
+        filter_metrics = page.evaluate("""()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve({
+            total:performance.now()-window.__filterStart,longtasks:window.__loadMetrics.longtasks.slice(window.__filterTaskIndex)}))))""")
+        metrics.update(filter_query=query, filter_debounce_ms=250, filter_total_ms=filter_metrics['total'],
+                       filter_after_debounce_ms=max(0, filter_metrics['total'] - 250), filter_longtasks=filter_metrics['longtasks'],
+                       cold_requests=cold_requests)
+        require(not errors, 'Viewer errors: ' + '; '.join(errors))
+        require(all(row['method'] == 'GET' and urlsplit(row['url']).netloc == urlsplit(url).netloc and '/api/' not in row['url'] for row in requests), 'Unexpected nonlocal, API or write request')
+        return metrics
+    finally:
+        context.close()
+
+
+def focused_sources(args, report):
+    runtime = args.preview_runtime.resolve(strict=True).read_text(encoding='utf-8')
+    sources = {}
+    for name, site, script in [('current', args.site, args.viewer_script)] + (
+            [('baseline', args.baseline_site, args.baseline_viewer_script)] if args.baseline_site else []):
+        html = (site / 'index.html').read_bytes()
+        viewer = script.resolve(strict=True).read_text(encoding='utf-8')
+        data = audit_html(html.decode('utf-8'), viewer, runtime, descriptors_only=True)
+        require(data.get('format') == 'static-media-v2' and data.get('transport') == 'external', 'Focused modes require external static-media-v2')
+        validate_data(data, args, report)
+        sources[name] = {'site': site, 'data': data}
+        report.setdefault('sources', {})[name] = {'site': str(site), 'sha256': hashlib.sha256(html).hexdigest(),
+            'viewer_sha256': hashlib.sha256(viewer.encode()).hexdigest(), 'runtime_sha256': hashlib.sha256(runtime.encode()).hexdigest(),
+            'html_bytes': len(html), 'gzip_bytes': len(gzip.compress(html, compresslevel=6, mtime=0))}
+    if 'baseline' in sources:
+        current, baseline = sources['current']['data'], sources['baseline']['data']
+        # Managed offline HTML embeds the version-specific viewer, so its
+        # already-audited digest/size must change when app.js changes.
+        require({key: value for key, value in current.items() if key != 'offline'} ==
+                {key: value for key, value in baseline.items() if key != 'offline'},
+                'Baseline/current snapshot metadata, originals or media mappings changed')
+    return sources
+
+
+def focused_ux(browser, url, data, args, report):
+    """Current product only: exact search IDs and bounded loading/interaction checks."""
+    from playwright.sync_api import expect
+    context = browser.new_context(viewport=PERFORMANCE_VIEWPORTS['desktop'], color_scheme='light', service_workers='block')
+    context.set_default_timeout(args.timeout_ms)
+    page = context.new_page()
+    errors, requests = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('request', lambda request: requests.append(request.url))
+    result = report['focused_ux'] = {'search': [], 'checks': []}
+    try:
+        page.goto(url + '?purpose=&task_id=#gallery', wait_until='networkidle')
+        all_filters(page)
+        # Store real option node references, not text/value equivalents.
+        page.evaluate("window.__optionNodes=[...document.querySelectorAll('#filters select')].map(s=>({select:s,options:[...s.options]}))")
+        queries = ['', 'gpt', 'FAILED', 'crocodile', ' max ', '入口', data['runs'][0]['id'], 'no-such-run-7f918c']
+        reviewed = next((run for run in data['runs'] if run.get('reviews')), None)
+        if reviewed and reviewed['reviews'][0].get('reviewer'):
+            queries.append(reviewed['reviews'][0]['reviewer'])
+        for query in queries:
+            # Frozen viewer's original JSON.stringify({...run,reviews:undefined})
+            # semantics are evaluated against audited data, not app internals.
+            expected = page.evaluate("""q=>{q=q.trim().toLocaleLowerCase();return window.BENCH_SNAPSHOT.runs.filter(r=>
+                !q||JSON.stringify({...r,reviews:undefined}).toLocaleLowerCase().includes(q)).map(r=>r.id).sort()}""", query)
+            result['active_step'] = 'search ' + repr(query)
+            changed = page.locator('[name="q"]').input_value() != query
+            page.evaluate("window.__previousGallery=document.querySelector('#view-content').firstElementChild")
+            page.locator('[name="q"]').fill(query)
+            # URL changes before debounce. Filling an unchanged value emits no
+            # input event, so only changed values require a replacement subtree.
+            page.wait_for_function("({q,changed})=>(new URL(location.href).searchParams.get('q')||'')===q&&(!changed||!window.__previousGallery.isConnected)&&document.querySelector('#workspace').getAttribute('aria-busy')==='false'", arg={'q': query, 'changed': changed})
+            history = page.locator('#no-media-history')
+            if history.count() and not history.evaluate('d=>d.open'):
+                history.locator('summary').click()
+            page.wait_for_function("ids=>JSON.stringify([...document.querySelectorAll('.evidence-card[data-run-id]')].map(c=>c.dataset.runId).sort())===JSON.stringify(ids)", arg=expected)
+            actual = page.locator('.evidence-card[data-run-id]').evaluate_all('cs=>cs.map(c=>c.dataset.runId).sort()')
+            require(actual == expected, 'Search ID set changed for ' + repr(query))
+            require(page.evaluate("window.__optionNodes.every(({select,options})=>select.isConnected&&options.length===select.options.length&&options.every((o,i)=>o===select.options[i]))"), 'Unchanged dropdown options were recreated during search')
+            result['search'].append({'query': query, 'expected_ids': expected, 'actual_ids': actual})
+        result['checks'].append('unchanged dropdown node identity across search')
+        page.evaluate("window.__previousGallery=document.querySelector('#view-content').firstElementChild")
+        page.locator('[name="q"]').fill('')
+        page.wait_for_function("!new URL(location.href).searchParams.get('q')&&!window.__previousGallery.isConnected&&document.querySelector('#workspace').getAttribute('aria-busy')==='false'")
+        no_media = [run['id'] for run in data['runs'] if not evidence_paths(run)]
+        history = page.locator('#no-media-history')
+        require(no_media and history.count(), 'Actual snapshot lacks no-media history fixture')
+        require(not history.evaluate('d=>d.open'), 'Mixed gallery no-media history should start collapsed')
+        require(history.locator('.evidence-card').count() == 0, 'Collapsed no-media history was eagerly built')
+        history.locator('summary').click()
+        expect(history.locator('.evidence-card')).to_have_count(len(no_media))
+        require(set(history.locator('.evidence-card').evaluate_all('cs=>cs.map(c=>c.dataset.runId)')) == set(no_media), 'First history expansion lost attempts')
+        history.locator('summary').click()
+        history.locator('summary').click()
+        expect(history.locator('.evidence-card')).to_have_count(len(no_media))
+        result['checks'].append('no-media history lazy first expansion, no duplicate cards on reopen')
+        page.locator('[name="q"]').fill(no_media[0])
+        page.wait_for_function("id=>new URL(location.href).searchParams.get('q')===id", arg=no_media[0])
+        expect(page.locator('#no-media-history')).to_have_attribute('open', '')
+        expect(page.locator('#no-media-history .evidence-card')).to_have_count(1)
+        result['checks'].append('all-no-media results default open')
+        # A fresh page avoids earlier full-image requests contaminating the
+        # assertion that phone B remains unrequested before an explicit switch.
+        page.goto(url + '?purpose=benchmark&task_id=crocodile#gallery', wait_until='networkidle')
+        page.set_viewport_size(PERFORMANCE_VIEWPORTS['phone'])
+        cases = [next(run for run in data['runs'] if run['id'] == run_id) for run_id in (args.case_id or NEW_CASES)]
+        require(len(cases) == 2 and cases[0]['task_id'] == cases[1]['task_id'], 'Focused UX needs two real same-task comparison cases')
+        result['active_step'] = 'phone comparison selection'
+        page.locator(f'#task-tabs [data-task-id="{cases[0]["task_id"]}"]').click()
+        page.locator(f'.evidence-card [data-select-run="{cases[0]["id"]}"]').click()
+        page.locator('#mixed-comparison').check()
+        for run in cases[1:]:
+            page.locator(f'.evidence-card [data-select-run="{run["id"]}"]').click()
+        expect(page.locator('#selection-label')).to_contain_text('2')
+        requests.clear()
+        page.locator('#compare-button').click()
+        expect(page.locator('#compare-dialog')).to_be_visible()
+        page.wait_for_load_state('networkidle')
+        b_path = next((path for path in evidence_paths(cases[1]) if path.split('/')[-1] == 'desktop.png'), None)
+        b_key = cases[1]['id'] + '/' + str(b_path)
+        require(b_key in data['evidence'], 'B lacks actual desktop evidence')
+        b_url = urljoin(url, data['evidence'][b_key])
+        require(b_url not in requests, 'Hidden phone B full-size image GET before switch')
+        require(page.locator('#compare-content .compare-column:visible').count() == 1, 'Phone comparison must show only A')
+        page.locator('#compare-ab [data-compare-index="1"]').click()
+        page.wait_for_function("[...document.querySelectorAll('#compare-content .compare-column:not([hidden]) img')].some(i=>i.complete&&i.naturalWidth>0)")
+        require(b_url in requests, 'Switch to B did not request its full-size image')
+        result['checks'].append('phone hidden B full-size GET deferred until explicit switch')
+        for stage in ('later', 'final', 'mobile', 'desktop'):
+            page.locator('#compare-stage').select_option(stage)
+            page.wait_for_function("[...document.querySelectorAll('#compare-content .compare-column:not([hidden]) img')].some(i=>i.complete&&i.naturalWidth>0)")
+        page.locator('#compare-stage').select_option('video')
+        require(page.locator('#compare-content video[src]').count() == 0, 'Video stage auto-loaded video')
+        page.locator('#play-videos').click()
+        page.wait_for_function("[...document.querySelectorAll('#compare-content .compare-column:not([hidden]) video')].some(v=>v.readyState>=2&&v.videoWidth>0&&v.currentTime>0&&!v.paused&&!v.error)")
+        page.evaluate("window.__cleanupVideos=[...document.querySelectorAll('#compare-content video')]")
+        page.locator('#compare-mode').select_option('original')
+        require(page.evaluate("window.__cleanupVideos.length>0&&window.__cleanupVideos.every(v=>v.paused&&!v.hasAttribute('src')&&!v.querySelector('source[src]'))"), 'Mode switch failed to release played comparison video')
+        require(not any('/originals/' in request for request in requests), 'Original mode fetched package without run action')
+        page.locator('#compare-mode').select_option('media')
+        page.locator('#compare-stage').select_option('desktop')
+        for size in ('desktop', 'phone'):
+            page.set_viewport_size(PERFORMANCE_VIEWPORTS[size])
+            expect(page.locator('#compare-content .compare-column:visible')).to_have_count(2 if size == 'desktop' else 1)
+            for theme in ('light', 'dark'):
+                # Background theme button is inert while the modal is open;
+                # gallery checks below exercise the actual toggle separately.
+                page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
+                settle_theme(page)
+                overflow(page, 'focused-compare-' + size + '-' + theme, report)
+        page.locator('[data-close="compare-dialog"]').click()
+        require(page.locator('#compare-content video[src],#compare-content video source[src]').count() == 0, 'Closed comparison retained video sources')
+        require(not page.locator('iframe').count(), 'Closed comparison retained original frames')
+        expect(page.locator('#selection-label')).to_contain_text('2')
+        page.locator('#clear-selection').click()
+        expect(page.locator('#compare-button')).to_be_disabled()
+        result['checks'].append('selection, stage, mode, resize and dialog media cleanup')
+        for size in ('desktop', 'phone'):
+            page.set_viewport_size(PERFORMANCE_VIEWPORTS[size])
+            for theme in ('light', 'dark'):
+                set_theme(page, theme, expect)
+                overflow(page, 'focused-gallery-' + size + '-' + theme, report)
+        new_gallery_checks(page, data, args, report, expect)
+        explicit_filter_compatibility(browser, url, data, args, report)
+        page.goto(url + '?purpose=benchmark&task_id=unknown-task#gallery', wait_until='networkidle')
+        expect(page.locator('[name="task_id"]')).to_have_value('unknown-task')
+        expect(page.locator('.evidence-card')).to_have_count(0)
+        page.locator('#reset-filters').click()
+        expect(page.locator('[name="purpose"]')).to_have_value('benchmark')
+        require(page.locator('.evidence-card').count() > 0, 'Reset did not restore default task results')
+        result['checks'].append('full gallery/date coverage, explicit filter URLs, unknown URL value and reset')
+        require(not errors, 'Focused UX JavaScript errors: ' + '; '.join(errors))
+        result['checks'].append('desktop/phone light/dark overflow')
+    finally:
+        context.close()
+
+
+def focused_verify(args, report):
+    from playwright.sync_api import sync_playwright
+    sources = focused_sources(args, report)
+    report['scope'] = 'focused_current_v2_viewer_ux' if args.ux_only else 'performance_only_real_gzip_http_not_original_rendering'
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            if args.ux_only:
+                source = sources['current']
+                with serve_report(source['site'] / 'index.html', source['data'], gzip_html=True) as url:
+                    focused_ux(browser, url, source['data'], args, report)
+                return
+            report['performance'] = {'profiles': PERFORMANCE_PROFILES, 'viewports': PERFORMANCE_VIEWPORTS,
+                'repeats': args.timing_repeats, 'transport': 'HTTP gzip level 6, cache disabled, fresh context per sample',
+                'ttfb_definition': 'Chromium navigation responseStart (local HTTP headers); server_ttfb_ms subtracts requestStart. CDP data delivery throttling may not delay this header timestamp; do not interpret it as remote RTT.',
+                'interactive_definition': 'real gallery button click followed by two animation frames; observed responsiveness, not formal TTI',
+                'longtask_definition': 'navigation through cold network idle, including the real interactive readiness probe; warm filter tasks separate',
+                'filter_definition': 'input event to exact filtered ID set plus two animation frames; 250ms debounce reported separately',
+                'versions': {}}
+            # Alternating old/new samples reduce drift; both sources use the same
+            # runtime, server transport, browser, viewport and network profile.
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                urls = {name: stack.enter_context(serve_report(source['site'] / 'index.html', source['data'], gzip_html=True))
+                        for name, source in sources.items()}
+                for name in sources:
+                    report['performance']['versions'][name] = {'samples': [], 'summaries': {}}
+                for profile in PERFORMANCE_PROFILES:
+                    for viewport in PERFORMANCE_VIEWPORTS:
+                        for repeat in range(args.timing_repeats):
+                            names = list(reversed(sources)) if repeat % 2 == 0 else list(sources)
+                            for name in names:
+                                sample = performance_sample(browser, urls[name], sources[name]['data'], args, name, profile, viewport, repeat + 1)
+                                report['performance']['versions'][name]['samples'].append(sample)
+                        for version in report['performance']['versions'].values():
+                            selected = [sample for sample in version['samples'] if sample['profile'] == profile and sample['viewport'] == viewport]
+                            version['summaries'][profile + '/' + viewport] = performance_summary(selected)
+        finally:
+            browser.close()
+
+
 def verify(args, report):
+    if args.performance_only or args.ux_only:
+        focused_verify(args, report)
+        return
     from playwright.sync_api import sync_playwright
     trusted = args.viewer_script.resolve(strict=True).read_text(encoding='utf-8')
     with sync_playwright() as playwright:

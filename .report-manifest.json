@@ -3,8 +3,8 @@
     "index.html": {
       "mime": "text/html",
       "role": "index",
-      "sha256": "799f04dc736be162381040e1958ee4671d93754c5c352ce36ffc3287ccd51c8a",
-      "size": 588744
+      "sha256": "caeddfe28402d9718f272b8605d7ba55d2be802ca882518577c49e472f51d6bb",
+      "size": 590974
     },
     "media/00431e4b3d81a837aa9f77dd4bf8127e024062eb96e400bc4982bb42d3f3b650.webm": {
       "height": 640,
@@ -2497,8 +2497,8 @@
     "offline.html": {
       "mime": "text/html",
       "role": "offline",
-      "sha256": "c78517147309935d67a430c2a3f2daec02583c840ce032645467dce35aa3cce2",
-      "size": 41339208
+      "sha256": "8dd9d32b028cc2e485f14441c93922e206cab0945d7738b0f716025d5abf40d1",
+      "size": 41341438
     },
     "originals/02951516812e7e7d82236b3289548375df5e13e3a2a2848eaf9cce34fd93e713.json": {
       "mime": "application/json",
@@ -2716,10 +2716,10 @@
     "benchmark_runs": 35,
     "evidence": 175,
     "images": 140,
-    "index_bytes": 588744,
+    "index_bytes": 590974,
     "media_bytes": 31409034,
     "media_files": 311,
-    "offline_bytes": 41339208,
+    "offline_bytes": 41341438,
     "original_bytes": 1745339,
     "original_files": 56,
     "original_packages": 35,

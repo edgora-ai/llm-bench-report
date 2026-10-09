@@ -4,6 +4,12 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const snapshot = window.BENCH_SNAPSHOT != null;
   const source = snapshot ? window.BENCH_SNAPSHOT : null;
+  // Snapshot records and mappings are immutable; live API responses are not cached.
+  const searchTexts = snapshot ? new WeakMap() : null;
+  const evidenceLists = snapshot ? new WeakMap() : null;
+  const includedLists = snapshot ? new WeakMap() : null;
+  const mediaURIs = snapshot ? new WeakMap() : null;
+  let snapshotOptionsReady = false;
   const filterKeys = ['q', 'tool', 'model', 'task_id', 'purpose', 'prompt_version', 'status', 'date_from', 'date_to'];
   const scoreLabels = { compliance: '指令遵循', recognizability: '辨识度', motion: '运动表现', visual_detail: '视觉细节', interaction: '交互表现', completeness: '完整性' };
   const statusNames = { queued: '排队中', running: '运行中', generated: '待评估', completed: '已完成', failed: '失败', interrupted: '已中断', unavailable: '不可用', blocked: '被阻止' };
@@ -78,14 +84,20 @@
     url.hash = state.view;
     try { history.replaceState(null, '', url); } catch (error) { notify('当前查看器无法保存筛选 URL；筛选仍然有效。'); }
   }
+  function searchText(run) {
+    if (searchTexts?.has(run)) return searchTexts.get(run);
+    const value = JSON.stringify({ ...run, reviews: undefined }).toLocaleLowerCase();
+    searchTexts?.set(run, value);
+    return value;
+  }
   function localFilter(runs) {
+    const q = (state.filters.q || '').trim().toLocaleLowerCase();
     return runs.filter(run => {
       for (const key of ['tool', 'model', 'task_id', 'purpose', 'prompt_version', 'status']) if (state.filters[key] && String(run[key] ?? '') !== state.filters[key]) return false;
       const date = dateOf(run);
       if (state.filters.date_from && (!date || date < state.filters.date_from)) return false;
       if (state.filters.date_to && (!date || date > state.filters.date_to)) return false;
-      const q = (state.filters.q || '').trim().toLocaleLowerCase();
-      if (q && !JSON.stringify({ ...run, reviews: undefined }).toLocaleLowerCase().includes(q)) return false;
+      if (q && !searchText(run).includes(q)) return false;
       return true;
     });
   }
@@ -118,7 +130,11 @@
       }
       if (key === 'purpose') entries.set('benchmark', 'benchmark');
       if (state.filters[key] && !entries.has(state.filters[key])) entries.set(state.filters[key], state.filters[key]);
-      select.replaceChildren(el('option', { value: '', text: names[key] }), ...[...entries].map(([value, name]) => el('option', { value, text: name })));
+      const signature = JSON.stringify([...entries]);
+      if (select.filterOptionsSignature !== signature) {
+        select.replaceChildren(el('option', { value: '', text: names[key] }), ...[...entries].map(([value, name]) => el('option', { value, text: name })));
+        select.filterOptionsSignature = signature;
+      }
       select.value = state.filters[key] || '';
     }
     for (const key of ['q', 'date_from', 'date_to']) $(`[name="${key}"]`, $('#filters')).value = state.filters[key] || '';
@@ -135,8 +151,11 @@
     setLoading(true);
     try {
       if (snapshot) {
-        state.tasks = Array.isArray(source.tasks) ? source.tasks : [];
-        state.options = { ...inferOptions(source.runs || []), ...(source.options || {}) };
+        if (!snapshotOptionsReady) {
+          state.tasks = Array.isArray(source.tasks) ? source.tasks : [];
+          state.options = { ...inferOptions(source.runs || []), ...(source.options || {}) };
+          snapshotOptionsReady = true;
+        }
         applyDefaultTask();
         state.runs = localFilter(Array.isArray(source.runs) ? source.runs : []);
         fillOptions();
@@ -194,7 +213,11 @@
     const check = (run.checks || []).find(item => item.name === 'entrypoint') || (run.evaluation?.checks || []).find(item => item.name === 'entrypoint');
     return ['pass', 'passed', 'ok'].includes(check?.status) ? 'pass' : ['fail', 'failed'].includes(check?.status) ? 'fail' : 'unknown';
   }
-  function includedPaths(run) { return snapshot ? evidencePaths(run).filter(path => mediaURI(run, path)) : []; }
+  function includedPaths(run) {
+    if (!snapshot) return [];
+    if (!includedLists.has(run)) includedLists.set(run, evidencePaths(run).filter(path => mediaURI(run, path)));
+    return includedLists.get(run);
+  }
   function reviewStatus(run) { const reviews = run.reviews || [], pending = reviews.filter(review => !review.blind && /AI.*建议/i.test(review.reviewer || '')).length; return reviews.length ? `${reviews.length} 条已有记录${pending ? ` · ${pending} 条非盲 AI 建议待人工复核` : ''}` : '未评'; }
   function attemptText(run) {
     if (run.retry_of) return `显式重试 · attempt ${text(run.attempt)} · retry_of ${run.retry_of}`;
@@ -482,8 +505,11 @@
   }
   function stableRuns(runs) { return [...runs].sort((a, b) => String(a.started_at || a.date || '').localeCompare(String(b.started_at || b.date || '')) || String(a.id).localeCompare(String(b.id))); }
   function evidencePaths(run) {
+    if (evidenceLists?.has(run)) return evidenceLists.get(run);
     const list = Array.isArray(run.evaluation?.evidence) ? run.evaluation.evidence : [];
-    return [...new Set(list.map(item => typeof item === 'string' ? item : item?.path).filter(path => safePath(path) && /\.(png|jpe?g|webp|gif|webm|mp4)$/i.test(path)))];
+    const paths = [...new Set(list.map(item => typeof item === 'string' ? item : item?.path).filter(path => safePath(path) && /\.(png|jpe?g|webp|gif|webm|mp4)$/i.test(path)))];
+    evidenceLists?.set(run, paths);
+    return paths;
   }
   function staticAsset(uri, video = false) {
     if (typeof uri !== 'string') return null;
@@ -494,6 +520,14 @@
     return asset;
   }
   function mediaURI(run, path, thumbnail = false) {
+    if (!snapshot) return resolveMediaURI(run, path, thumbnail);
+    let uris = mediaURIs.get(run);
+    if (!uris) { uris = new Map(); mediaURIs.set(run, uris); }
+    const key = JSON.stringify([path, thumbnail]);
+    if (!uris.has(key)) uris.set(key, resolveMediaURI(run, path, thumbnail));
+    return uris.get(key);
+  }
+  function resolveMediaURI(run, path, thumbnail = false) {
     if (!safePath(path) || !evidencePaths(run).includes(path)) return null;
     const video = /\.(webm|mp4)$/i.test(path);
     if (!snapshot) return fileURL(run, path);
@@ -635,7 +669,11 @@
       element.evidenceURI = uri;
       if (thumbnailObserver) thumbnailObserver.observe(element);
       else frame.append(el('button', { text: '加载缩略图', onclick: event => { element.src = uri; event.target.remove(); } }));
-    } else element.src = uri;
+    } else {
+      figure.loadEvidence = () => { if (!element.hasAttribute('src')) { element.src = uri; figure.dataset.mediaState = 'loading'; status.textContent = '全尺寸图 · 正在加载'; } };
+      if (options.defer) status.textContent = '全尺寸图 · 切换到此列时加载';
+      else figure.loadEvidence();
+    }
     return figure;
   }
   function openZoom(run, path, anonymous = false) {
@@ -677,8 +715,16 @@
       const history = el('details', { id: 'no-media-history', class: 'no-media-history', open: withoutMedia.length === state.runs.length ? '' : null }, [
         el('summary', {}, [el('strong', { text: `${withoutMedia.length} / ${state.runs.length} 次无媒体登记 · 展开每次尝试` }), el('span', { class: 'history-states' }, [el('span', { 'data-history-status': 'session', text: `会话 ${counts(generationStatus)}` }), el('span', { 'data-history-status': 'entrypoint', text: `入口 pass ${entries.filter(value => value === 'pass').length} / fail ${entries.filter(value => value === 'fail').length} / unknown ${entries.filter(value => value === 'unknown').length}` }), el('span', { 'data-history-status': 'evaluation', text: `评估 ${counts(run => run.evaluation?.status)}` })])]),
         el('p', { class: 'footnote', text: '这里只收折未登记可预览栅格 / 录像的尝试，不按会话成败筛选。无媒体不等于入口失败；实时原作另由标题入口主动启动。每次运行仍可选中、查详情及全部附件。' }),
-        el('div', { class: 'gallery no-media-list' }, [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).flatMap(([, runs]) => stableRuns(runs).filter(run => !evidencePaths(run).length).map(galleryCard)))
+        el('div', { class: 'gallery no-media-list' })
       ]);
+      let populated = false;
+      const populate = () => {
+        if (populated) return;
+        populated = true;
+        $('.no-media-list', history).replaceChildren(...[...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).flatMap(([, runs]) => stableRuns(runs).filter(run => !evidencePaths(run).length).map(galleryCard)));
+      };
+      history.addEventListener('toggle', () => { if (history.isConnected && history.open) populate(); });
+      if (history.open) populate();
       root.append(history);
     }
     const groupGrid = el('div', { class: 'model-groups' }); root.append(groupGrid);
@@ -778,6 +824,7 @@
     $$('#compare-content .compare-column').forEach((column, i) => {
       column.hidden = narrowScreen.matches && i !== index;
       if (column.hidden) { for (const panel of previewPanels) if (column.contains(panel.node)) panel.stop(); $$('video', column).forEach(video => video.pause()); }
+      else $$('.media-evidence', column).forEach(figure => figure.loadEvidence?.());
     });
     $$('#compare-ab [data-compare-index]').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.compareIndex) === index)));
   }
@@ -802,11 +849,12 @@
     if (live) { renderOriginalComparison(runs, content); return; }
     content.style.setProperty('--columns', runs.length);
     $('#compare-ab').replaceChildren(...runs.map((run, i) => el('button', { 'data-compare-index': i, 'aria-pressed': String(state.compareIndex === i), text: `${String.fromCharCode(65 + i)} · ${text(run.model)}`, onclick: () => showCompareSide(i) })));
+    state.compareIndex = Math.min(state.compareIndex, runs.length - 1);
     content.replaceChildren(...runs.map((run, i) => {
       const path = stagePath(run, state.compareStage);
       return el('article', { class: 'compare-column', 'data-run-id': run.id }, [
         el('div', { class: 'compare-identity' }, [el('p', { class: 'eyebrow', text: `${String.fromCharCode(65 + i)} / ${text(run.tool)}` }), el('h3', { text: text(run.model) }), el('p', { class: 'condition-key', text: `${dateOf(run)} · ${text(run.task_name || run.task_id)} · ${text(run.prompt_version)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` })]),
-        media(run, path, false, { full: true }),
+        media(run, path, false, { full: true, defer: narrowScreen.matches && i !== state.compareIndex }),
         el('div', { class: 'card-actions' }, [el('button', { 'data-open-stage': run.id, text: '放大当前图像', disabled: !path || state.compareStage === 'video' || !mediaURI(run, path), onclick: () => openZoom(run, path) }), detailButton(run, '运行详情')]),
         el('div', { class: 'compare-facts' }, compareFacts(run))
       ]);
