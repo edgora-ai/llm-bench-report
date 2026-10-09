@@ -166,6 +166,22 @@ class GalleryUtilityTests(unittest.TestCase):
                 verifier.validate_requests(rows(names), url, self.manifest, seed, cold=True, viewport='phone')
         verifier.validate_requests(rows(['index.html', self.thumb, self.thumb]), url, self.manifest, seed, cold=True, viewport='desktop')
 
+    def test_pages_subdirectory_preserves_exact_inventory_and_origin(self):
+        url = 'https://example.test/llm-bench-report/'
+        seed = {'runs': [{'image': {'thumb': self.thumb}}]}
+        rows = [{'url': url, 'method': 'GET'}, {'url': url + self.thumb, 'method': 'GET'}]
+        self.assertEqual(verifier.validate_requests(rows, url, self.manifest, seed, cold=True, viewport='phone'),
+                         ['index.html', self.thumb])
+        for address in ('https://example.test/index.html',
+                        'https://example.test/llm-bench-report-extra/index.html',
+                        'https://external.test/llm-bench-report/index.html',
+                        'http://example.test/llm-bench-report/index.html',
+                        url + '../index.html', url + '%2e%2e/index.html',
+                        url + 'api/runs', url + self.full):
+            with self.subTest(address=address), self.assertRaises(AssertionError):
+                verifier.validate_requests([{'url': address, 'method': 'GET'}], url, self.manifest,
+                                           seed, cold=True, viewport='phone')
+
     def test_passive_request_audit_rejects_external_api_and_writes(self):
         for row in ({'url': 'http://external.test/index.html', 'method': 'GET'},
                     {'url': 'http://example.test/api/runs', 'method': 'GET'},

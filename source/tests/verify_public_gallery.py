@@ -396,14 +396,19 @@ def serve_gallery(root, manifest, *, delays=None, fail_once=None):
 
 def validate_requests(requests, url, manifest, seed=None, *, cold=False, viewport=None, allow_preview=False):
     names = []
+    base = urlsplit(url)
+    prefix = unquote(base.path)
+    require(prefix.startswith('/') and prefix.endswith('/'), 'Report base must be a directory URL')
     for row in requests:
         target = urlsplit(row['url'])
         if allow_preview and target.scheme == 'blob':
             require(row['method'] == 'GET' and (row['url'].startswith('blob:null/') or
                     row['url'].startswith('blob:' + url.rstrip('/') + '/')), 'Unexpected preview Blob origin')
             continue
-        require(row['method'] == 'GET' and target.netloc == urlsplit(url).netloc, 'Nonlocal/write request')
-        name = unquote(target.path).lstrip('/') or 'index.html'
+        require(row['method'] == 'GET' and target.netloc == base.netloc and target.scheme == base.scheme, 'Nonlocal/write request')
+        path = unquote(target.path)
+        require(path.startswith(prefix), 'Request outside report directory')
+        name = path[len(prefix):] or 'index.html'
         require(name in manifest['files'] and '/api/' not in target.path, 'Undeclared/API request: ' + name)
         names.append(name)
     if cold:
