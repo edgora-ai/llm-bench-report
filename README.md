@@ -1,6 +1,6 @@
 # 模型能力基准 · 一次会话评测
 
-固定任务、固定隔离环境下的模型一次会话完成度对比。
+2026-10-09 新增 Exo Free、Ling 3.1 Flash Free、Step 5 Preview Free 两题补测，共6项。没有完整可用交付：5项无输出文件，1项为残缺HTML。会话 completed 不代表作品通过。免费目录与实际可用性不同，实际计费未独立核实。保留历史日期快照，最新结果请查看首页。
 
 本仓库的报告由 `llm-bench` 发布步骤自动生成，报告为只读脱敏合并快照，不含凭据、原始日志或本机路径。源码与运行配置分开，私有配置、二进制和完整运行归档不上传。
 index.html 随发布更新。日期命名文件是首次创建时的合并数据副本，不是该日期专属数据；旧版文件保留原字节，不重新包装成日快照。
@@ -17,6 +17,7 @@ index.html 随发布更新。日期命名文件是首次创建时的合并数据
 - [2026-09-30](index.html?purpose=benchmark&date_from=2026-09-30&date_to=2026-09-30)
 - [2026-10-01](index.html?purpose=benchmark&date_from=2026-10-01&date_to=2026-10-01)
 - [2026-10-08](index.html?purpose=benchmark&date_from=2026-10-08&date_to=2026-10-08)
+- [2026-10-09](index.html?purpose=benchmark&date_from=2026-10-09&date_to=2026-10-09)
 
 ## 结果解释
 
