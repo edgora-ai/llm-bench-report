@@ -21,7 +21,7 @@ REQUIRED_FILES = (
     ".dockerignore", ".gitignore", "README.md", "pyproject.toml",
     "bench/tasks/blackhole.json", "bench/tasks/crocodile.json",
     "docs/methodology.md", "web/index.html", "web/app.js", "web/styles.css",
-    "web/preview-runtime.js",
+    "web/preview-runtime.js", "web/public-gallery.html", "web/public-gallery.css", "web/public-gallery.js",
     "containers/runtime.Dockerfile", "runtime/launch.py",
     "runtime/evaluate_worker.py", "config/bench.example.toml",
 )
@@ -29,7 +29,7 @@ OPTIONAL_HELPERS = (
     "publish.py", "make_snapshot.py", "dashboard_e2e.py", "evaluate_e2e.py",
     "gateway_e2e.py", "verify_archives.py", "reconcile_batches.py",
     "source_export.py", "verify_public_snapshot.py", "make_site.py", "make_originals.py",
-    "verify_preview_isolation.py", "verify_original_previews.py",
+    "verify_preview_isolation.py", "verify_original_previews.py", "make_gallery.py", "verify_public_gallery.py",
 )
 
 # Signature lengths distinguish real tokens from documented prefixes and

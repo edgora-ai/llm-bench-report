@@ -33,6 +33,8 @@ from make_originals import (FORMAT_V2, ORIGINAL_PATH, MAX_PACKAGE_BYTES, build_o
                             validate_original_descriptor, validate_original_package, validate_originals)
 
 FORMAT = "static-media-v1"
+FORMAT_V3 = "progressive-static-v3"
+VIEWER_PATH = re.compile(r"viewer/([a-f0-9]{64})\.(html|js)\Z")
 MANIFEST = ".report-manifest.json"
 MIME_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
                    "image/gif": "gif", "video/webm": "webm", "video/mp4": "mp4"}
@@ -401,15 +403,19 @@ def _file_info(payload, mime, role):
 def validate_manifest(manifest: dict) -> dict:
     """Validate the exact manifest schema and canonical content-addressed names."""
     _require(isinstance(manifest, dict) and set(manifest) == {"version", "format", "files", "stats"}, "invalid manifest fields")
-    _require(type(manifest["version"]) is int and (manifest["version"], manifest["format"]) in ((1, FORMAT), (2, FORMAT_V2)), "unsupported manifest version")
-    v2 = manifest["version"] == 2
+    _require(type(manifest["version"]) is int and (manifest["version"], manifest["format"]) in
+             ((1, FORMAT), (2, FORMAT_V2), (3, FORMAT_V3)), "unsupported manifest version")
+    v2 = manifest["version"] in {2, 3}
+    v3 = manifest["version"] == 3
     files = manifest["files"]
     _require(isinstance(files, dict) and {"index.html", "offline.html"} <= set(files), "missing entrypoint or offline file")
     for path, info in files.items():
         _relative(path)
         media = MEDIA_PATH.fullmatch(path)
         original = ORIGINAL_PATH.fullmatch(path) if v2 else None
-        _require(media is not None or original is not None or path in {"index.html", "offline.html"}, "unmanaged manifest file")
+        viewer = VIEWER_PATH.fullmatch(path) if v3 else None
+        _require(media is not None or original is not None or viewer is not None
+                 or path in {"index.html", "offline.html"}, "unmanaged manifest file")
         _require(isinstance(info, dict) and {"sha256", "mime", "size", "role"} <= set(info)
                  <= {"sha256", "mime", "size", "role", "width", "height"}, "invalid asset metadata")
         _require(isinstance(info["mime"], str) and isinstance(info["role"], str), "invalid MIME/role types")
@@ -428,14 +434,24 @@ def validate_manifest(manifest: dict) -> dict:
             _require(set(info) == {"sha256", "mime", "size", "role"} and info["sha256"] == original.group(1)
                      and info["mime"] == "application/json" and info["role"] == "original"
                      and info["size"] <= MAX_PACKAGE_BYTES, "invalid original metadata")
+        elif viewer:
+            mime, role = (("text/html", "viewer") if viewer.group(2) == "html"
+                          else ("text/javascript", "runtime"))
+            _require(set(info) == {"sha256", "mime", "size", "role"}
+                     and info["sha256"] == viewer.group(1) and info["mime"] == mime
+                     and info["role"] == role, "invalid viewer metadata")
         else:
             _require(info["mime"] == "text/html" and info["role"] == path.removesuffix(".html")
                      and "width" not in info, "invalid HTML metadata")
+    if v3:
+        _require(sum(info["role"] == "viewer" for info in files.values()) == 1
+                 and sum(info["role"] == "runtime" for info in files.values()) == 1,
+                 "v3 requires exactly one full viewer and one runtime")
     stats = manifest["stats"]
     stats_keys = STATS_KEYS | ({"original_packages", "original_bytes", "original_files"} if v2 else set())
     _require(isinstance(stats, dict) and set(stats) == stats_keys
              and all(type(value) is int and value >= 0 for value in stats.values()), "invalid manifest statistics")
-    _require(stats["index_bytes"] == files["index.html"]["size"] <= INDEX_BUDGET
+    _require(stats["index_bytes"] == files["index.html"]["size"] <= (100 * 1024 if v3 else INDEX_BUDGET)
              and stats["offline_bytes"] == files["offline.html"]["size"], "invalid HTML size statistics or entrypoint budget")
     return manifest
 
@@ -458,9 +474,14 @@ def _stats(data, files, packages=None):
     return result
 
 
-def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js", *, preview_runtime=None) -> dict:
+def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js", *, preview_runtime=None,
+                gallery_root=None, baseline_site=None) -> dict:
     """Verify a standalone bundle completely; extra files/directories fail closed."""
     manifest = validate_manifest(_json(read_asset_safe(directory, MANIFEST)))
+    if manifest["version"] == 3:
+        from make_gallery import verify_gallery
+        return verify_gallery(directory, manifest, viewer_script, preview_runtime=preview_runtime,
+                              root=gallery_root or ROOT, baseline_site=baseline_site)
     files, directories = _inventory(directory)
     expected_dirs = {"media"} if any(MEDIA_PATH.fullmatch(path) for path in manifest["files"]) else set()
     if any(ORIGINAL_PATH.fullmatch(path) for path in manifest["files"]):
@@ -475,6 +496,12 @@ def verify_site(directory: Path, viewer_script: Path = ROOT / "web/app.js", *, p
             _require(all(actual.get(key) == value for key, value in info.items() if key != "role"
                          and (key not in {"width", "height"} or key in actual)), "media metadata mismatch: " + path)
         payloads[path] = payload
+    return _verify_site_payloads(manifest, payloads, viewer_script, preview_runtime=preview_runtime)
+
+
+def _verify_site_payloads(manifest, payloads, viewer_script, *, preview_runtime=None):
+    """Shared strict v1/v2 semantic audit, also used for the embedded v3 viewer."""
+    _require(manifest["version"] in {1, 2}, "legacy payload audit requires v1/v2")
     data = audit_snapshot(payloads["index.html"].decode("utf-8"), viewer_script, static=True, preview_runtime=preview_runtime)
     offline = audit_snapshot(payloads["offline.html"].decode("utf-8"), viewer_script, preview_runtime=preview_runtime)
     _require(data.get("format") == manifest["format"], "manifest/report format mismatch")
@@ -571,14 +598,14 @@ def build_site(snapshot: Path, destination: Path, input_viewer: Path, root: Path
     return _write_site_payloads(destination, payloads, manifest, viewer)
 
 
-def _write_site_payloads(destination, payloads, manifest, viewer):
+def _write_site_payloads(destination, payloads, manifest, viewer, *, preview_runtime=None, gallery_root=None):
     destination = Path(destination)
     _relative(destination.name)
     with _directory(destination.parent) as parent:
         if destination.exists() or destination.is_symlink():
             old_files, old_dirs = _inventory(destination)
             if old_files or old_dirs:
-                verify_site(destination, viewer)
+                verify_site(destination, viewer, preview_runtime=preview_runtime, gallery_root=gallery_root)
                 _require(old_files == set(payloads) and all(read_asset_safe(destination, path) == payload for path, payload in payloads.items()),
                          "destination is not byte-identical; use an empty directory")
                 return dict(manifest["stats"])
@@ -589,7 +616,7 @@ def _write_site_payloads(destination, payloads, manifest, viewer):
             stage_fd = os.open(stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             children = {}
             try:
-                for folder in ("media", "originals"):
+                for folder in ("media", "originals", "viewer"):
                     if any(path.startswith(folder + "/") for path in payloads):
                         os.mkdir(folder, dir_fd=stage_fd)
                         children[folder] = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=stage_fd)
@@ -603,7 +630,8 @@ def _write_site_payloads(destination, payloads, manifest, viewer):
                 for child_fd in children.values():
                     os.close(child_fd)
                 os.close(stage_fd)
-            verify_site(destination.parent / stage_name, viewer)
+            verify_site(destination.parent / stage_name, viewer, preview_runtime=preview_runtime,
+                        gallery_root=gallery_root)
             # Directory-relative rename cannot follow a swapped parent symlink or
             # replace a populated directory. Never merge/take over existing files.
             os.rename(stage_name, destination.name, src_dir_fd=parent, dst_dir_fd=parent)

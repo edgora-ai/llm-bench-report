@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>模型实验台</title>
+  <style>{{PUBLIC_CSS}}</style>
+</head>
+<body class="public-gallery">
+  <a class="skip-link" href="#public-grid">跳到作品</a>
+  <header class="public-header">
+    <a class="public-brand" href="#gallery">模型实验台</a>
+    <div class="public-header-actions"><button data-full-view="evidence" class="text-button">完整记录</button><button id="public-theme" class="theme-button" aria-label="切换明暗主题">明 / 暗</button></div>
+  </header>
+  <main class="public-main">
+    <section class="gallery-intro" aria-labelledby="gallery-title"><div><p class="section-label">同题 · 逐次交付</p><h1 id="gallery-title">作品，直接对照。</h1></div><p class="intro-note">先看交付，再看条件。<br>截图非实时；点击运行原作。</p></section>
+    <div class="gallery-controls">
+    <nav id="public-task-tabs" class="public-task-tabs" role="tablist" aria-label="选择任务">{{TASK_TABS}}</nav>
+    <div class="gallery-tools">
+      <label class="model-search"><span>查找模型</span><input id="public-model" type="search" placeholder="输入模型名称" autocomplete="off"></label>
+      <label class="purpose-control"><span>运行用途</span><select id="public-purpose"><option value="benchmark">主评测</option><option value="smoke">冒烟测试</option><option value="">全部用途</option></select></label>
+      <button class="filter-button" data-full-view="gallery">更多筛选 <span aria-hidden="true">↗</span></button>
+    </div>
+    </div>
+    <div class="gallery-heading"><p id="public-result-label" aria-live="polite">{{GALLERY_COUNT}}</p><span class="evidence-label">截图采样 · 非实时</span></div>
+    <p id="public-notice" class="public-notice" role="status" hidden></p>
+    <section id="public-grid" class="public-grid" aria-label="逐次作品" tabindex="-1">{{GALLERY_CARDS}}</section>
+    <nav id="public-pages" class="public-pages" aria-label="作品分页"></nav>
+    <details id="public-history" class="public-history" hidden><summary id="public-history-label">无媒体记录</summary><div id="public-history-list"></div></details>
+    <section class="more-evidence" aria-label="进一步检查实验"><div><h2>完整实验记录</h2><p>全部 {{GALLERY_TOTAL}} 次尝试，包括失败、重复和未评分记录。</p></div><nav><button data-full-view="matrix">结果总览 <span aria-hidden="true">↗</span></button><button data-full-view="batch">成本与耗时 <span aria-hidden="true">↗</span></button><button data-full-view="evidence">完整记录 <span aria-hidden="true">↗</span></button></nav></section>
+  </main>
+  <footer class="public-footer"><span>固定任务 · 不挑最佳 · 既有 AI 建议仍待人工复核</span><a id="public-offline" download="offline.html">离线完整版 <span>约 41MB</span></a></footer>
+  <aside id="public-selection" class="public-selection" aria-label="已选比较对象" hidden><div><strong id="public-selection-label"></strong><p id="public-selection-names"></p><label class="public-mixed-label"><input id="public-mixed" type="checkbox">允许同题跨条件对照（条件见对照页）</label></div><div class="selection-actions"><button id="public-clear">清空</button><button id="public-compare" class="primary">并排对照</button></div></aside>
+  <dialog id="public-zoom" class="public-zoom" aria-labelledby="public-zoom-title"><div class="public-dialog-heading"><h2 id="public-zoom-title">采样截图</h2><button data-public-close="public-zoom" aria-label="关闭放大图像">关闭 ×</button></div><p id="public-zoom-state" role="status"></p><img id="public-zoom-image" alt=""><p class="dialog-footnote">历史采样截图，不是当前浏览器的实时原作。</p></dialog>
+  <dialog id="original-dialog" class="public-original" aria-labelledby="original-title"><div class="public-dialog-heading"><div><p class="section-label">真实原作 · 当前浏览器</p><h2 id="original-title">原作实时预览</h2></div><button data-public-close="original-dialog" aria-label="关闭实时原作">关闭 ×</button></div><div id="original-content"></div></dialog>
+  <noscript><p class="public-noscript">截图装载、任务切换及原作运行需要 JavaScript；离线完整版包含全部记录。</p></noscript>
+  <script>window.BENCH_GALLERY={{GALLERY_SEED}};</script>
+  <script>{{PUBLIC_JS}}</script>
+</body>
+</html>

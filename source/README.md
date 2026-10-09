@@ -81,13 +81,28 @@ python3 -m bench.cli stop <job-id>  # 先保存取消意图，再发出SIGINT，
 
 默认比较 `benchmark`，冒烟和测试fixture不混榜。先在“用途”选择smoke可查看环境联调尝试。**CLI正常退出不等于任务完成**；自动检查与视觉评分分开，未评分显示待评。视频是会话结束后在隔离浏览器录制的画面，不是实时原作。评估器自身超时或崩溃记为 `infrastructure_error`，不折算成产物失败；检查集缺失时看板不显示为「全部通过」。本地认证看板保持HTML/SVG附件下载及原有安全头，实时预览通过导出的v2报告使用。
 
-`artifacts/observatory.html`（或明确指定的版本文件）是自包含、无API、不可写入的脱敏快照。GitHub Pages使用轻量多文件版：元数据和可信查看器内联，缩略图按视口加载，全尺寸截图和录像由操作触发；`offline.html` 保留可下载的单文件完整版。两版run数据与完整媒体派生字节一致，缩略图是额外派生，不修改归档。公开媒体经过压缩，部分录像裁掉无内容边缘，不等于档案原始像素。
+`artifacts/observatory.html`（或明确指定的版本文件）是自包含、无API、不可写入的脱敏快照。GitHub Pages使用 `progressive-static-v3` 作品画廊：首屏内联58次尝试的精简索引和画廊程序，桌面先读两张缩略图、手机一张。任务、用途、模型名称查找和放大截图不下载完整实验台；点击原作才以SRI装载可信运行器，再读取所选原作包。完整记录、复杂筛选、成本、矩阵和高级比较由明确操作一次装载经过大小及SHA-256校验的完整v2文档。`offline.html` 保留字节不变的单文件完整版。两版run数据与完整媒体派生字节一致，缩略图是额外派生，不修改归档。公开媒体经过压缩，部分录像裁掉无内容边缘，不等于档案原始像素。
 
 在线浏览和分享请使用轻量首页；按日期分享用首页筛选链接（例如 `?date_from=2026-10-08&date_to=2026-10-08`），不要把约41MB的日期存档或离线文件当在线入口。静态报告复用筛选和证据的派生数据，收起的无媒体历史在展开时创建卡片；手机媒体对比只装载当前A/B列的大图，另一列切换后再读取，所有尝试和证据仍保留。
 
-2026-10-09 同条件 Chromium 新旧v2对照：真实gzip HTTP、冷缓存、每组3次取中位数。首屏DOM节点814→590；1.6Mbps／150ms／4倍CPU节流下，桌面和手机搜索处理至绘制分别60.7→47.3ms、64.4→49.3ms，另有两版共同的250ms输入防抖。普通网络筛选约37–40ms，没有稳定提速；首页可交互时间在各组约0.30–1.43s，没有稳定的大幅改善。本地节流测试不包含用户到GitHub的真实网络等待，不代表其实际加载时间。可用 `verify_public_snapshot.py --performance-only --baseline-site ... --baseline-viewer-script ...` 复测，旧查看器须独立保存。
+上一轮（2026-10-09）同条件 Chromium 新旧v2对照：真实gzip HTTP、冷缓存、每组3次取中位数。首屏DOM节点814→590；1.6Mbps／150ms／4倍CPU节流下，桌面和手机搜索处理至绘制分别60.7→47.3ms、64.4→49.3ms，另有两版共同的250ms输入防抖。普通网络筛选约37–40ms，没有稳定提速；首页可交互时间在各组约0.30–1.43s，没有稳定的大幅改善。本地节流测试不包含用户到GitHub的真实网络等待，不代表其实际加载时间。可用 `verify_public_snapshot.py --performance-only --baseline-site ... --baseline-viewer-script ...` 复测，旧查看器须独立保存。
 
-v2作品卡的“运行原作”会在校验包及逐文件SHA-256后启动真实HTML/SVG/Canvas/WebGL。原件字节保持不变；执行文档只增加隔离前缀，并将已登记本地JS/CSS引用适配为携带原字节的data URL，保留脚本顺序和defer。截图、录像、实时原作是独立模式；原作缺文件或报错不会被补齐、改写成成功或偷偷替换成录像。失败但有交付的attempt同样保留。
+### 本轮作品画廊实测（2026-10-09）
+
+以已部署的 `9ca0695` 为基线，Chromium、真实gzip level 6 HTTP，桌面1440×900／手机400×850，每组新旧交替3次冷缓存取中位数。首页解压后590,974→101,589 bytes，gzip 113,907→25,596 bytes；含首屏缩略图的传输量，桌面147,783→59,472 bytes，手机131,300→42,989 bytes；首屏DOM节点590→226。
+
+| 网络与设备 | 第一张真实作品可见：旧→新 | 画廊内容与基础控件就绪：旧→新 | 实际任务切换至绘制：旧→新 |
+| --- | --- | --- | --- |
+| 20Mbps／40ms，桌面 | 262.0→136.5ms | 176.4→104.4ms | 62.7→46.6ms |
+| 20Mbps／40ms，手机 | 265.2→126.5ms | 179.9→99.9ms | 62.8→46.9ms |
+| 1.6Mbps／150ms／4倍CPU，桌面 | 1438.0→732.6ms | 1050.3→417.5ms | 168.5→87.6ms |
+| 1.6Mbps／150ms／4倍CPU，手机 | 1336.0→648.6ms | 1022.1→408.0ms | 165.9→86.0ms |
+
+按需装载有额外等待：明确点击原作至运行器装载，普通桌面／手机165.5／151.5→210.6／214.7ms，慢速946.1／877.0→1171.0／1171.9ms。明确进入完整查看器至就绪，普通桌面／手机82.1／65.1→691.1／283.0ms，慢速339.6／320.7→1224.2／1217.2ms；旧版此前已在首页下载并初始化完整查看器。第一次立即进入高级记录的路径因此可能更慢，不能称所有路径均提速。基础筛选与截图放大不产生此请求，单作也不先加载完整版。原作装载时间不是画面运动证明；另以真实Canvas像素变化验证了运动和桌面／手机视口。
+
+测量中的 `interactive_ms` 含人为等待network-idle及后续任务点击，不作为最早可交互时间或正式TTI。以上为本地节流对照，不代表用户到GitHub的真实路由／TTFB。双作独立控件、RAF-SVG属性推进／暂停、CSS动画推进／暂停及手机A/B生命周期通过；本环境双作像素截图超时，未宣称双作像素验证通过，也未重复35原作×3浏览器矩阵。
+
+公开作品卡的“运行原作”会在校验包及逐文件SHA-256后启动真实HTML/SVG/Canvas/WebGL。原件字节保持不变；执行文档只增加隔离前缀，并将已登记本地JS/CSS引用适配为携带原字节的data URL，保留脚本顺序和defer。截图、录像、实时原作是独立模式；原作缺文件或报错不会被补齐、改写成成功或偷偷替换成录像。失败但有交付的attempt同样保留。
 
 单作预览及两份原作比较均需明确启动；手机仅运行可见列，关闭或切换销毁实例。原作在双层不透明源沙箱中执行，不进入主站DOM，不获得报告存储、认证或任意网络代理；下载、全屏和部分浏览器功能受限。浏览器策略不等于容器级断网，不能保证WebRTC/DNS等所有通道或硬CPU/内存/GPU配额。运行环境是访问者的浏览器，实际视口和缩放单独显示，不保证与历史评估像素、性能或动画进度一致。“已装载”也不是新的验收结论。
 
@@ -151,9 +166,23 @@ python3 tests/publish.py artifacts/site-originals --include-source --dry-run
 python3 tests/publish.py artifacts/site-originals --include-source
 ```
 
+已经完整验收的v2包可无损派生新画廊，不再次读取归档或重建原作：
+
+```bash
+python3 tests/make_gallery.py --help
+python3 tests/make_gallery.py artifacts/site-originals artifacts/site-gallery \
+  --input-viewer artifacts/share.viewer.js --input-runtime artifacts/share.preview-runtime.js
+python3 tests/verify_public_gallery.py --help
+# 单独执行 --audit-only、--performance-only、--ux-only、--original-smoke；
+# 独立保存旧site和匹配的可信web/app.js、preview-runtime.js及基线锁。
+python3 tests/publish.py artifacts/site-gallery --include-source --dry-run
+```
+
+完整文档和SDK在 `viewer/<sha256>.html`／`.js`。这些路径是画廊校验后加载的资源，不是可直接导航的报告入口；请分享根首页。旧v1/v2校验分支仍独立严格，v3的离线文件仍使用既有v2合同。公开验收脚本不重建候选；使用真实gzip HTTP，不拦截网络、替换API或把空壳FCP当成作品可见。额外测试依赖安装到独立临时环境，不修改冻结镜像。
+
 审核JSON结构为`{version: 1, reviewer: "assistant", files: {"run-id/index.html": {sha256, decision: "include"或"withhold", reviewed_full: true, reason}}}`，文件名相对于各自output目录。只为确实全文审阅且摘要一致的文件登记`reviewed_full`；缺失审核的原作保留未审核状态，不公开。缺依赖是交付完整性问题，不自动等于隐私拒绝。升级v2输入时另传与输入匹配的`--input-runtime`；公开源码副本没有私有归档或该审核文件，不能凭空恢复这一步。
 
-`.report-manifest.json` 记录当前报告的精确文件/hash/MIME/大小。`media/` 只放内容寻址的栅格图和录像，v2的`originals/`只放已审核原作的内容寻址JSON；原作源码不作为同源裸HTML发布。`.report-assets.json` 是追加式资源所有权账本，v1仅管理媒体，v2无损继承旧媒体并追加原作包。修改或缺失的已管理文件、未知媒体/原作或符号链接均阻止发布，不自动接管、删除或覆盖；不自动降级v2报告。已有日期HTML保持原字节，不会自动获得实时预览；最新首页按日期筛选可使用新能力。新日期副本来自自包含offline文件，不来自轻量index；日期文件仍是历史合并副本，不是假装的单日数据集。
+`.report-manifest.json` 记录当前报告的精确文件/hash/MIME/大小。`media/` 只放内容寻址的栅格图和录像，v2的`originals/`只放已审核原作的内容寻址JSON；原作源码不作为同源裸HTML发布。`.report-assets.json` 是追加式资源所有权账本，v1仅管理媒体，v2无损继承旧媒体并追加原作包，v3继续保留全部旧资源并追加两个可信 `viewer/` 资源。修改或缺失的已管理文件、未知媒体/原作/查看器或符号链接均阻止发布，不自动接管、删除或覆盖；禁止版本降级。已有日期HTML保持原字节，不会自动获得实时预览；最新首页按日期筛选可使用新能力。新日期副本来自自包含offline文件，不来自轻量index；日期文件仍是历史合并副本，不是假装的单日数据集。
 
 当前发布验收器支持 `python3 tests/verify_public_snapshot.py --help` 和 `--site artifacts/site --output /tmp/report-check`；需要原生Python Playwright与已安装的Chromium，可使用现有隔离runtime镜像执行。它先检查冷缓存首屏请求预算，再进行全图片解码及指定录像播放，两阶段分别统计。历史对照可显式传入 `--baseline-snapshot` 与对应 `--baseline-viewer-script`，不把不同时代的查看器混为一谈。
 

@@ -24,7 +24,8 @@ REPORT_MANIFEST = ".report-manifest.json"
 REPORT_ASSETS = ".report-assets.json"
 MEDIA_PATH = re.compile(r"media/([a-f0-9]{64})\.(?:jpg|png|webp|gif|webm|mp4)\Z")
 ORIGINAL_PATH = re.compile(r"originals/([a-f0-9]{64})\.json\Z")
-ASSET_DIRECTORIES = ("media", "originals")
+VIEWER_PATH = re.compile(r"viewer/([a-f0-9]{64})\.(?:html|js)\Z")
+ASSET_DIRECTORIES = ("media", "originals", "viewer")
 
 
 def verify(html: str) -> dict:
@@ -156,13 +157,15 @@ def asset_digest(relative, version):
     if not isinstance(relative, str):
         return None
     match = MEDIA_PATH.fullmatch(relative)
-    if match is None and version == 2:
+    if match is None and version in {2, 3}:
         match = ORIGINAL_PATH.fullmatch(relative)
+    if match is None and version == 3:
+        match = VIEWER_PATH.fullmatch(relative)
     return match.group(1) if match else None
 
 
 def owned_media(repo, previous):
-    """Validate v1 media or v2 media/original ownership before adding assets."""
+    """Validate append-only ownership: v1 media, v2 originals, v3 viewer roles."""
     from make_site import _json, read_asset_safe
 
     ledger_path = repo / REPORT_ASSETS
@@ -172,7 +175,7 @@ def owned_media(repo, previous):
             raise RuntimeError("Media ownership ledger has no current report manifest")
         ledger = _json(read_asset_safe(repo, REPORT_ASSETS))
         if (not isinstance(ledger, dict) or set(ledger) != {"version", "sha256"}
-                or type(ledger["version"]) is not int or ledger["version"] not in {1, 2}
+                or type(ledger["version"]) is not int or ledger["version"] not in {1, 2, 3}
                 or ledger["version"] != previous["version"]
                 or not isinstance(ledger["sha256"], dict)):
             raise RuntimeError("Invalid media ownership ledger")
@@ -194,6 +197,8 @@ def owned_media(repo, previous):
         if directory.exists() or directory.is_symlink():
             if directory.is_symlink() or not directory.is_dir():
                 raise RuntimeError("Unsafe " + namespace + " destination")
+            if namespace == "viewer" and (previous is None or previous["version"] < 3):
+                raise RuntimeError("Unmanaged viewer destination")
             for path in directory.iterdir():
                 relative = namespace + "/" + path.name
                 if relative not in hashes:
