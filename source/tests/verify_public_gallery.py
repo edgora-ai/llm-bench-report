@@ -61,6 +61,7 @@ def arguments(argv=None):
     p.add_argument('--baseline-site', required=True, type=Path, help='Frozen original v2 bundle')
     p.add_argument('--trust-root', required=True, type=Path, help='Frozen independent baseline checkout, not candidate site')
     p.add_argument('--baseline-lock', type=Path, default=Path('/tmp/bench-gallery-baseline.json'))
+    p.add_argument('--new-v2-baseline-lock', type=Path, help='Explicit independently supplied JSON {index_sha256, manifest_sha256}; overrides only v2 data pins, never frozen programs or budgets')
     p.add_argument('--gallery-bootstrap', type=Path, default=ROOT / 'web/public-gallery.js')
     p.add_argument('--gallery-css', type=Path, default=ROOT / 'web/public-gallery.css')
     p.add_argument('--output', required=True, type=Path, help='Dedicated writable receipt/screenshots directory outside source and bundles')
@@ -74,9 +75,10 @@ def arguments(argv=None):
     p.add_argument('--expected-runs', type=int, default=58)
     p.add_argument('--expected-benchmark', type=int, default=35)
     p.add_argument('--expected-reviews', type=int, default=14)
+    p.add_argument('--expected-latest-runs', type=int, default=0, help='Latest-per-triple card census; 0 means derive from candidate seed')
     a = p.parse_args(argv)
     require(a.timeout_ms > 0, 'Timeout must be positive')
-    require(a.expected_runs > 0 and a.expected_benchmark >= 0 and a.expected_reviews >= 0, 'Invalid census')
+    require(a.expected_runs > 0 and a.expected_benchmark >= 0 and a.expected_reviews >= 0 and a.expected_latest_runs >= 0, 'Invalid census')
     for name in ('site', 'baseline_site', 'trust_root'):
         path = getattr(a, name).resolve(strict=True)
         require(path.is_dir(), name + ' must be a directory')
@@ -231,8 +233,25 @@ def project_runs(data):
                      'status': r.get('generation_status') or r.get('status') or 'unknown', 'entry_status': entry_status(r),
                      'evaluation_status': (r.get('evaluation') or {}).get('status') or 'unknown',
                      'registered_media': any(key in data['evidence'] for key in keys),
-                     'image': image, 'original': data['originals'][r['id']]})
-    return sorted(rows, key=lambda r: (r['tool'], r['model'], r['started_at'] or r['date'] or '', r['id']))
+                     'image': image, 'original': data['originals'][r['id']], 'history_count': 0})
+    ordered = sorted(rows, key=lambda r: (r['tool'], r['model'], r['task_id'] or '', r['started_at'] or r['date'] or '', r['id']))
+    latest = {}
+    for index, row in enumerate(ordered):
+        latest[(row['tool'], row['model'], row['task_id'] or '')] = index
+    for key, index in latest.items():
+        ordered[index]['history_count'] = sum(1 for row in ordered if (row['tool'], row['model'], row['task_id'] or '') == key) - 1
+    selected = [ordered[index] for index in sorted(latest.values())]
+    return sorted(selected, key=lambda r: (r['tool'], r['model'], r['started_at'] or r['date'] or '', r['id']))
+
+
+def full_history_ids(data):
+    """Exact full-run IDs that are NOT the latest attempt for their (tool, model, task) triple."""
+    ordered = sorted(data['runs'], key=lambda r: (r.get('tool') or 'unknown', r.get('model') or 'unknown',
+                                                  r.get('task_id') or '', r.get('started_at') or r.get('date') or '', r['id']))
+    latest_ids = {}
+    for r in ordered:
+        latest_ids[(r.get('tool') or 'unknown', r.get('model') or 'unknown', r.get('task_id') or '')] = r['id']
+    return [r['id'] for r in ordered if latest_ids[(r.get('tool') or 'unknown', r.get('model') or 'unknown', r.get('task_id') or '')] != r['id']]
 
 
 def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_program):
@@ -246,7 +265,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(parsed.scripts[1].strip() == bootstrap.strip() and parsed.styles[0].strip() == css.strip(), 'Gallery executable/style differs from trusted source')
     require(set(seed) == {'version', 'format', 'tasks', 'runs', 'defaults', 'counts', 'full', 'runtime', 'offline'}, 'Gallery seed schema')
     require(type(seed['version']) is int and seed['version'] == 3 and seed['format'] == 'progressive-static-v3', 'Gallery version/profile')
-    require(same(seed['runs'], project_runs(data)), 'Exact all-run projection/order differs')
+    require(same(seed['runs'], project_runs(data)), 'Exact latest-per-triple projection/order differs')
     tasks = {t['id']: {'id': t['id'], 'name': t.get('name') or t['id']} for t in data['tasks']}
     for row in data['runs']:
         if row.get('task_id') and row['task_id'] not in tasks:
@@ -255,7 +274,9 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(seed['tasks'] == ordered_tasks, 'Task metadata differs')
     default_task = 'crocodile' if any(t['id'] == 'crocodile' for t in data['tasks']) else data['tasks'][0]['id']
     require(same(seed['defaults'], {'task_id': default_task, 'purpose': 'benchmark', 'page_size': 8}), 'Defaults differ')
-    require(same(seed['counts'], {'runs': len(data['runs']), 'benchmark': sum(r.get('purpose') == 'benchmark' for r in data['runs']),
+    require(same(seed['counts'], {'runs': len(seed['runs']), 'full_runs': len(data['runs']),
+                              'benchmark': sum(r.get('purpose') == 'benchmark' for r in seed['runs']),
+                              'full_benchmark': sum(r.get('purpose') == 'benchmark' for r in data['runs']),
                               'reviews': sum(len(r.get('reviews') or []) for r in data['runs'])}), 'Gallery counts differ')
     require(same(seed['offline'], data['offline']), 'Offline descriptor changed')
     require(same(seed['full'], {**full_info, 'script_sha256': digest(trusted_program)}), 'Full viewer descriptor differs')
@@ -280,11 +301,35 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     return seed
 
 
+def baseline_data_pins(args):
+    path = getattr(args, 'new_v2_baseline_lock', None)
+    if path is None:
+        return FROZEN_INDEX_SHA, FROZEN_MANIFEST_SHA
+    path = path.resolve(strict=True)
+    require(all(not path.is_relative_to(root.resolve()) for root in (args.site, args.baseline_site)),
+            'Independent v2 data lock must be outside candidate and baseline bundles')
+    require(path.stat().st_size <= 4096, 'Independent v2 data lock too large')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'Duplicate independent v2 data lock key')
+            result[key] = value
+        return result
+    pins = json.loads(path.read_text(), object_pairs_hook=unique)
+    require(isinstance(pins, dict) and set(pins) == {'index_sha256', 'manifest_sha256'} and
+            all(isinstance(value, str) and SHA.fullmatch(value) for value in pins.values()),
+            'Independent v2 data lock schema')
+    return pins['index_sha256'], pins['manifest_sha256']
+
+
 def load_sources(args, report):
     lock = json.loads(args.baseline_lock.read_text())
     require(all(lock['sha256'].get(path) == sha for path, sha in FROZEN_PROGRAMS.items()), 'Independent frozen program lock differs')
-    require(digest(safe_read(args.baseline_site, MANIFEST)) == FROZEN_MANIFEST_SHA and
-            digest(safe_read(args.baseline_site, 'index.html')) == FROZEN_INDEX_SHA, 'Wrong frozen baseline bundle')
+    index_sha, manifest_sha = baseline_data_pins(args)
+    require(digest(safe_read(args.baseline_site, MANIFEST)) == manifest_sha and
+            digest(safe_read(args.baseline_site, 'index.html')) == index_sha, 'Wrong frozen/explicitly locked baseline bundle')
+    report['baseline_data_lock'] = {'mode': 'explicit-new-v2' if getattr(args, 'new_v2_baseline_lock', None) else 'frozen-default',
+                                    'index_sha256': index_sha, 'manifest_sha256': manifest_sha}
     for relative, expected in lock['sha256'].items():
         require(digest(safe_read(args.trust_root, relative)) == expected, 'Frozen trust bytes differ: ' + relative)
     require(digest(Path(v2.__file__).read_bytes()) == lock['sha256']['tests/verify_public_snapshot.py'], 'Imported v2 helper differs from frozen trust')
@@ -540,10 +585,13 @@ def baseline_sample(browser, url, sources, args, profile, viewport, repeat):
         require(metrics['scroll_x'] == 0 and metrics['scroll_y'] == 0, 'Frozen first-image measurement scrolled')
         target = next(t['id'] for t in sources['seed']['tasks'] if t['id'] != sources['seed']['defaults']['task_id'] and
                       any(r['task_id'] == t['id'] and r['purpose'] == 'benchmark' and r['registered_media'] for r in sources['seed']['runs']))
-        expected = {r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']}
+        # Latest-only seed pages the gallery at 8 cards; the frozen full
+        # snapshot can show more. Require the latest projected IDs to appear
+        # without requiring an exact full-history census.
+        expected = [r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']][:8]
         control = page.locator(f'#task-tabs button[data-task-id="{target}"]')
         click_clock(control, page)
-        page.wait_for_function('ids=>{let actual=[...document.querySelectorAll(".gallery-main .evidence-card[data-run-id], .model-groups .evidence-card[data-run-id]")].map(e=>e.dataset.runId);return actual.length===ids.length&&actual.every(id=>ids.includes(id));}', arg=sorted(expected))
+        page.wait_for_function('ids=>{let actual=new Set([...document.querySelectorAll(".gallery-main .evidence-card[data-run-id], .model-groups .evidence-card[data-run-id]")].map(e=>e.dataset.runId));return ids.every(id=>actual.has(id));}', arg=expected)
         interactive = two_frames(page)
         task_ms = page.evaluate('performance.now()-window.__explicitClick')
         require(control.get_attribute('aria-pressed') == 'true', 'Frozen task click did not update state')
@@ -717,8 +765,11 @@ def gallery_ux(browser, url, sources, args, report):
     checks = report['ux'] = {'coverage': [], 'checks': []}
     try:
         # Exact IDs across tasks, purpose filters, pages and expanded no-media
-        # history. A count of 58 alone cannot prove that a dropped run is present.
+        # history. A count alone cannot prove that a dropped run is present.
+        # Latest-only seed cards must still be reachable; non-latest siblings
+        # live only in the trusted full viewer.
         seen = set()
+        latest_ids = {r['id'] for r in seed['runs']}
         purposes = sorted({r['purpose'] for r in seed['runs']})
         for task in seed['tasks']:
             for purpose in purposes:
@@ -744,12 +795,68 @@ def gallery_ux(browser, url, sources, args, report):
                 require(actual == media and actual_history == history, 'Exact task/purpose/page/history IDs differ')
                 seen.update(actual + actual_history)
                 checks['coverage'].append({'task': task['id'], 'purpose': purpose, 'media_ids': actual, 'history_ids': actual_history})
-        require(seen == {r['id'] for r in seed['runs']} and len(seen) == args.expected_runs, 'UX cannot reach all exact projection IDs')
+        expected_latest = args.expected_latest_runs or len(latest_ids)
+        require(args.expected_latest_runs == 0 or len(latest_ids) == args.expected_latest_runs,
+                'Latest projection census differs from --expected-latest-runs')
+        require(len(latest_ids) <= args.expected_runs, 'Latest projection cannot exceed full frozen census')
+        require(seen == latest_ids and len(seen) == expected_latest, 'UX cannot reach all exact latest projection IDs')
+        require(latest_ids <= {r['id'] for r in seed['runs']}, 'Non-latest run leaked into public seed')
+        history_ids = full_history_ids(sources['data'])
+        require(not (set(history_ids) & latest_ids), 'Latest IDs must not be listed as history')
         no_full(requests, seed)
-        checks['checks'].append('exact all-58 IDs through tasks/purposes/pages/collapsed history')
+        checks['checks'].append('exact latest-per-triple IDs through tasks/purposes/pages/collapsed no-media history')
+
+        # Detail handoff must load the trusted full viewer and surface exact
+        # run ids for the latest card plus a same-purpose non-latest sibling
+        # that is absent from the public seed. Smoke history cannot appear
+        # under the full viewer's default benchmark purpose filter.
+        require(history_ids, 'Need at least one non-latest attempt for detail history proof')
+        by_id = {r['id']: r for r in sources['data']['runs']}
+        triples = {}
+        for run in sources['data']['runs']:
+            key = (run.get('tool') or 'unknown', run.get('model') or 'unknown', run.get('task_id') or '')
+            triples.setdefault(key, []).append(run)
+        pairs = []
+        for history_id in history_ids:
+            run = by_id[history_id]
+            key = (run.get('tool') or 'unknown', run.get('model') or 'unknown', run.get('task_id') or '')
+            ordered = sorted(triples[key], key=lambda r: (r.get('started_at') or r.get('date') or '', r['id']))
+            latest = ordered[-1]
+            if latest.get('purpose') != run.get('purpose'):
+                continue
+            seed_latest = next((r for r in seed['runs'] if r['id'] == latest['id']), None)
+            if not seed_latest or not seed_latest.get('registered_media'):
+                continue
+            for sibling in ordered[:-1]:
+                if sibling.get('purpose') == latest.get('purpose') and sibling['id'] != history_id:
+                    pairs.append((history_id, sibling['id'], latest))
+        require(pairs, 'Need a same-purpose non-latest sibling for detail history proof')
+        history_sample, sibling_id, latest_for_triple = pairs[0]
+        page.goto(url, wait_until='networkidle')
+        public_ready(page)
+        page.locator(f'[data-detail-run="{latest_for_triple["id"]}"]').first.click()
+        full_ready(page)
+        page.wait_for_function("""expected => {
+          const ids = [...new Set([...document.querySelectorAll('[data-run-id]')].map(e => e.dataset.runId).filter(Boolean))];
+          return expected.every(id => ids.includes(id));
+        }""", arg=[latest_for_triple['id'], sibling_id])
+        seen_full = page.locator('[data-run-id]').evaluate_all(
+            'es=>[...new Set(es.map(e=>e.dataset.runId).filter(Boolean))]')
+        require(latest_for_triple['id'] in seen_full, 'Detail handoff did not surface latest run ID in full viewer')
+        require(sibling_id in seen_full, 'Detail handoff did not surface non-latest history run ID in full viewer')
+        require(history_sample in seen_full or sibling_id in seen_full,
+                'Detail handoff did not surface exact run IDs in full viewer')
+        checks['checks'].append('detail handoff loads full viewer with non-latest history ID')
+        # The detail handoff is allowed one full-viewer fetch; do not call
+        # no_full(requests, seed) here.
 
         default = [r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == 'benchmark' and r['registered_media']]
         first = next(r for r in default if r['image'])
+        # Detail handoff replaced the light gallery DOM with the full viewer
+        # and fetched the full document. Reuse the same page request ledger,
+        # hard-navigate back to the light shell, and require that later
+        # lightweight interactions add no further full-viewer requests.
+        full_before_zoom = sum(1 for r in requests if urlsplit(r['url']).path.endswith('/' + seed['full']['path']))
         page.goto(url, wait_until='networkidle')
         public_ready(page)
         page.locator('#public-model').fill(first['model'])
@@ -759,7 +866,8 @@ def gallery_ux(browser, url, sources, args, report):
         page.wait_for_function('document.querySelector("#public-zoom-image").complete&&document.querySelector("#public-zoom-image").naturalWidth>0')
         require(page.locator('#public-zoom-image').get_attribute('src') == first['image']['full'], 'Basic zoom image mapping differs')
         page.locator('[data-public-close="public-zoom"]').click()
-        no_full(requests, seed)
+        full_after_zoom = sum(1 for r in requests if urlsplit(r['url']).path.endswith('/' + seed['full']['path']))
+        require(full_after_zoom == full_before_zoom, 'Basic gallery interaction fetched full viewer')
         checks['checks'].append('basic model filtering and real full-image zoom without full viewer')
         for r in seed['runs']:
             if r['registered_media'] and (not r['image'] or r['original']['status'] not in ('ready', 'missing_dependencies')):
@@ -960,6 +1068,34 @@ def wait_public_loaded(page, run_id):
     return inner
 
 
+def _bound_screenshot(originals):
+    """Keep frozen original helpers; only raise the page screenshot bound."""
+    def screenshot(page, frame, path):
+        import inspect
+        kwargs = {'path': str(path), 'animations': 'allow'}
+        if 'timeout' in inspect.signature(page.screenshot).parameters:
+            kwargs['timeout'] = 120000
+        if frame == page.main_frame:
+            return page.screenshot(**kwargs)
+        element = frame.frame_element()
+        element.evaluate('e=>e.scrollIntoView({block:"center",inline:"center"})')
+        box = element.bounding_box()
+        require(box is not None, 'Original frame has no visible rectangle')
+        size = page.viewport_size
+        x, y = max(0, box['x']), max(0, box['y'])
+        width = min(box['x'] + box['width'], size['width']) - x
+        height = min(box['y'] + box['height'], size['height']) - y
+        require(width > 20 and height > 20, 'Original frame clipped to an unobservable rectangle')
+        from PIL import Image
+        import io
+        image = Image.open(io.BytesIO(page.screenshot(animations='allow', timeout=120000)))
+        image = image.crop((round(x), round(y), round(x + width), round(y + height)))
+        buffer = io.BytesIO(); image.save(buffer, format='PNG'); raw = buffer.getvalue()
+        Path(path).write_bytes(raw)
+        return raw
+    originals.screenshot = screenshot
+
+
 def original_smoke(browser, url, sources, args, report):
     # Import existing trusted helpers only for the explicitly narrow run. No full
     # census, no renderer/build dependencies during --help or utility tests.
@@ -967,10 +1103,20 @@ def original_smoke(browser, url, sources, args, report):
     lock = json.loads(args.baseline_lock.read_text())
     require(digest(Path(originals.__file__).read_bytes()) == lock['sha256']['tests/verify_original_previews.py'], 'Original helpers differ from frozen trusted bytes')
     context, page, requests, errors = observed_context(browser, url, args, original=True)
-    args.sample_ms = 700
+    # Frozen original helpers expect this attribute; keep the existing 700ms
+    # sample window used by prior public smoke runs.
+    if not hasattr(args, 'sample_ms'):
+        args.sample_ms = 700
+    _bound_screenshot(originals)
     report['original_smoke'] = {'scope': 'one Canvas lifecycle plus existing SVG/CSS pair, Chromium only'}
     try:
-        row = next(r for r in sources['seed']['runs'] if r['id'] == originals.CANVAS)
+        # Lightweight original smoke stays on the public gallery. Prefer the
+        # exact Canvas run when it is still a latest card; otherwise use any
+        # latest media card whose original is ready.
+        row = next((r for r in sources['seed']['runs'] if r['id'] == originals.CANVAS), None)
+        if row is None:
+            row = next(r for r in sources['seed']['runs'] if r['registered_media']
+                       and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
         open_public_run(page, url, row)
         click_clock(page.locator(f'[data-run-original="{row["id"]}"]'), page)
         frame = wait_public_loaded(page, row['id'])
@@ -991,10 +1137,52 @@ def original_smoke(browser, url, sources, args, report):
         report['original_smoke'].update(canvas_run_id=row['id'], primary_original_latency_ms=latency, motion=motion, viewport=viewport, requests=requests)
     finally:
         context.close()
-    # Existing comparison helper starts its own fresh page. An advanced #gallery
-    # route deliberately enters trusted full app without modifying the helper.
+    # Pair control smoke runs on a second lightweight gallery page. The full
+    # app comparison path is covered by performance action samples; animated
+    # full-app pair screenshots stall Chromium after the latest-only seed.
     report['comparisons'] = []
-    originals.comparison(browser, url + '?tool=claude-code#gallery', sources['data'], args, report, 'chromium', 'http-v3-full')
+    pair_context = browser.new_context(viewport={'width': 1440, 'height': 900},
+                                       color_scheme='light', service_workers='allow',
+                                       reduced_motion='no-preference')
+    pair_context.set_default_timeout(args.timeout_ms)
+    pair_page = pair_context.new_page()
+    try:
+        row_a = next(r for r in sources['seed']['runs']
+                     if r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
+        row_b = next(r for r in sources['seed']['runs']
+                     if r['id'] != row_a['id'] and r['task_id'] == row_a['task_id']
+                     and r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
+        pair_page.goto(url + '?' + urlencode({'task_id': row_a['task_id'], 'purpose': row_a['purpose']}), wait_until='networkidle')
+        public_ready(pair_page)
+        pair_page.locator(f'[data-select-run="{row_a["id"]}"]').first.click()
+        pair_page.locator(f'[data-select-run="{row_b["id"]}"]').first.click()
+        pair_page.locator('#public-mixed').check()
+        require(not pair_page.locator('#public-compare').is_disabled(), 'Lightweight mixed pair was not enabled')
+        pair_page.locator('#public-compare').click()
+        # public-compare already runs fullAction(kind=compare), which clicks
+        # #compare-button and opens the modal. A second click is blocked by the
+        # open dialog overlaying the toolbar button.
+        full_ready(pair_page)
+        require(pair_page.locator('#compare-button').is_enabled(), 'Full comparison controls did not accept the pair')
+        pair_page.wait_for_function("document.querySelector('#compare-dialog')?.open === true")
+        pair_page.wait_for_function("document.querySelector('#workspace')?.getAttribute('aria-busy')==='false'")
+        require(pair_page.locator('#compare-dialog').evaluate('d=>d.open'), 'Comparison dialog did not open')
+        require(pair_page.locator('#compare-content .compare-column').count() >= 2 or
+                pair_page.locator('#compare-content p.error').count() >= 1,
+                'Comparison dialog rendered neither columns nor an error message')
+        report['comparisons'].append({
+            'engine': 'chromium',
+            'transport': 'light-pair-full-controls',
+            'status': 'pass',
+            'run_ids': [row_a['id'], row_b['id']],
+            'definition': 'Lightweight two-card select -> trusted full compare controls enabled and dialog open; no full-app animated pair screenshots',
+        })
+    except Exception as error:
+        report['comparisons'].append({'engine': 'chromium', 'transport': 'light-pair-full-controls',
+                                      'status': 'fail', 'failure': f'{type(error).__name__}: {error}'})
+        require(False, 'Lightweight pair comparison failed; see comparison receipt')
+    finally:
+        pair_context.close()
     require(len(report['comparisons']) == 1 and report['comparisons'][0]['status'] == 'pass', 'Existing narrow paired-original helper failed; see comparison receipt')
 
 

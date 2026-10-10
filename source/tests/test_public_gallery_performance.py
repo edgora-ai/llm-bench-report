@@ -243,7 +243,8 @@ class GalleryUtilityTests(unittest.TestCase):
         runtime_info['path'] = self.js
         seed = {'version': 3, 'format': 'progressive-static-v3', 'tasks': [{'id': 'crocodile', 'name': 'Task'}],
                 'runs': verifier.project_runs(data), 'defaults': {'task_id': 'crocodile', 'purpose': 'benchmark', 'page_size': 8},
-                'counts': {'runs': 1, 'benchmark': 1, 'reviews': 0}, 'full': {**full_info, 'script_sha256': verifier.digest(b'trusted-program')},
+                'counts': {'runs': 1, 'full_runs': 1, 'benchmark': 1, 'full_benchmark': 1, 'reviews': 0},
+                'full': {**full_info, 'script_sha256': verifier.digest(b'trusted-program')},
                 'runtime': runtime_info, 'offline': data['offline']}
         return data, seed, full_info, runtime_info
 

@@ -59,6 +59,8 @@
   function card(run) {
     const original = node('button', { 'data-run-original': run.id, class: 'primary', text: '运行原作', disabled: !allowedOriginal(run) });
     const selected = state.selected.has(run.id);
+    const historyCount = Number(run.history_count) || 0;
+    const history = node('span', { class: 'work-history-badge', title: historyCount ? '历史尝试' : '无历史尝试', text: historyCount ? `历史 ${historyCount + 1} 次 · 详情对照` : '最新' });
     const actions = node('div', { class: 'work-actions' }, [original,
       node('button', { 'data-select-run': run.id, 'aria-pressed': selected, text: selected ? '移出对比' : '加入对比' }),
       node('button', { 'data-zoom-run': run.id, text: '放大', disabled: !run.image }),
@@ -67,7 +69,7 @@
     if (run.image && imagePattern.test(run.image.thumb)) cover.append(node('img', { class: 'work-image', 'data-src': run.image.thumb, alt: `${run.model} · ${run.id} · ${run.image.label}`, decoding: 'async' }));
     else cover.append(node('p', { class: 'work-empty', text: '本次未登记桌面首张截图；不替换为其他采样。' }));
     return node('article', { class: 'evidence-card', 'data-run-id': run.id }, [
-      node('div', { class: 'work-heading' }, [node('div', { class: 'work-identity' }, [node('h2', { class: 'work-name', text: text(run.model) }), node('p', { class: 'work-meta', text: `${text(run.tool)} · ${text(run.date)} · ${text(run.prompt_version)}` })]), node('span', { class: 'work-attempt', text: run.id.slice(0, 8), title: run.id })]), cover,
+      node('div', { class: 'work-heading' }, [node('div', { class: 'work-identity' }, [node('h2', { class: 'work-name', text: text(run.model) }), node('p', { class: 'work-meta', text: `${text(run.tool)} · ${text(run.date)} · ${text(run.prompt_version)}` }), history]), node('span', { class: 'work-attempt', text: run.id.slice(0, 8), title: run.id })]), cover,
       node('div', { class: 'work-status' }, [node('span', { text: `会话 ${text(run.status)}` }), node('span', { text: `入口 ${text(run.entry_status)}` }), node('span', { text: `评估 ${text(run.evaluation_status)}` })]), actions]);
   }
   function loadImage(image) {
@@ -105,7 +107,7 @@
     const shown = media.slice(state.page * seed.defaults.page_size, (state.page + 1) * seed.defaults.page_size);
     $('#public-grid').replaceChildren(...shown.map(card));
     if (!shown.length) $('#public-grid').append(node('p', { class: 'work-empty', text: historyRuns.length ? '此筛选没有公开媒体；全部尝试在下方完整保留。' : '没有符合此筛选的尝试。' }));
-    $('#public-result-label').textContent = `${filtered.length} 次尝试 · 本页 ${shown.length} 份媒体记录 · ${historyRuns.length} 次无媒体`;
+    $('#public-result-label').textContent = `${filtered.length} 最新三元组 · 本页 ${shown.length} 份媒体记录 · ${historyRuns.length} 次无媒体 · 详情对照历史 ${filtered.reduce((sum, run) => sum + (Number(run.history_count) || 0), 0)} 次`;
     document.querySelectorAll('#public-task-tabs [data-task-id]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.taskId === state.task)));
     $('#public-model').value = state.model;
     const purpose = $('#public-purpose');
@@ -232,7 +234,7 @@
     if (scripts.length !== 2 || scripts.some(script => script.hasAttribute('src')) || documentCopy.querySelector('base, iframe, object, embed')) throw new Error('完整查看器结构不匹配');
     const prefix = 'window.BENCH_SNAPSHOT='; if (!scripts[0].textContent.startsWith(prefix)) throw new Error('完整数据标识不匹配');
     const data = JSON.parse(scripts[0].textContent.slice(prefix.length).trim().replace(/;$/, ''));
-    if (data.format !== 'static-media-v2' || data.transport !== 'external' || data.runs.length !== seed.counts.runs || data.runs.some(run => !records.has(run.id))) throw new Error('完整记录身份不匹配');
+    if (data.format !== 'static-media-v2' || data.transport !== 'external' || data.runs.length !== seed.counts.full_runs) throw new Error('完整记录身份不匹配');
     if (await digest(new TextEncoder().encode(scripts[1].textContent)) !== descriptor.script_sha256) throw new Error('可信查看器代码摘要不匹配');
     const code = scripts[1].textContent; scripts.forEach(script => script.remove()); return { documentCopy, data, code };
   }
@@ -300,6 +302,11 @@
         $('#mixed-comparison').checked = mixed; $('#mixed-comparison').dispatchEvent(new Event('change', { bubbles: true }));
         for (const id of selected) { const button = document.querySelector(`[data-select-run="${id}"]`); if (button.getAttribute('aria-pressed') !== 'true' && !button.checked) button.click(); }
       }
+      if (action.kind === 'detail') {
+        // History comparison needs every attempt of the same task/purpose.
+        // Keep task filters; drop the single-id q before the shared reload.
+        url.searchParams.delete('q');
+      }
       history.replaceState(null, '', url); window.dispatchEvent(new PopStateEvent('popstate'));
       await waitReady(() => $('#workspace')?.getAttribute('aria-busy') === 'false');
       if (action.kind === 'compare') {
@@ -308,9 +315,24 @@
         const target = $('#notice'); target.hidden = false; target.textContent = '为保留选择，已清除用途、日期及搜索限制；对照页仍显示完整条件。';
       } else if (action.kind === 'detail') {
         const historyBlock = $('#no-media-history'); if (historyBlock) historyBlock.open = true;
-        await waitReady(() => document.querySelector(`[data-run-id="${action.run}"] [data-detail-run]`) || [...document.querySelectorAll('.run-name button')].some(button => button.textContent === action.run) || document.querySelector(`[data-run-id="${action.run}"]`));
-        const detail = [...document.querySelectorAll('[data-detail-run],.run-name button,[data-open-run]')].find(button => button.dataset.detailRun === action.run || button.dataset.openRun === action.run || button.textContent === action.run);
-        if (detail) detail.click(); else { const evidence = document.querySelector('[data-view="evidence"]'); evidence.click(); await waitReady(() => [...document.querySelectorAll('.run-name button')].some(button => button.textContent === action.run)); [...document.querySelectorAll('.run-name button')].find(button => button.textContent === action.run).click(); }
+        // Full viewer filters by run id (q); clear any blocking dialog so the
+        // historical evidence row can receive an explicit click.
+        for (const dialog of document.querySelectorAll('dialog[open]')) { try { dialog.close(); } catch (error) { /* already closed */ } }
+        // Matrix is the only trusted view that lists every attempt of a
+        // (tool, model, task) triple under the current filters.
+        const matrix = document.querySelector('[data-view="matrix"]');
+        if (matrix && matrix.getAttribute('aria-current') !== 'page') matrix.click();
+        await waitReady(() => {
+          const cells = [...document.querySelectorAll('[data-task-cell]')];
+          if (!cells.length) return false;
+          const latest = document.querySelector(`[data-run-id="${action.run}"]`);
+          if (!latest) return false;
+          const cell = latest.closest('td');
+          if (!cell) return true;
+          const disclosure = cell.querySelector('details.matrix-attempts');
+          if (disclosure && !disclosure.open) disclosure.open = true;
+          return true;
+        });
       }
       if (state.model.trim() && !action.run && action.kind !== 'compare') { const target = $('#notice'); if (target) { target.hidden = false; target.textContent = '模型查找已转为全文搜索；可在更多筛选中选择精确模型。'; } }
     } catch (error) {

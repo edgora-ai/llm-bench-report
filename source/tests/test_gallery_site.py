@@ -48,13 +48,23 @@ class GalleryFixture(unittest.TestCase):
         raw = BytesIO()
         Image.new("RGB", (48, 30), "navy").save(raw, "JPEG")
         image = "data:image/jpeg;base64," + base64.b64encode(raw.getvalue()).decode()
+        # Shared "unit-tool" model identity for the first six crocodile attempts
+        # so latest-only selection drops five; later models stay distinct.
         for i in range(12):
             run_id = f"{i + 1:032x}"
             paths = ["evidence/desktop.png"] if i < 9 else ["evidence/later.png", "evidence/mobile.png"] if i == 9 else []
+            if i == 0:
+                model = 'A Model <script>&"'
+            elif i < 7:
+                model = "Unit Model"
+            elif i == 11:
+                model = "Blackhole Model"
+            else:
+                model = f"Model {i:02d}"
             run = {"id": run_id, "date": "2026-10-08", "started_at": f"2026-10-08T01:{i:02d}:00Z",
-                   "model": 'A Model <script>&"' if i == 0 else f"Model {i:02d}", "tool": "unit-tool",
+                   "model": model, "tool": "unit-tool",
                    "task_id": "crocodile" if i < 11 else "blackhole", "purpose": "benchmark",
-                   "status": "failed", "generation_status": "completed" if i == 0 else "failed",
+                   "status": "failed", "generation_status": "completed" if i in (0, 6, 11) else "failed",
                    "checks": [{"name": "entrypoint", "status": "pass"}],
                    "evaluation": {"status": "completed", "evidence": paths}, "reviews": [{"id": "unit-review"}] if i == 0 else []}
             if i == 1:
@@ -122,26 +132,37 @@ class GalleryFixture(unittest.TestCase):
 
 
 class GallerySiteTests(GalleryFixture):
-    def test_projection_covers_all_runs_preserves_status_and_originals(self):
+    def test_projection_covers_latest_triples_preserves_status_and_originals(self):
         self.build()
         seed = self.seed()
         self.assertEqual(set(seed), {"version", "format", "tasks", "runs", "defaults", "counts", "full", "runtime", "offline"})
-        self.assertEqual(seed["counts"], {"runs": 12, "benchmark": 12, "reviews": 1})
+        # Fixture: 11 crocodile + 1 blackhole. First seven share "Unit Model"
+        # (i=0..6) so latest drops 6; remaining distinct models stay (7 total).
+        self.assertEqual(seed["counts"], {"runs": 7, "full_runs": 12, "benchmark": 7, "full_benchmark": 12, "reviews": 1})
         self.assertEqual(seed["defaults"], {"task_id": "crocodile", "purpose": "benchmark", "page_size": 8})
-        self.assertEqual([r["id"] for r in seed["runs"]], [r["id"] for r in sorted(self.runs, key=lambda r: (r["tool"], r["model"], r["started_at"], r["id"]))])
+        expected = [self.runs[i]["id"] for i in (0, 11, 7, 8, 9, 10, 6)]
+        self.assertEqual([r["id"] for r in seed["runs"]], expected)
         by_id = {run["id"]: run for run in seed["runs"]}
-        first, second, later, absent = [by_id[self.runs[i]["id"]] for i in (0, 1, 9, 10)]
-        self.assertEqual(first["status"], "completed")
-        self.assertEqual(first["entry_status"], "pass")
-        self.assertEqual(second["entry_status"], "unknown")
-        self.assertEqual(first["evaluation_status"], "completed")
-        self.assertIsNone(first["prompt_version"])
-        self.assertEqual(first["image"]["width"], 48)
-        self.assertEqual(first["image"]["height"], 30)
+        latest_unit = by_id[self.runs[6]["id"]]
+        self.assertEqual(latest_unit["status"], "completed")
+        self.assertEqual(latest_unit["entry_status"], "pass")
+        self.assertEqual(latest_unit["evaluation_status"], "completed")
+        self.assertIsNone(latest_unit["prompt_version"])
+        self.assertEqual(latest_unit["image"]["width"], 48)
+        self.assertEqual(latest_unit["image"]["height"], 30)
+        self.assertEqual(latest_unit["history_count"], 5)
+        later = by_id[self.runs[8]["id"]]
         self.assertTrue(later["registered_media"])
-        self.assertIsNone(later["image"])
+        self.assertIsNotNone(later["image"])
+        # runs[9] has later.png / mobile.png only → registered, no desktop image.
+        registered_no_desktop = by_id[self.runs[9]["id"]]
+        self.assertTrue(registered_no_desktop["registered_media"])
+        self.assertIsNone(registered_no_desktop["image"])
+        absent = by_id[self.runs[11]["id"]]
         self.assertFalse(absent["registered_media"])
         self.assertIsNone(absent["image"])
+        dropped = {self.runs[i]["id"] for i in range(1, 6)} & {r["id"] for r in seed["runs"]}
+        self.assertEqual(dropped, set())
         for run in seed["runs"]:
             self.assertEqual(run["original"], self.full_data["originals"][run["id"]])
             self.assertNotIn("metrics", run)
@@ -180,20 +201,21 @@ class GallerySiteTests(GalleryFixture):
         articles = [attrs for tag, attrs in parsed.elements if tag == "article"]
         images = [attrs for tag, attrs in parsed.elements if tag == "img"]
         self.assertEqual([attrs["data-run-id"] for attrs in articles], [run["id"] for run in make_gallery.initial_runs(self.seed())[:8]])
-        self.assertEqual(len(articles), 8)
-        self.assertEqual(len(images), 8)
+        self.assertEqual(len(articles), 5)
+        self.assertEqual(len(images), 4)
         for attrs in images:
             self.assertIn("data-src", attrs)
             self.assertNotIn("src", attrs)
         for action in ("run-original", "select-run", "zoom-run", "detail-run"):
-            self.assertEqual(sum("data-" + action in attrs for tag, attrs in parsed.elements if tag == "button"), 8)
+            self.assertEqual(sum("data-" + action in attrs for tag, attrs in parsed.elements if tag == "button"), 5)
         self.assertIn("&lt;script&gt;&amp;&quot;", html)
         self.assertIn('Task &lt; &amp; &quot; {{PUBLIC_JS}}', html)
         self.assertEqual(len([tag for tag, _ in parsed.elements if tag == "script"]), 2)
         original_buttons = {a["data-run-original"]: a for tag, a in parsed.elements if "data-run-original" in a}
+        # Latest crocodile media run among page cards; blackhole is no-media and not
+        # server-rendered as a card. Unit Model latest (runs[6]) has no original.
+        self.assertIn("disabled", original_buttons[self.runs[6]["id"]])
         self.assertNotIn("disabled", original_buttons[self.runs[0]["id"]])
-        self.assertNotIn("disabled", original_buttons[self.runs[1]["id"]])
-        self.assertIn("disabled", original_buttons[self.runs[2]["id"]])
 
     def test_first_desktop_only_and_registration_requires_included_evidence(self):
         data = copy.deepcopy(self.full_data)
@@ -251,7 +273,7 @@ class GallerySiteTests(GalleryFixture):
         for old, new in ((b"TRUSTED_UNIT_GALLERY=1", b"TRUSTED_UNIT_GALLERY=2"),
                          (b"#fefefe", b"#eeeeee"), (b"work-name", b"fake-name"),
                          (b'"registered_media":true', b'"registered_media":1'),
-                         (b'"entry_status":"unknown"', b'"entry_status":"pass"'),
+                         (b'"history_count":0', b'"history_count":"x"'),
                          (b'"version":3', b'"version":2')):
             with self.subTest(old=old):
                 self.assertIn(old, original)
@@ -408,7 +430,10 @@ class GallerySiteTests(GalleryFixture):
                    "--input-runtime", str(self.runtime), "--root", str(self.project)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["runs"], 12)
+        payload = json.loads(result.stdout)
+        # CLI stats still describe the full embedded v2 bundle; seed runs are latest-only.
+        self.assertEqual(payload["runs"], 12)
+        self.assertEqual(self.seed()["counts"]["runs"], 7)
         self.verify()
 
 

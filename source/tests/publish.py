@@ -87,10 +87,10 @@ def stage(html: str, directory: Path, title: str, note: str, source_root=None) -
         "## 结果解释\n\n"
         "会话正常结束、页面交付、自动检查与人工视觉评分分别展示。"
         "CLI费用未经供应商账单核验，未知计量不补零。既有14条非盲AI建议评分仍待人工复核。\n\n"
-        "2026-10-08 的 Sol 与 6.1-Sol 鳄鱼题人工补跑均正常结束、8/8检查通过；"
-        "此前失败保留，不被新结果覆盖。Astra/Luna早先黑洞样本的上游count_tokens403"
-        "曾被旧评估逻辑误记为路由违规；原检查仍保留，源码已区分上游与本地拒绝，"
-        "不把历史误判当成模型调用了其他路由的证据。\n\n"
+        "画廊默认仅展示每个（工具，模型，任务）三元组的最新一次；"
+        "点击详情进入完整实验台查看历史对照。全部尝试与正式样本计数见首页。\n\n"
+        "第二轮补齐样本：1 个组合新交付；5 个组合已尝试仍失败（多为 session_error/length 空交付）；"
+        "1 个组合条件阻塞（step-5 黑洞）。失败样本保留，不被覆盖，也不重跑。\n\n"
         "重新发布请在 `source/` 内执行 `python3 tests/publish.py <snapshot.html> --include-source`。\n",
         encoding="utf-8")
     (directory / ".nojekyll").write_text("", encoding="utf-8")

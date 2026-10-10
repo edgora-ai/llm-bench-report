@@ -85,7 +85,7 @@ const prefix='window.BENCH_SNAPSHOT=';
 const data={format:'static-media-v2',transport:'external',runs:[{id:'r1'}]};
 const program='trusted-test-viewer';
 const payload=new TextEncoder().encode('synthetic complete document');
-const seed={counts:{runs:1},full:{path:'viewer/'+'a'.repeat(64)+'.html',size:payload.length,sha256:await digest(payload),script_sha256:await digest(new TextEncoder().encode(program))}};
+const seed={counts:{runs:1,full_runs:1},full:{path:'viewer/'+'a'.repeat(64)+'.html',size:payload.length,sha256:await digest(payload),script_sha256:await digest(new TextEncoder().encode(program))}};
 const records=new Map([['r1',{}]]);
 const pathURL=()=> 'https://example.test/report/viewer/a.html';
 class DOMParser {parseFromString(){const scripts=[{textContent:prefix+JSON.stringify(data)+';',hasAttribute:()=>false,remove(){}},{textContent:program,hasAttribute:()=>false,remove(){}}];return {querySelectorAll:()=>scripts,querySelector:()=>null};}}

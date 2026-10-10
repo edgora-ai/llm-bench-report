@@ -54,8 +54,66 @@ def entrypoint_status(run):
     return "pass" if status in {"pass", "passed", "ok"} else "fail" if status in {"fail", "failed"} else "unknown"
 
 
+def project_row(run, data):
+    """One projected attempt; history_count is stamped later."""
+    for key in ("model", "tool", "task_id", "task_name", "purpose", "prompt_version", "date", "started_at", "status", "generation_status"):
+        site._require(run.get(key) is None or isinstance(run[key], str), "invalid gallery run field: " + key)
+    evaluation = run.get("evaluation") or {}
+    site._require(evaluation.get("status") is None or isinstance(evaluation["status"], str), "invalid gallery evaluation status")
+    for checks in (run.get("checks"), evaluation.get("checks")):
+        site._require(checks is None or isinstance(checks, list), "invalid gallery checks")
+        site._require(all(isinstance(item, dict) and (item.get("status") is None or isinstance(item["status"], str))
+                          for item in checks or []), "invalid gallery check status")
+    run_id = run["id"]
+    declared = [(item.get("path") if isinstance(item, dict) else item)
+                for item in (run.get("evaluation") or {}).get("evidence") or []]
+    keys = [run_id + "/" + path for path in declared]
+    desktop = next((key for key in keys if key.rsplit("/", 1)[-1] == "desktop.png"), None)
+    full = data["evidence"].get(desktop)
+    thumb = data["thumbnails"].get(desktop)
+    image = None
+    if full and thumb:
+        info = data["assets"][full]
+        if info["mime"].startswith("image/"):
+            image = {"thumb": thumb, "full": full, "width": info["width"],
+                     "height": info["height"], "label": "desktop.png"}
+    return {"id": run_id, "model": run.get("model") or "unknown",
+            "tool": run.get("tool") or "unknown", "task_id": run.get("task_id"),
+            "purpose": run.get("purpose") or "unknown", "prompt_version": run.get("prompt_version"),
+            "date": str(run.get("date") or run.get("started_at") or "")[:10] or None,
+            "started_at": run.get("started_at"),
+            "status": run.get("generation_status") or run.get("status") or "unknown",
+            "entry_status": entrypoint_status(run),
+            "evaluation_status": (run.get("evaluation") or {}).get("status") or "unknown",
+            "registered_media": any(key in data["evidence"] for key in keys),
+            "image": image, "original": copy.deepcopy(data["originals"][run_id]),
+            "history_count": 0}
+
+
+def project_runs(data):
+    """Latest attempt per (tool, model, task_id); full history stays in viewer only."""
+    site._require(all(re.fullmatch(r"[a-f0-9]{32}", run["id"]) for run in data["runs"])
+                  and len({run["id"] for run in data["runs"]}) == len(data["runs"]),
+                  "gallery requires unique 32hex run IDs")
+    ordered = sorted(data["runs"], key=lambda run: (run.get("tool") or "unknown", run.get("model") or "unknown",
+                                                    run.get("task_id") or "", run.get("started_at") or run.get("date") or "",
+                                                    run["id"]))
+    latest_index = {}
+    for index, run in enumerate(ordered):
+        key = (run.get("tool") or "unknown", run.get("model") or "unknown", run.get("task_id") or "")
+        latest_index[key] = index
+    rows = [project_row(run, data) for run in ordered]
+    for key, index in latest_index.items():
+        rows[index]["history_count"] = sum(1 for run in ordered
+                                           if (run.get("tool") or "unknown", run.get("model") or "unknown",
+                                               run.get("task_id") or "") == key) - 1
+    selected = [rows[index] for index in sorted(latest_index.values())]
+    selected.sort(key=lambda row: (row["tool"], row["model"], row["started_at"] or row["date"] or "", row["id"]))
+    return selected
+
+
 def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes):
-    """Deterministic full-run projection; never select best/latest or invent scores."""
+    """Latest-per-triple projection; never select best or invent scores."""
     site._require(data.get("format") == FORMAT_V2 and data.get("transport") == "external",
                   "gallery input must be verified external v2")
     tasks = {}
@@ -64,52 +122,21 @@ def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes):
         site._require(isinstance(task, dict) and isinstance(task.get("id"), str), "invalid gallery task")
         site._require(task.get("name") is None or isinstance(task["name"], str), "invalid gallery task name")
         tasks[task["id"]] = {"id": task["id"], "name": task.get("name") or task["id"]}
-    runs = []
     ids = set()
     for run in data["runs"]:
-        for key in ("model", "tool", "task_id", "task_name", "purpose", "prompt_version", "date", "started_at", "status", "generation_status"):
-            site._require(run.get(key) is None or isinstance(run[key], str), "invalid gallery run field: " + key)
-        evaluation = run.get("evaluation") or {}
-        site._require(evaluation.get("status") is None or isinstance(evaluation["status"], str), "invalid gallery evaluation status")
-        for checks in (run.get("checks"), evaluation.get("checks")):
-            site._require(checks is None or isinstance(checks, list), "invalid gallery checks")
-            site._require(all(isinstance(item, dict) and (item.get("status") is None or isinstance(item["status"], str))
-                              for item in checks or []), "invalid gallery check status")
-        run_id = run["id"]
-        site._require(re.fullmatch(r"[a-f0-9]{32}", run_id) is not None and run_id not in ids,
+        site._require(re.fullmatch(r"[a-f0-9]{32}", run["id"]) is not None and run["id"] not in ids,
                       "gallery requires unique 32hex run IDs")
-        ids.add(run_id)
+        ids.add(run["id"])
         if run.get("task_id") and run["task_id"] not in tasks:
             tasks[run["task_id"]] = {"id": run["task_id"], "name": run.get("task_name") or run["task_id"]}
-        declared = [(item.get("path") if isinstance(item, dict) else item)
-                    for item in (run.get("evaluation") or {}).get("evidence") or []]
-        keys = [run_id + "/" + path for path in declared]
-        desktop = next((key for key in keys if key.rsplit("/", 1)[-1] == "desktop.png"), None)
-        full = data["evidence"].get(desktop)
-        thumb = data["thumbnails"].get(desktop)
-        image = None
-        if full and thumb:
-            info = data["assets"][full]
-            if info["mime"].startswith("image/"):
-                image = {"thumb": thumb, "full": full, "width": info["width"],
-                         "height": info["height"], "label": "desktop.png"}
-        runs.append({"id": run_id, "model": run.get("model") or "unknown",
-                     "tool": run.get("tool") or "unknown", "task_id": run.get("task_id"),
-                     "purpose": run.get("purpose") or "unknown", "prompt_version": run.get("prompt_version"),
-                     "date": str(run.get("date") or run.get("started_at") or "")[:10] or None,
-                     "started_at": run.get("started_at"),
-                     "status": run.get("generation_status") or run.get("status") or "unknown",
-                     "entry_status": entrypoint_status(run),
-                     "evaluation_status": (run.get("evaluation") or {}).get("status") or "unknown",
-                     "registered_media": any(key in data["evidence"] for key in keys),
-                     "image": image, "original": copy.deepcopy(data["originals"][run_id])})
-    runs.sort(key=lambda run: (run["tool"], run["model"], run["started_at"] or run["date"] or "", run["id"]))
+    runs = project_runs(data)
     ordered_tasks = sorted(tasks.values(), key=lambda task: (task["id"] != "crocodile", task["id"]))
     full = _descriptor(full_bytes, "html")
     full["script_sha256"] = _digest(runtime_bytes + b"\n" + viewer_bytes)
     seed = {"version": VERSION, "format": FORMAT, "tasks": ordered_tasks, "runs": runs,
             "defaults": {"task_id": ordered_tasks[0]["id"] if ordered_tasks else "", "purpose": "benchmark", "page_size": 8},
-            "counts": {"runs": len(runs), "benchmark": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
+            "counts": {"runs": len(runs), "full_runs": len(data["runs"]), "benchmark": sum(run.get("purpose") == "benchmark" for run in runs),
+                       "full_benchmark": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
                        "reviews": sum(len(run.get("reviews") or []) for run in data["runs"])},
             "full": full, "runtime": _descriptor(runtime_bytes, "js"), "offline": copy.deepcopy(data["offline"])}
     site._public_data(seed)
@@ -132,9 +159,13 @@ def render_card(run):
              + '" loading="lazy" decoding="async">') if image else '<p class="work-empty">本次未登记桌面首张截图；不替换为其他采样。</p>'
     disabled = '' if run["original"]["status"] in {"ready", "missing_dependencies"} else ' disabled'
     zoom_disabled = '' if image else ' disabled'
+    history = int(run.get("history_count") or 0)
+    history_badge = ('<span class="work-history-badge" title="历史尝试">历史 ' + e(history + 1) + ' 次 · 详情对照</span>'
+                     if history else '<span class="work-history-badge" title="无历史尝试">最新</span>')
     return ('<article class="evidence-card" data-run-id="' + run_id + '">'
             '<div class="work-heading"><div class="work-identity"><h2 class="work-name">' + e(run["model"]) + '</h2>'
-            '<p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["prompt_version"]) + '</p></div>'
+            '<p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["prompt_version"]) + '</p>'
+            + history_badge + '</div>'
             '<span class="work-attempt" title="' + run_id + '">' + e(run["id"][:8]) + '</span></div>'
             '<div class="work-cover">' + cover + '</div>'
             '<div class="work-status"><span>会话 ' + e(run["status"]) + '</span><span>入口 ' + e(run["entry_status"])
@@ -160,10 +191,11 @@ def render_gallery(seed, root=ROOT):
     encoded = json.dumps(seed, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).replace("<", "\\u003c")
     defaults = seed["defaults"]
     filtered = [run for run in seed["runs"] if run["task_id"] == defaults["task_id"] and run["purpose"] == defaults["purpose"]]
+    history_extra = sum(int(run.get("history_count") or 0) for run in filtered)
     values = {"PUBLIC_CSS": css, "PUBLIC_JS": bootstrap, "GALLERY_SEED": encoded,
               "TASK_TABS": tabs, "GALLERY_CARDS": ''.join(render_card(run) for run in included[:8]),
-              "GALLERY_COUNT": f"{len(filtered)} 次尝试 · 本页 {min(8, len(included))} 份媒体记录 · {len(filtered) - len(included)} 次无媒体",
-              "GALLERY_TOTAL": str(len(seed["runs"]))}
+              "GALLERY_COUNT": f"{len(filtered)} 最新三元组 · 本页 {min(8, len(included))} 份媒体记录 · {len(filtered) - len(included)} 次无媒体 · 详情对照历史 {history_extra} 次",
+              "GALLERY_TOTAL": str(seed["counts"]["full_runs"])}
     # One pass prevents a literal template marker in source data being expanded.
     result = re.sub(r"\{\{(" + '|'.join(MARKERS) + r")\}\}", lambda match: values[match.group(1)], template)
     return result.encode("utf-8")
@@ -257,6 +289,8 @@ def build_gallery(source, destination, input_viewer, *, input_runtime=None, root
     files[seed["full"]["path"]] = site._file_info(captured["index.html"], "text/html", "viewer")
     files[seed["runtime"]["path"]] = site._file_info(runtime_bytes, "text/javascript", "runtime")
     files["index.html"] = site._file_info(payloads["index.html"], "text/html", "index")
+    # Manifest stats still describe the full embedded v2 bundle (not latest-only
+    # seed rows); only the progressive entrypoint size is updated.
     output = site.validate_manifest({"version": VERSION, "format": FORMAT, "files": dict(sorted(files.items())),
                                     "stats": {**manifest["stats"], "index_bytes": len(payloads["index.html"])}})
     payloads[site.MANIFEST] = (json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + '\n').encode("utf-8")
