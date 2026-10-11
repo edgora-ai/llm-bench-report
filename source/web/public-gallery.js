@@ -68,9 +68,12 @@
     const cover = node('div', { class: 'work-cover' });
     if (run.image && imagePattern.test(run.image.thumb)) cover.append(node('img', { class: 'work-image', 'data-src': run.image.thumb, alt: `${run.model} · ${run.id} · ${run.image.label}`, decoding: 'async' }));
     else cover.append(node('p', { class: 'work-empty', text: '本次未登记桌面首张截图；不替换为其他采样。' }));
+    const score = node('span', { class: 'work-score-note', text: '评分状态 · 详情' });
+    const profile = node('button', { 'data-model-profile': run.model, text: '模型全史 ↗', title: '该模型两道题的完整实验台记录' });
     return node('article', { class: 'evidence-card', 'data-run-id': run.id }, [
       node('div', { class: 'work-heading' }, [node('div', { class: 'work-identity' }, [node('h2', { class: 'work-name', text: text(run.model) }), node('p', { class: 'work-meta', text: `${text(run.tool)} · ${text(run.date)} · ${text(run.prompt_version)}` }), history]), node('span', { class: 'work-attempt', text: run.id.slice(0, 8), title: run.id })]), cover,
-      node('div', { class: 'work-status' }, [node('span', { text: `会话 ${text(run.status)}` }), node('span', { text: `入口 ${text(run.entry_status)}` }), node('span', { text: `评估 ${text(run.evaluation_status)}` })]), actions]);
+      node('div', { class: 'work-status' }, [node('span', { text: `会话 ${text(run.status)}` }), node('span', { text: `入口 ${text(run.entry_status)}` }), node('span', { text: `评估 ${text(run.evaluation_status)}` }), score]),
+      node('div', { class: 'work-actions' }, [...actions.children, profile])]);
   }
   function loadImage(image) {
     if (!image?.isConnected || image.hasAttribute('src') || !imagePattern.test(image.dataset.src || '')) return;
@@ -83,11 +86,19 @@
     images.slice(0, narrow.matches ? 1 : 2).forEach(loadImage);
     if (afterScroll) images.forEach(image => imageObserver.observe(image));
   }
+  function populateModels() {
+    const host = $('#public-model-list'); if (!host) return;
+    const models = [...new Set(seed.runs.map(run => run.model))].sort((a, b) => text(a).localeCompare(text(b)));
+    host.replaceChildren(...models.map(model => node('button', {
+      type: 'button', 'data-model-name': model, 'aria-pressed': String(state.model.trim().toLocaleLowerCase() === text(model).toLocaleLowerCase()),
+      text: model
+    })));
+  }
   function populateHistory() {
     if (!$('#public-history').open) return;
     $('#public-history-list').replaceChildren(...historyRuns.map(run => node('article', { class: 'history-row', 'data-run-id': run.id }, [
-      node('div', {}, [node('strong', { text: text(run.model) }), node('p', { text: `${text(run.tool)} · ${text(run.date)} · ${run.id.slice(0, 8)} · 会话 ${text(run.status)} / 入口 ${text(run.entry_status)} / 评估 ${text(run.evaluation_status)}` })]),
-      node('div', { class: 'history-actions' }, [node('button', { 'data-run-original': run.id, text: '运行原作', disabled: !allowedOriginal(run) }), node('button', { 'data-select-run': run.id, text: state.selected.has(run.id) ? '移出对比' : '加入对比' }), node('button', { 'data-detail-run': run.id, text: '完整记录 ↗' })])] )));
+      node('div', {}, [node('strong', { text: text(run.model) }), node('p', { text: `${text(run.tool)} · ${text(run.task_id)} · ${text(run.date)} · ${run.id.slice(0, 8)} · 会话 ${text(run.status)} / 入口 ${text(run.entry_status)} / 评估 ${text(run.evaluation_status)} · 无桌面首图` })]),
+      node('div', { class: 'history-actions' }, [node('button', { 'data-run-original': run.id, text: '运行原作', disabled: !allowedOriginal(run) }), node('button', { 'data-select-run': run.id, text: state.selected.has(run.id) ? '移出对比' : '加入对比' }), node('button', { 'data-detail-run': run.id, text: '详情与历史 ↗' })])] )));
   }
   function selection() {
     const runs = [...state.selected].map(id => records.get(id));
@@ -107,9 +118,12 @@
     const shown = media.slice(state.page * seed.defaults.page_size, (state.page + 1) * seed.defaults.page_size);
     $('#public-grid').replaceChildren(...shown.map(card));
     if (!shown.length) $('#public-grid').append(node('p', { class: 'work-empty', text: historyRuns.length ? '此筛选没有公开媒体；全部尝试在下方完整保留。' : '没有符合此筛选的尝试。' }));
-    $('#public-result-label').textContent = `${filtered.length} 最新三元组 · 本页 ${shown.length} 份媒体记录 · ${historyRuns.length} 次无媒体 · 详情对照历史 ${filtered.reduce((sum, run) => sum + (Number(run.history_count) || 0), 0)} 次`;
+    const historyExtra = filtered.reduce((sum, run) => sum + (Number(run.history_count) || 0), 0);
+    const modelNote = state.model.trim() ? ` · 模型「${state.model.trim()}」` : '';
+    $('#public-result-label').textContent = `${filtered.length} 最新三元组 · 本页 ${shown.length} 份媒体记录 · ${historyRuns.length} 次无媒体 · 详情对照历史 ${historyExtra} 次${modelNote}`;
     document.querySelectorAll('#public-task-tabs [data-task-id]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.taskId === state.task)));
     $('#public-model').value = state.model;
+    populateModels();
     const purpose = $('#public-purpose');
     if (![...purpose.options].some(option => option.value === state.purpose)) purpose.append(node('option', { value: state.purpose, text: `未知用途：${state.purpose}` }));
     purpose.value = state.purpose;
@@ -307,6 +321,12 @@
         // Keep task filters; drop the single-id q before the shared reload.
         url.searchParams.delete('q');
       }
+      if (action.kind === 'model') {
+        // Model profile: both tasks, latest + full history under one model.
+        url.searchParams.set('task_id', ''); url.searchParams.set('purpose', '');
+        url.searchParams.set('model', action.model || '');
+        for (const key of ['q', 'date_from', 'date_to', 'tool', 'prompt_version', 'status']) url.searchParams.delete(key);
+      }
       history.replaceState(null, '', url); window.dispatchEvent(new PopStateEvent('popstate'));
       await waitReady(() => $('#workspace')?.getAttribute('aria-busy') === 'false');
       if (action.kind === 'compare') {
@@ -333,6 +353,13 @@
           if (disclosure && !disclosure.open) disclosure.open = true;
           return true;
         });
+      } else if (action.kind === 'model') {
+        for (const dialog of document.querySelectorAll('dialog[open]')) { try { dialog.close(); } catch (error) { /* already closed */ } }
+        const matrix = document.querySelector('[data-view="matrix"]');
+        if (matrix && matrix.getAttribute('aria-current') !== 'page') matrix.click();
+        await waitReady(() => document.querySelectorAll('[data-task-cell]').length > 0);
+        const target = $('#notice');
+        if (target) { target.hidden = false; target.textContent = `已按模型 ${action.model || ''} 过滤完整实验台；展开矩阵中的历史对照可看该模型全部尝试。`; }
       }
       if (state.model.trim() && !action.run && action.kind !== 'compare') { const target = $('#notice'); if (target) { target.hidden = false; target.textContent = '模型查找已转为全文搜索；可在更多筛选中选择精确模型。'; } }
     } catch (error) {
@@ -348,6 +375,7 @@
     document.addEventListener('click', event => {
       const button = event.target.closest('button'); if (!button || button.disabled) return;
       if (button.dataset.taskId !== undefined) { state.task = button.dataset.taskId; changeFilter(); }
+      else if (button.dataset.modelName !== undefined) { state.model = button.dataset.modelName; changeFilter(); }
       else if (button.dataset.galleryPage !== undefined) { cancelFull(); state.page = Math.max(0, Number(button.dataset.galleryPage)); render(); $('#public-grid').scrollIntoView({ block: 'start' }); observeImages(true); }
       else if (button.dataset.fullView) fullAction({ kind: 'view', view: button.dataset.fullView });
       else if (button.dataset.publicClose) { if (button.dataset.publicClose === 'original-dialog') destroyPreview(); $('#' + button.dataset.publicClose).close(); }
@@ -359,6 +387,7 @@
         else if (button.dataset.selectRun) toggleRun(run);
         else if (button.dataset.zoomRun) zoom(run);
         else if (button.dataset.detailRun) fullAction({ kind: 'detail', view: 'evidence', run: id });
+        else if (button.dataset.modelProfile) fullAction({ kind: 'model', view: 'matrix', model: button.dataset.modelProfile });
       }
     }, options);
     $('#public-purpose').addEventListener('change', event => { state.purpose = event.target.value; changeFilter(); }, options);

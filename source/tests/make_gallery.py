@@ -162,6 +162,7 @@ def render_card(run):
     history = int(run.get("history_count") or 0)
     history_badge = ('<span class="work-history-badge" title="历史尝试">历史 ' + e(history + 1) + ' 次 · 详情对照</span>'
                      if history else '<span class="work-history-badge" title="无历史尝试">最新</span>')
+    score = '<span class="work-score-note">评分状态 · 详情</span>'
     return ('<article class="evidence-card" data-run-id="' + run_id + '">'
             '<div class="work-heading"><div class="work-identity"><h2 class="work-name">' + e(run["model"]) + '</h2>'
             '<p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["prompt_version"]) + '</p>'
@@ -169,11 +170,12 @@ def render_card(run):
             '<span class="work-attempt" title="' + run_id + '">' + e(run["id"][:8]) + '</span></div>'
             '<div class="work-cover">' + cover + '</div>'
             '<div class="work-status"><span>会话 ' + e(run["status"]) + '</span><span>入口 ' + e(run["entry_status"])
-            + '</span><span>评估 ' + e(run["evaluation_status"]) + '</span></div><div class="work-actions">'
+            + '</span><span>评估 ' + e(run["evaluation_status"]) + '</span>' + score + '</div><div class="work-actions">'
             '<button type="button" class="primary" data-run-original="' + run_id + '"' + disabled + '>运行原作</button>'
             '<button type="button" data-select-run="' + run_id + '" aria-pressed="false">加入对比</button>'
             '<button type="button" data-zoom-run="' + run_id + '"' + zoom_disabled + '>放大</button>'
             '<button type="button" data-detail-run="' + run_id + '">详情 ↗</button>'
+            '<button type="button" data-model-profile="' + e(run["model"]) + '">模型全史 ↗</button>'
             '</div></article>')
 
 
