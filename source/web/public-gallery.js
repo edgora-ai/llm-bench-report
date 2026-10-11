@@ -379,6 +379,7 @@
       else if (button.dataset.galleryPage !== undefined) { cancelFull(); state.page = Math.max(0, Number(button.dataset.galleryPage)); render(); $('#public-grid').scrollIntoView({ block: 'start' }); observeImages(true); }
       else if (button.dataset.fullView) fullAction({ kind: 'view', view: button.dataset.fullView });
       else if (button.dataset.publicClose) { if (button.dataset.publicClose === 'original-dialog') destroyPreview(); $('#' + button.dataset.publicClose).close(); }
+      else if (button.dataset.modelProfile) fullAction({ kind: 'model', view: 'matrix', model: button.dataset.modelProfile });
       else {
         const id = button.dataset.runOriginal || button.dataset.selectRun || button.dataset.zoomRun || button.dataset.detailRun;
         if (!idPattern.test(id || '') || !records.has(id)) return;
@@ -387,7 +388,6 @@
         else if (button.dataset.selectRun) toggleRun(run);
         else if (button.dataset.zoomRun) zoom(run);
         else if (button.dataset.detailRun) fullAction({ kind: 'detail', view: 'evidence', run: id });
-        else if (button.dataset.modelProfile) fullAction({ kind: 'model', view: 'matrix', model: button.dataset.modelProfile });
       }
     }, options);
     $('#public-purpose').addEventListener('change', event => { state.purpose = event.target.value; changeFilter(); }, options);
