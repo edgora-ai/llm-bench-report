@@ -424,7 +424,7 @@ body.public-full{background:var(--bg);color:var(--ink)}.public-full .masthead{di
     document.addEventListener('click', event => {
       const button = event.target.closest('button'); if (!button || button.disabled) return;
       if (button.dataset.taskId !== undefined) { state.task = button.dataset.taskId; changeFilter(); }
-      else if (button.dataset.modelName !== undefined) { state.model = button.dataset.modelName; changeFilter(); }
+      else if (button.dataset.modelName !== undefined) { const name = button.dataset.modelName; state.model = state.model.trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase() ? '' : name; changeFilter(); }
       else if (button.dataset.galleryPage !== undefined) { cancelFull(); state.page = Math.max(0, Number(button.dataset.galleryPage)); render(); $('#public-grid').scrollIntoView({ block: 'start' }); observeImages(true); }
       else if (button.dataset.fullView) fullAction({ kind: 'view', view: button.dataset.fullView });
       else if (button.dataset.publicClose) { if (button.dataset.publicClose === 'original-dialog') destroyPreview(); $('#' + button.dataset.publicClose).close(); }
