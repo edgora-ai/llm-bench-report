@@ -1,6 +1,6 @@
 # 模型能力基准 · 一次会话评测
 
-固定任务、固定隔离环境下的模型一次会话完成度对比。
+第三轮追加 6 个正式样本，全部为零源码交付失败（zero-source）：3 次 length、1 次上游 idle timeout、2 次 HTTP 400。累计 90 次尝试（67 benchmark、23 smoke），14 条既有非盲 AI 建议评分仍待人工复核；最新三元组 36（34 benchmark），无新增评分。本次仅更新报告，不复制或更新 source/。
 
 本仓库的报告由 `llm-bench` 发布步骤自动生成，报告为只读脱敏合并快照，不含凭据、原始日志或本机路径。源码与运行配置分开，私有配置、二进制和完整运行归档不上传。
 index.html 随发布更新。日期命名文件是首次创建时的合并数据副本，不是该日期专属数据；旧版文件保留原字节，不重新包装成日快照。
@@ -19,6 +19,7 @@ index.html 随发布更新。日期命名文件是首次创建时的合并数据
 - [2026-10-08](index.html?purpose=benchmark&date_from=2026-10-08&date_to=2026-10-08)
 - [2026-10-09](index.html?purpose=benchmark&date_from=2026-10-09&date_to=2026-10-09)
 - [2026-10-10](index.html?purpose=benchmark&date_from=2026-10-10&date_to=2026-10-10)
+- [2026-10-11](index.html?purpose=benchmark&date_from=2026-10-11&date_to=2026-10-11)
 
 ## 结果解释
 
