@@ -15,6 +15,7 @@ import hashlib
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -32,7 +33,13 @@ import verify_public_snapshot as v2
 require = v2.require
 PROFILES = v2.PERFORMANCE_PROFILES
 VIEWPORTS = v2.PERFORMANCE_VIEWPORTS
-FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'trend', 'blind')
+FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'trend', 'blind', 'scores')
+CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/index.html', 'web/styles.css',
+    'web/public-gallery.html', 'web/public-gallery.css', 'web/public-gallery.js',
+    'tests/make_gallery.py', 'tests/test_gallery_site.py', 'tests/test_public_gallery_performance.py',
+    'tests/verify_public_gallery.py', 'tests/verify_public_snapshot.py'))
+PAGE_SIZE = 2
+PHONE_PAGE_SIZE = 1
 MANIFEST = '.report-manifest.json'
 SHA = re.compile(r'[a-f0-9]{64}')
 FROZEN_INDEX_SHA = 'caeddfe28402d9718f272b8605d7ba55d2be802ca882518577c49e472f51d6bb'
@@ -62,6 +69,9 @@ def arguments(argv=None):
     p.add_argument('--trust-root', required=True, type=Path, help='Frozen independent baseline checkout, not candidate site')
     p.add_argument('--baseline-lock', type=Path, default=Path('/tmp/bench-gallery-baseline.json'))
     p.add_argument('--new-v2-baseline-lock', type=Path, help='Explicit independently supplied JSON {index_sha256, manifest_sha256}; overrides only v2 data pins, never frozen programs or budgets')
+    p.add_argument('--candidate-source-lock', type=Path, help='Independent final operator JSON {sha256:{11 planned relative paths:digest}}; mandatory for candidate verification, outside source/input bundles')
+    p.add_argument('--candidate-viewer-script', type=Path, help='Current app.js named in the independent candidate-source-lock, not the frozen viewer')
+    p.add_argument('--source-root', type=Path, default=ROOT, help='Reviewed current project source; never the generated candidate')
     p.add_argument('--gallery-bootstrap', type=Path, default=ROOT / 'web/public-gallery.js')
     p.add_argument('--gallery-css', type=Path, default=ROOT / 'web/public-gallery.css')
     p.add_argument('--output', required=True, type=Path, help='Dedicated writable receipt/screenshots directory outside source and bundles')
@@ -79,12 +89,13 @@ def arguments(argv=None):
     a = p.parse_args(argv)
     require(a.timeout_ms > 0, 'Timeout must be positive')
     require(a.expected_runs > 0 and a.expected_benchmark >= 0 and a.expected_reviews >= 0 and a.expected_latest_runs >= 0, 'Invalid census')
-    for name in ('site', 'baseline_site', 'trust_root'):
+    for name in ('site', 'baseline_site', 'trust_root', 'source_root'):
         path = getattr(a, name).resolve(strict=True)
         require(path.is_dir(), name + ' must be a directory')
         setattr(a, name, path)
     require(a.site != a.baseline_site, 'Candidate and frozen baseline must differ')
     require(not a.trust_root.is_relative_to(a.site), 'Trust cannot come from candidate')
+    require(all(not a.source_root.is_relative_to(root) for root in (a.site, a.baseline_site)), 'Current source cannot come from an input bundle')
     a.output = a.output.resolve()
     require(a.output != Path('/') and all(not a.output.is_relative_to(path) for path in
             (ROOT.resolve(), a.site, a.baseline_site, a.trust_root)), 'Output must be outside source and inputs')
@@ -156,6 +167,8 @@ class GalleryHTML(HTMLParser):
         self.current = None
         self.unsafe = []
         self.card_details = {}
+        self.card_attrs = {}
+        self.name_attrs = {}
         self.card = None
         self.field = None
 
@@ -175,7 +188,10 @@ class GalleryHTML(HTMLParser):
             self.cards.append(attrs.get('data-run-id'))
             self.card = attrs.get('data-run-id')
             self.card_details[self.card] = {}
+            self.card_attrs[self.card] = attrs
         if self.card:
+            if 'work-name' in attrs.get('class', '').split():
+                self.name_attrs[self.card] = attrs
             for field in ('work-name', 'work-meta', 'work-status'):
                 if field in attrs.get('class', '').split():
                     self.field = (tag, field)
@@ -227,7 +243,9 @@ def project_runs(data):
         if full and thumb:
             asset = data['assets'][full]
             image = {'thumb': thumb, 'full': full, 'width': asset['width'], 'height': asset['height'], 'label': 'desktop.png'}
-        rows.append({**{k: r.get(k) for k in ('id', 'task_id', 'prompt_version', 'started_at')},
+        summaries = v2.score_summaries(r)
+        rows.append({**({'scores': summaries} if summaries else {}), 'meter': v2.meter(r),
+                     **{k: r.get(k) for k in ('id', 'task_id', 'prompt_version', 'started_at')},
                      **{k: r.get(k) or 'unknown' for k in ('model', 'tool', 'purpose')},
                      'date': str(r.get('date') or r.get('started_at') or '')[:10] or None,
                      'status': r.get('generation_status') or r.get('status') or 'unknown', 'entry_status': entry_status(r),
@@ -263,7 +281,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(match is not None and '<' not in parsed.scripts[0], 'Unescaped gallery seed')
     seed = json.loads(match[1])
     require(parsed.scripts[1].strip() == bootstrap.strip() and parsed.styles[0].strip() == css.strip(), 'Gallery executable/style differs from trusted source')
-    require(set(seed) == {'version', 'format', 'tasks', 'runs', 'defaults', 'counts', 'full', 'runtime', 'offline'}, 'Gallery seed schema')
+    require(set(seed) == {'version', 'format', 'tasks', 'runs', 'score_scopes', 'defaults', 'counts', 'full', 'runtime', 'offline'}, 'Gallery seed schema')
     require(type(seed['version']) is int and seed['version'] == 3 and seed['format'] == 'progressive-static-v3', 'Gallery version/profile')
     require(same(seed['runs'], project_runs(data)), 'Exact latest-per-triple projection/order differs')
     tasks = {t['id']: {'id': t['id'], 'name': t.get('name') or t['id']} for t in data['tasks']}
@@ -273,7 +291,10 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     ordered_tasks = sorted(tasks.values(), key=lambda t: (t['id'] != 'crocodile', t['id']))
     require(seed['tasks'] == ordered_tasks, 'Task metadata differs')
     default_task = 'crocodile' if any(t['id'] == 'crocodile' for t in data['tasks']) else data['tasks'][0]['id']
-    require(same(seed['defaults'], {'task_id': default_task, 'purpose': 'benchmark', 'page_size': 8}), 'Defaults differ')
+    scopes = v2.score_scopes(data['runs'])
+    require(same(seed['score_scopes'], scopes), 'Exact score scope census/order differs')
+    require(same(seed['defaults'], {'task_id': default_task, 'purpose': 'benchmark', 'page_size': PAGE_SIZE,
+                                   'mobile_page_size': PHONE_PAGE_SIZE, 'score_source': v2.default_score_source(scopes)}), 'Defaults differ')
     require(same(seed['counts'], {'runs': len(seed['runs']), 'full_runs': len(data['runs']),
                               'benchmark': sum(r.get('purpose') == 'benchmark' for r in seed['runs']),
                               'full_benchmark': sum(r.get('purpose') == 'benchmark' for r in data['runs']),
@@ -281,15 +302,17 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(same(seed['offline'], data['offline']), 'Offline descriptor changed')
     require(same(seed['full'], {**full_info, 'script_sha256': digest(trusted_program)}), 'Full viewer descriptor differs')
     require(same(seed['runtime'], runtime_info), 'Runtime descriptor differs')
-    expected = [r for r in seed['runs'] if r['task_id'] == default_task and r['purpose'] == 'benchmark' and r['registered_media']][:8]
+    expected = [r for r in seed['runs'] if r['task_id'] == default_task and r['purpose'] == 'benchmark' and r['registered_media']][:PAGE_SIZE]
     require(parsed.cards == [r['id'] for r in expected], 'Server-rendered initial card IDs differ')
     thumbnails = [i for i in parsed.images if 'work-image' in i.get('class', '').split()]
     require([i.get('data-src') for i in thumbnails] == [r['image']['thumb'] for r in expected if r['image']], 'Initial thumbnail mapping differs')
     require(all(i in thumbnails or (i.get('id') == 'public-zoom-image' and not i.get('data-src')) for i in parsed.images), 'Undeclared initial image')
     for row in expected:
         fields = {key: ''.join(value).strip() for key, value in parsed.card_details[row['id']].items()}
-        require(fields.get('work-name') == row['model'] and row['tool'] in fields.get('work-meta', '') and
-                str(row['date']) in fields.get('work-meta', ''), 'Initial card model/tool/date presentation differs')
+        short_model = row['model'][9:] if row['model'].startswith('opencode/') else row['model']
+        require(fields.get('work-name') == short_model and parsed.card_attrs[row['id']].get('data-model-route') == row['model']
+                and parsed.name_attrs[row['id']].get('aria-label') == row['model'] and parsed.name_attrs[row['id']].get('title') == row['model']
+                and row['tool'] in fields.get('work-meta', '') and str(row['date']) in fields.get('work-meta', ''), 'Initial visible label/canonical identity/tool/date differs')
         status = fields.get('work-status', '')
         require(all(value in status for value in (row['status'], row['entry_status'], row['evaluation_status'])), 'Initial card source status presentation differs')
         for attr in ('data-run-original', 'data-select-run', 'data-zoom-run', 'data-detail-run'):
@@ -322,51 +345,105 @@ def baseline_data_pins(args):
     return pins['index_sha256'], pins['manifest_sha256']
 
 
+def candidate_sources(args, report):
+    require(args.candidate_source_lock is not None and args.candidate_viewer_script is not None,
+            'Candidate needs an independent final source lock and --candidate-viewer-script')
+    path = args.candidate_source_lock
+    require(not path.is_symlink() and path.is_file() and path.stat().st_size <= 16384, 'Candidate source lock must be a bounded regular file')
+    require(all(not path.resolve().is_relative_to(root.resolve()) for root in (args.site, args.baseline_site, args.source_root, args.trust_root)),
+            'Candidate source lock must be outside all source/input/trust trees')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'Duplicate candidate source lock key')
+            result[key] = value
+        return result
+    raw = path.read_bytes()
+    lock = json.loads(raw, object_pairs_hook=unique)
+    require(isinstance(lock, dict) and set(lock) == {'sha256'} and isinstance(lock['sha256'], dict)
+            and set(lock['sha256']) == CANDIDATE_SOURCES, 'Candidate source lock must name exactly the eleven planned sources')
+    sources = {}
+    for relative, expected in lock['sha256'].items():
+        require(isinstance(expected, str) and SHA.fullmatch(expected), 'Invalid candidate source digest')
+        sources[relative] = safe_read(args.source_root, relative)
+        require(digest(sources[relative]) == expected, 'Approved current source bytes differ: ' + relative)
+    require(Path(v2.__file__).resolve() == (args.source_root / 'tests/verify_public_snapshot.py').resolve()
+            and Path(__file__).resolve() == (args.source_root / 'tests/verify_public_gallery.py').resolve(), 'Current verifier/helper not from locked source tree')
+    for actual, relative in ((args.candidate_viewer_script, 'web/app.js'), (args.gallery_bootstrap, 'web/public-gallery.js'), (args.gallery_css, 'web/public-gallery.css')):
+        require(actual.resolve(strict=True) == (args.source_root / relative).resolve(), 'Candidate viewer/bootstrap/CSS path is not the pinned current source')
+    report['candidate_source_lock'] = {'path': str(path.resolve()), 'sha256': digest(raw), 'sources': lock['sha256']}
+    return sources
+
+
+def current_document(data, sources, runtime):
+    """Independent exact composition, matching render_snapshot without importing a builder."""
+    html = sources['web/index.html'].decode()
+    html = html.replace('<link rel="stylesheet" href="/styles.css">', '<style>' + sources['web/styles.css'].decode() + '</style>')
+    html = re.sub(r'^[ \t]*<script src="/app\.js" defer></script>[ \t]*$', '', html, flags=re.M)
+    program = runtime.decode() + '\n' + sources['web/app.js'].decode()
+    require(not re.search(r'</script[\t\n\f\r />]', program, re.I), 'Trusted current composition closes script')
+    payload = json.dumps(data, ensure_ascii=False, allow_nan=False).replace('<', '\\u003c')
+    return html.replace('</body>', '<script>window.BENCH_SNAPSHOT=' + payload + ';</script><script>' + program + '</script></body>').encode()
+
+
 def load_sources(args, report):
     lock = json.loads(args.baseline_lock.read_text())
     require(all(lock['sha256'].get(path) == sha for path, sha in FROZEN_PROGRAMS.items()), 'Independent frozen program lock differs')
     index_sha, manifest_sha = baseline_data_pins(args)
     require(digest(safe_read(args.baseline_site, MANIFEST)) == manifest_sha and
             digest(safe_read(args.baseline_site, 'index.html')) == index_sha, 'Wrong frozen/explicitly locked baseline bundle')
-    report['baseline_data_lock'] = {'mode': 'explicit-new-v2' if getattr(args, 'new_v2_baseline_lock', None) else 'frozen-default',
+    report['baseline_data_lock'] = {'mode': 'explicit-new-v2' if args.new_v2_baseline_lock else 'frozen-default',
                                     'index_sha256': index_sha, 'manifest_sha256': manifest_sha}
     for relative, expected in lock['sha256'].items():
         require(digest(safe_read(args.trust_root, relative)) == expected, 'Frozen trust bytes differ: ' + relative)
-    require(digest(Path(v2.__file__).read_bytes()) == lock['sha256']['tests/verify_public_snapshot.py'], 'Imported v2 helper differs from frozen trust')
+    # Load the separately pinned legacy helper, never accept a changed current
+    # helper as the old baseline merely because it can parse the new candidate.
+    helper_path = args.trust_root / 'tests/verify_public_snapshot.py'
+    spec = importlib.util.spec_from_file_location('gallery_frozen_v2', helper_path)
+    frozen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(frozen)
+    approved = candidate_sources(args, report)
     viewer = safe_read(args.trust_root, 'web/app.js')
     runtime = safe_read(args.trust_root, 'web/preview-runtime.js')
-    old_manifest = checked_manifest(args.baseline_site, 2)
-    manifest = checked_manifest(args.site, 3)
+    require(safe_read(args.source_root, 'web/preview-runtime.js') == runtime, 'Runtime changed outside approved scope')
+    old_manifest, manifest = checked_manifest(args.baseline_site, 2), checked_manifest(args.site, 3)
     old_html = safe_read(args.baseline_site, 'index.html')
-    old_data = v2.audit_html(old_html.decode(), viewer.decode(), runtime.decode(), descriptors_only=True)
-    full_path = 'viewer/' + digest(old_html) + '.html'
-    runtime_path = 'viewer/' + digest(runtime) + '.js'
+    old_data = frozen.audit_html(old_html.decode(), viewer.decode(), runtime.decode(), descriptors_only=True)
+    old_inline = v2.audit_html(safe_read(args.baseline_site, 'offline.html').decode(), viewer.decode(), runtime.decode())
+    full_paths = [name for name, info in manifest['files'].items() if info.get('role') == 'viewer']
+    require(len(full_paths) == 1, 'Exactly one trusted full viewer required')
+    full_path, runtime_path = full_paths[0], 'viewer/' + digest(runtime) + '.js'
     require(set(manifest['files']) == set(old_manifest['files']) | {full_path, runtime_path}, 'Only two viewer namespace assets may be appended')
     for name, meta in old_manifest['files'].items():
-        if name != 'index.html':
+        if name not in ('index.html', 'offline.html'):
             require(same(manifest['files'][name], meta) and safe_read(args.site, name) == safe_read(args.baseline_site, name), 'Inherited asset changed: ' + name)
+    require(safe_read(args.site, runtime_path) == runtime, 'Frozen preview runtime bytes changed')
     full_html = safe_read(args.site, full_path)
-    require(full_html == old_html and safe_read(args.site, runtime_path) == runtime, 'Frozen full document/runtime bytes changed')
-    current_data = v2.audit_html(full_html.decode(), viewer.decode(), runtime.decode(), descriptors_only=True)
-    require(current_data == old_data, 'Metadata/evidence/originals/offline equality failed')
-    offline = v2.audit_html(safe_read(args.site, 'offline.html').decode(), viewer.decode(), runtime.decode())
-    # Offline is old inline transport; compare run/task metadata and exact package bytes,
-    # not external media URLs to embedded data URLs.
-    require(offline['runs'] == old_data['runs'] and offline['tasks'] == old_data['tasks'], 'Offline metadata differs')
+    current_data = v2.audit_html(full_html.decode(), approved['web/app.js'].decode(), runtime.decode(), descriptors_only=True)
+    require(same({k: value for k, value in current_data.items() if k != 'offline'},
+                 {k: value for k, value in old_data.items() if k != 'offline'}), 'NEW snapshot data/tasks/assets/thumbnails/originals/reviews differ from frozen v2')
+    offline_html = safe_read(args.site, 'offline.html')
+    offline = v2.audit_html(offline_html.decode(), approved['web/app.js'].decode(), runtime.decode())
+    require(same(offline, old_inline), 'Offline data or embedded media/original bytes changed')
+    require(offline_html == current_document(old_inline, approved, runtime), 'Offline code/template/styles are not the pinned current composition')
+    expected_data = {**old_data, 'offline': {'path': 'offline.html', 'sha256': digest(offline_html), 'size': len(offline_html)}}
+    require(same(current_data, expected_data) and full_html == current_document(expected_data, approved, runtime),
+            'Full viewer is not the exact current composition with versioned offline descriptor')
     require(len(old_data['runs']) == args.expected_runs and sum(r.get('purpose') == 'benchmark' for r in old_data['runs']) == args.expected_benchmark
             and sum(len(r.get('reviews') or []) for r in old_data['runs']) == args.expected_reviews, 'Frozen census differs')
     html = safe_read(args.site, 'index.html')
-    require(same(manifest['stats'], {**old_manifest['stats'], 'index_bytes': len(html)}), 'Inherited manifest statistics changed')
+    require(same(manifest['stats'], {**old_manifest['stats'], 'index_bytes': len(html), 'offline_bytes': len(offline_html)}), 'Inherited manifest statistics changed')
     full_info = {'path': full_path, 'sha256': digest(full_html), 'size': len(full_html)}
     runtime_info = {'path': runtime_path, 'sha256': digest(runtime), 'size': len(runtime)}
-    seed = audit_gallery(html.decode(), old_data, args.gallery_bootstrap.read_text(), args.gallery_css.read_text(),
-                         full_info, runtime_info, runtime + b'\n' + viewer)
+    seed = audit_gallery(html.decode(), current_data, approved['web/public-gallery.js'].decode(), approved['web/public-gallery.css'].decode(),
+                         full_info, runtime_info, runtime + b'\n' + approved['web/app.js'])
     require(len(html) <= 102400 and len(gzip.compress(html, compresslevel=6, mtime=0)) <= 25600, 'Initial HTML decoded/gzip budget exceeded')
     report['audit'] = {'baseline_html_sha256': digest(old_html), 'full_html_sha256': digest(full_html), 'runtime_sha256': digest(runtime),
+                       'frozen_v2_helper_sha256': digest(helper_path.read_bytes()), 'current_v2_helper_sha256': digest(approved['tests/verify_public_snapshot.py']),
                        'current_html_sha256': digest(html), 'decoded_html_bytes': len(html), 'gzip_html_bytes': len(gzip.compress(html, compresslevel=6, mtime=0)),
                        'exact_data_equality_including_offline': True, 'run_ids': [r['id'] for r in seed['runs']], 'counts': seed['counts'],
                        'candidate_files': len(manifest['files']), 'baseline_files': len(old_manifest['files'])}
-    return {'seed': seed, 'data': old_data, 'manifest': manifest, 'baseline_manifest': old_manifest}
+    return {'seed': seed, 'data': current_data, 'baseline_data': old_data, 'manifest': manifest, 'baseline_manifest': old_manifest}
 
 
 @contextmanager
@@ -475,7 +552,7 @@ GALLERY_OBSERVER = v2.PERFORMANCE_OBSERVER + """
    if(m.readable===null&&document.documentElement.dataset.galleryReady==='true'&&
       visible(document.querySelector('#public-task-tabs button[data-task-id]'))&&
       visible(document.querySelector('#public-purpose'))&&!document.querySelector('#public-purpose').disabled&&
-      visible(document.querySelector('#public-model'))&&!document.querySelector('#public-model').disabled&&
+      visible(document.querySelector('#public-models>summary'))&&
       visible(document.querySelector('#public-grid .evidence-card[data-run-id]')))m.readable=performance.now();
    if(m.image===null)for(const i of document.querySelectorAll('#public-grid .work-image')){
      let row=window.BENCH_GALLERY?.runs.find(r=>r.id===i.closest('[data-run-id]')?.dataset.runId);
@@ -521,7 +598,7 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
             first_actually_visible_image_ms:m.image.ms,first_visible_image:m.image,dom_nodes:document.querySelectorAll('*').length,
             longtasks:window.__loadMetrics.longtasks,document_encoded_bytes:n.encodedBodySize,document_decoded_bytes:n.decodedBodySize,
             transfer_bytes:n.transferSize+performance.getEntriesByType('resource').reduce((s,r)=>s+r.transferSize,0),
-            first_controls:['#public-task-tabs button[data-task-id]','#public-purpose','#public-model','#public-grid .evidence-card[data-run-id]'].map(s=>{
+            first_controls:['#public-task-tabs button[data-task-id]','#public-purpose','#public-models>summary','#public-grid .evidence-card[data-run-id]'].map(s=>{
               let e=document.querySelector(s),r=e.getBoundingClientRect();return {selector:s,label:e.textContent.slice(0,100),top:r.top,bottom:r.bottom,disabled:!!e.disabled};}),
             scroll_x:scrollX,scroll_y:scrollY};}''')
         require(metrics['document_encoded_bytes'] <= 25600 and metrics['document_decoded_bytes'] <= 102400,
@@ -531,7 +608,7 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
         # not only acknowledge a click or render two arbitrary animation frames.
         target = next(t['id'] for t in sources['seed']['tasks'] if t['id'] != sources['seed']['defaults']['task_id'] and
                       any(r['task_id'] == t['id'] and r['purpose'] == 'benchmark' and r['registered_media'] for r in sources['seed']['runs']))
-        expected = [r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']][:8]
+        expected = [r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']][:(PAGE_SIZE if viewport == 'desktop' else PHONE_PAGE_SIZE)]
         page.locator(f'#public-task-tabs button[data-task-id="{target}"]').evaluate('''e=>e.addEventListener('click',()=>{
             window.__taskClickAt=performance.now();},{capture:true,once:true})''')
         page.locator(f'#public-task-tabs button[data-task-id="{target}"]').click()
@@ -588,7 +665,7 @@ def baseline_sample(browser, url, sources, args, profile, viewport, repeat):
         # Latest-only seed pages the gallery at 8 cards; the frozen full
         # snapshot can show more. Require the latest projected IDs to appear
         # without requiring an exact full-history census.
-        expected = [r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']][:8]
+        expected = [r['id'] for r in sources['seed']['runs'] if r['task_id'] == target and r['purpose'] == 'benchmark' and r['registered_media']][:(PAGE_SIZE if viewport == 'desktop' else PHONE_PAGE_SIZE)]
         control = page.locator(f'#task-tabs button[data-task-id="{target}"]')
         click_clock(control, page)
         page.wait_for_function('ids=>{let actual=new Set([...document.querySelectorAll(".gallery-main .evidence-card[data-run-id], .model-groups .evidence-card[data-run-id]")].map(e=>e.dataset.runId));return ids.every(id=>actual.has(id));}', arg=expected)
@@ -688,17 +765,39 @@ def no_full(requests, seed):
     require(not any(urlsplit(r['url']).path.endswith('/' + seed['full']['path']) for r in requests), 'Basic gallery interaction fetched full viewer')
 
 
+def model_menu(page):
+    details = page.locator('#public-models')
+    require(details.evaluate('e=>e.tagName==="DETAILS"'), 'Model selector is not native keyboard disclosure')
+    if not details.evaluate('e=>e.open'):
+        details.locator('summary').click()
+
+
+def reach_public_run(page, row):
+    previous = page.locator('#public-pages [data-gallery-page]').filter(has_text='上一页')
+    while previous.count() and previous.is_enabled():
+        previous.click()
+    limit = page.evaluate('window.BENCH_GALLERY.runs.length') + 1
+    for _ in range(limit):
+        if page.locator(f'#public-grid [data-run-id="{row["id"]}"]').count():
+            return
+        history = page.locator('#public-history')
+        if history.is_visible():
+            if not history.evaluate('d=>d.open'):
+                history.locator('summary').click()
+            if page.locator(f'#public-history-list [data-run-id="{row["id"]}"]').count():
+                return
+        next_page = page.locator('#public-pages [data-gallery-page]').filter(has_text='下一页')
+        require(next_page.count() == 1 and next_page.is_enabled(), 'Requested concrete run is not reachable in basic gallery')
+        next_page.click()
+    require(False, 'Requested run exceeded exact-record bounded pagination')
+
+
 def open_public_run(page, url, row):
     page.goto(url + '?' + urlencode({'task_id': row['task_id'], 'purpose': row['purpose'], 'model_query': row['model']}), wait_until='networkidle')
     public_ready(page)
+    model_menu(page)
     page.locator('#public-model').fill(row['model'])
-    for _ in range(8):
-        if page.locator(f'#public-grid [data-run-id="{row["id"]}"]').count():
-            return
-        next_page = page.get_by_role('button', name='下一页', exact=True)
-        require(next_page.count() == 1 and next_page.is_enabled(), 'Requested concrete run is not reachable in basic gallery')
-        next_page.click()
-    require(False, 'Requested run exceeded bounded gallery pagination')
+    reach_public_run(page, row)
 
 
 def click_clock(locator, page):
@@ -779,10 +878,10 @@ def gallery_ux(browser, url, sources, args, report):
                 media = [r['id'] for r in filtered if r['registered_media']]
                 history = [r['id'] for r in filtered if not r['registered_media']]
                 actual = []
-                for index in range(max(1, (len(media) + 7)//8)):
+                for index in range(max(1, (len(media) + PAGE_SIZE - 1)//PAGE_SIZE)):
                     if index:
                         page.locator(f'#public-pages [data-gallery-page="{index}"]').click()
-                    expected = media[index*8:(index+1)*8]
+                    expected = media[index*PAGE_SIZE:(index+1)*PAGE_SIZE]
                     page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card[data-run-id]")].map(e=>e.dataset.runId))===JSON.stringify(ids)', arg=expected)
                     actual.extend(public_ids(page))
                 if history:
@@ -832,8 +931,7 @@ def gallery_ux(browser, url, sources, args, report):
                     pairs.append((history_id, sibling['id'], latest))
         require(pairs, 'Need a same-purpose non-latest sibling for detail history proof')
         history_sample, sibling_id, latest_for_triple = pairs[0]
-        page.goto(url, wait_until='networkidle')
-        public_ready(page)
+        open_public_run(page, url, next(r for r in seed['runs'] if r['id'] == latest_for_triple['id']))
         page.locator(f'[data-detail-run="{latest_for_triple["id"]}"]').first.click()
         full_ready(page)
         page.wait_for_function("""expected => {
@@ -859,8 +957,9 @@ def gallery_ux(browser, url, sources, args, report):
         full_before_zoom = sum(1 for r in requests if urlsplit(r['url']).path.endswith('/' + seed['full']['path']))
         page.goto(url, wait_until='networkidle')
         public_ready(page)
+        model_menu(page)
         page.locator('#public-model').fill(first['model'])
-        expected = [r['id'] for r in default if first['model'].lower() in r['model'].lower()][:8]
+        expected = [r['id'] for r in default if first['model'].lower() in r['model'].lower()][:PAGE_SIZE]
         page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card[data-run-id]")].map(e=>e.dataset.runId))===JSON.stringify(ids)', arg=expected)
         page.locator(f'[data-zoom-run="{first["id"]}"]').click()
         page.wait_for_function('document.querySelector("#public-zoom-image").complete&&document.querySelector("#public-zoom-image").naturalWidth>0')
@@ -903,19 +1002,24 @@ def gallery_ux(browser, url, sources, args, report):
         public_ready(page)
         compatible = [r for r in default if r['image']][:2]
         require(len(compatible) == 2, 'Need two concrete default-task runs for selection test')
+        reach_public_run(page, compatible[0])
         page.locator(f'[data-select-run="{compatible[0]["id"]}"]').click()
         other = next(r for r in seed['runs'] if r['task_id'] != compatible[0]['task_id'] and r['purpose'] == 'benchmark' and r['registered_media'])
         page.locator(f'#public-task-tabs [data-task-id="{other["task_id"]}"]').click()
+        reach_public_run(page, other)
         page.locator(f'[data-select-run="{other["id"]}"]').click()
         require(page.locator(f'[data-select-run="{other["id"]}"]').get_attribute('aria-pressed') == 'false' and
                 page.locator('#public-notice').is_visible(), 'Cross-task selection bypassed compatibility restriction')
         page.locator(f'#public-task-tabs [data-task-id="{compatible[0]["task_id"]}"]').click()
+        reach_public_run(page, compatible[0])
         require(page.locator(f'[data-select-run="{compatible[0]["id"]}"]').get_attribute('aria-pressed') == 'true', 'Task filter discarded first selection')
+        reach_public_run(page, compatible[1])
         page.locator(f'[data-select-run="{compatible[1]["id"]}"]').click()
         require(page.locator('#public-selection-label').inner_text().find('2') >= 0, 'Two selections not retained')
         require(page.locator('#public-compare').is_disabled(), 'Cross-condition comparison did not require explicit confirmation')
         page.locator('#public-mixed').check()
         require(page.locator('#public-compare').is_enabled(), 'Explicit same-task comparison confirmation unavailable')
+        model_menu(page)
         page.locator('#public-model').fill('does-not-match-any-real-model')
         page.wait_for_function('document.querySelectorAll("#public-grid .evidence-card").length===0')
         require('2' in page.locator('#public-selection-label').inner_text(), 'Filter erased selection')
@@ -1154,7 +1258,9 @@ def original_smoke(browser, url, sources, args, report):
                      and r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
         pair_page.goto(url + '?' + urlencode({'task_id': row_a['task_id'], 'purpose': row_a['purpose']}), wait_until='networkidle')
         public_ready(pair_page)
+        reach_public_run(pair_page, row_a)
         pair_page.locator(f'[data-select-run="{row_a["id"]}"]').first.click()
+        reach_public_run(pair_page, row_b)
         pair_page.locator(f'[data-select-run="{row_b["id"]}"]').first.click()
         pair_page.locator('#public-mixed').check()
         require(not pair_page.locator('#public-compare').is_disabled(), 'Lightweight mixed pair was not enabled')
@@ -1207,7 +1313,7 @@ def main(argv=None):
             from playwright.sync_api import sync_playwright
             with ExitStack() as stack:
                 current, _ = stack.enter_context(serve_gallery(args.site, sources['manifest']))
-                baseline = stack.enter_context(v2.serve_report(args.baseline_site / 'index.html', sources['data'], gzip_html=True))
+                baseline = stack.enter_context(v2.serve_report(args.baseline_site / 'index.html', sources['baseline_data'], gzip_html=True))
                 baseline_actions, _ = stack.enter_context(serve_gallery(args.baseline_site, sources['baseline_manifest']))
                 playwright = stack.enter_context(sync_playwright())
                 browser = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'])

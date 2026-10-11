@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -144,6 +145,104 @@ class ReportHTML(HTMLParser):
         if tag == "script" and self.current is not None:
             self.scripts.append("".join(self.current))
             self.current = None
+
+
+SCORE_LABELS = {'compliance': '指令遵循', 'recognizability': '辨识度', 'motion': '运动表现',
+                'visual_detail': '视觉细节', 'interaction': '交互表现', 'completeness': '完整性'}
+
+
+def valid_number(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def score_scope(run, review):
+    rubric = (run.get('conditions') or {}).get('rubric_version')
+    rubric = rubric if isinstance(rubric, str) and rubric and rubric != 'unknown' else None
+    declarations = [review] + [review[key] for key in ('conditions', 'source') if isinstance(review.get(key), dict)]
+    if any('rubric_version' in item and item['rubric_version'] != rubric for item in declarations) or (
+            'run_id' in review and review['run_id'] != run.get('id')):
+        rubric = None
+    reviewer = review.get('reviewer')
+    reviewer = reviewer if isinstance(reviewer, str) and reviewer.strip() else None
+    blind = review.get('blind') if type(review.get('blind')) is bool else None
+    return [rubric, 'ai-suggestion' if blind is False and re.search(r'AI.*建议', reviewer or '', re.I) else 'label-unverified', blind, reviewer]
+
+
+def scope_key(scope):
+    return json.dumps(scope, ensure_ascii=False, separators=(',', ':'))
+
+
+def scope_rankable(scope):
+    return (isinstance(scope, list) and len(scope) == 4 and scope[0] == 'visual-v1'
+            and scope[1] in ('ai-suggestion', 'label-unverified') and type(scope[2]) is bool
+            and isinstance(scope[3], str) and bool(scope[3].strip()))
+
+
+def review_timestamp(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?', value):
+        return -math.inf
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).timestamp()
+    except ValueError:
+        return -math.inf
+
+
+def score_summaries(run):
+    selected = {}
+    for index, review in enumerate(run.get('reviews') or []):
+        if not isinstance(review, dict):
+            continue
+        scope = scope_key(score_scope(run, review))
+        created = review.get('created_at') if isinstance(review.get('created_at'), str) else None
+        rid = review.get('id')
+        rid = rid if isinstance(rid, str) or valid_number(rid) else None
+        tie_id = str(int(rid)) if valid_number(rid) and rid == int(rid) else str(rid) if rid is not None else ''
+        order = (review_timestamp(created), tie_id, index)
+        values = review.get('scores') if isinstance(review.get('scores'), dict) else {}
+        summary = {'scope': scope, 'created_at': created, 'id': rid, 'index': index,
+                   'values': [value if valid_number(value) and value <= 4 else None for value in (values.get(key) for key in SCORE_LABELS)]}
+        if scope not in selected or order > selected[scope][0]:
+            selected[scope] = (order, summary)
+    return [selected[key][1] for key in sorted(selected)]
+
+
+def score_scopes(runs):
+    unique = {scope_key(score_scope(run, review)): score_scope(run, review)
+              for run in runs for review in run.get('reviews') or [] if isinstance(review, dict)}
+    return [unique[key] for key in sorted(unique)]
+
+
+def default_score_source(scopes):
+    preferred = next((scope for scope in scopes if scope_rankable(scope) and scope[1] == 'ai-suggestion' and scope[2] is False), None)
+    fallback = next((scope for scope in scopes if scope_rankable(scope)), None)
+    return scope_key(preferred or fallback or scopes[0]) if scopes else ''
+
+
+def meter(run):
+    metrics = run.get('metrics') or {}
+    return [run.get('duration_ms') if valid_number(run.get('duration_ms')) else None,
+            metrics.get('cost_usd') if valid_number(metrics.get('cost_usd')) else None,
+            metrics.get('cost_source') if isinstance(metrics.get('cost_source'), str) and metrics['cost_source'] else None]
+
+
+def score_order(rows, dimension, scope):
+    """Independent expected IDs: same task/purpose/scope; stable ties and missing last."""
+    if not dimension:
+        return rows
+    dimension_index = list(SCORE_LABELS).index(dimension)
+    def value(row):
+        summary = next((item for item in row.get('scores', []) if item['scope'] == scope), None)
+        return summary['values'][dimension_index] if summary and scope_rankable(json.loads(scope)) else None
+    groups = {}
+    for row in rows:
+        groups.setdefault(json.dumps([row.get('task_id'), row.get('purpose'), scope], ensure_ascii=False, separators=(',', ':')), []).append(row)
+    return [row for key in sorted(groups) for row in sorted(groups[key], key=lambda row: (value(row) is None, -value(row) if value(row) is not None else 0))]
 
 
 def audit_external_original_descriptors(data):

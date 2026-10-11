@@ -242,7 +242,8 @@ class GalleryUtilityTests(unittest.TestCase):
         runtime_info = {k: self.files[self.js][k] for k in ('sha256', 'size')}
         runtime_info['path'] = self.js
         seed = {'version': 3, 'format': 'progressive-static-v3', 'tasks': [{'id': 'crocodile', 'name': 'Task'}],
-                'runs': verifier.project_runs(data), 'defaults': {'task_id': 'crocodile', 'purpose': 'benchmark', 'page_size': 8},
+                'runs': verifier.project_runs(data), 'score_scopes': [],
+                'defaults': {'task_id': 'crocodile', 'purpose': 'benchmark', 'page_size': 2, 'mobile_page_size': 1, 'score_source': ''},
                 'counts': {'runs': 1, 'full_runs': 1, 'benchmark': 1, 'full_benchmark': 1, 'reviews': 0},
                 'full': {**full_info, 'script_sha256': verifier.digest(b'trusted-program')},
                 'runtime': runtime_info, 'offline': data['offline']}
@@ -251,8 +252,8 @@ class GalleryUtilityTests(unittest.TestCase):
     def render_fixture(self, seed):
         payload = json.dumps(seed).replace('<', '\\u003c')
         model = escape(seed['runs'][0]['model'])
-        return ('<style>trusted-css</style><article class="evidence-card" data-run-id="a">'
-                '<h2 class="work-name">' + model + '</h2><p class="work-meta">tool · 2026-10-08</p>'
+        return ('<style>trusted-css</style><article class="evidence-card" data-run-id="a" data-model-route="' + model + '">'
+                '<h2 class="work-name" aria-label="' + model + '" title="' + model + '">' + model + '</h2><p class="work-meta">tool · 2026-10-08</p>'
                 '<p class="work-status">会话 failed · 入口 fail · 评估 completed</p>'
                 '<button data-run-original="a" disabled></button><button data-select-run="a"></button>'
                 '<button data-zoom-run="a" disabled></button><button data-detail-run="a"></button></article>'
@@ -309,6 +310,13 @@ class GalleryUtilityTests(unittest.TestCase):
             parsed.feed(markup)
             self.assertTrue(parsed.unsafe)
 
+
+    def test_phone_gallery_heading_has_44px_target_without_extra_vertical_budget(self):
+        css = (verifier.ROOT / 'web/public-gallery.css').read_text()
+        self.assertIn('.public-gallery .gallery-heading>button{min-height:44px;', css)
+        self.assertNotIn('.public-gallery .gallery-heading>button{min-height:36px;', css)
+        # +8px target height is offset by -8px combined heading padding.
+        self.assertIn('.public-gallery .gallery-heading{padding:4px 0;align-items:start;gap:8px}', css)
 
 if __name__ == '__main__':
     unittest.main()

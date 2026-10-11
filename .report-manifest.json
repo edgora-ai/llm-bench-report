@@ -3,8 +3,8 @@
     "index.html": {
       "mime": "text/html",
       "role": "index",
-      "sha256": "4ab18966dd308b16f75565c8308e773892f31963661f6aeb2ac032ceb700961f",
-      "size": 93940
+      "sha256": "7cbc4f8e0ab48adc825fe89ffdfeea1c3359d71ff0cfc3f8c928a423406045b3",
+      "size": 90863
     },
     "media/00431e4b3d81a837aa9f77dd4bf8127e024062eb96e400bc4982bb42d3f3b650.webm": {
       "height": 640,
@@ -3081,8 +3081,8 @@
     "offline.html": {
       "mime": "text/html",
       "role": "offline",
-      "sha256": "03965dcad4c15bed6a203dd8f4703ec5c8e6c1d3bbed2ea404683d254e8ca3b3",
-      "size": 46796135
+      "sha256": "4cf51195d85aa38feea294d1738a36389eb70897eaf5715e2dce3de7516b6321",
+      "size": 46811374
     },
     "originals/02951516812e7e7d82236b3289548375df5e13e3a2a2848eaf9cce34fd93e713.json": {
       "mime": "application/json",
@@ -3348,17 +3348,17 @@
       "sha256": "fe9ae42dd3d0477c4ed1ce7fa8eb1c24403575763f340d721ff6506e06cd8c10",
       "size": 49499
     },
-    "viewer/1fadb7de49c52730d7faa897306904af3ac85ecedb770d1ffa9c27a8ae05165e.html": {
-      "mime": "text/html",
-      "role": "viewer",
-      "sha256": "1fadb7de49c52730d7faa897306904af3ac85ecedb770d1ffa9c27a8ae05165e",
-      "size": 758619
-    },
     "viewer/50f44020c5464433c28c9a27a944b83588002c435e7ce33508866afb249b67cf.js": {
       "mime": "text/javascript",
       "role": "runtime",
       "sha256": "50f44020c5464433c28c9a27a944b83588002c435e7ce33508866afb249b67cf",
       "size": 27601
+    },
+    "viewer/5a07cc3134a2e3cff223116fe4258587198f437519b18b790db297b2156f4ef2.html": {
+      "mime": "text/html",
+      "role": "viewer",
+      "sha256": "5a07cc3134a2e3cff223116fe4258587198f437519b18b790db297b2156f4ef2",
+      "size": 773858
     }
   },
   "format": "progressive-static-v3",
@@ -3366,10 +3366,10 @@
     "benchmark_runs": 67,
     "evidence": 220,
     "images": 176,
-    "index_bytes": 93940,
+    "index_bytes": 90863,
     "media_bytes": 35466101,
     "media_files": 384,
-    "offline_bytes": 46796135,
+    "offline_bytes": 46811374,
     "original_bytes": 2003664,
     "original_files": 65,
     "original_packages": 44,

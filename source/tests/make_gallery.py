@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime, timezone
 import gzip
+import math
 import hashlib
 from html import escape
 import json
@@ -31,6 +33,117 @@ PUBLIC_FILES = ("web/public-gallery.html", "web/public-gallery.css", "web/public
 MARKERS = ("PUBLIC_CSS", "PUBLIC_JS", "GALLERY_SEED", "TASK_TABS", "GALLERY_CARDS",
            "GALLERY_COUNT", "GALLERY_TOTAL")
 GZIP_BUDGET = 25 * 1024
+SCORE_LABELS = {"compliance": "指令遵循", "recognizability": "辨识度", "motion": "运动表现",
+                "visual_detail": "视觉细节", "interaction": "交互表现", "completeness": "完整性"}
+
+
+def valid_number(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False  # Outside the browser's finite numeric range.
+
+
+def valid_score(value):
+    return value if valid_number(value) and value <= 4 else None
+
+
+def score_scope(run, review):
+    """Provenance labels are heuristics, never reviewer identity authentication."""
+    rubric = (run.get("conditions") or {}).get("rubric_version")
+    rubric = rubric if isinstance(rubric, str) and rubric and rubric != "unknown" else None
+    # A declared conflict is not permission to infer a protocol from today's task.
+    declarations = [review]
+    declarations += [review[key] for key in ("conditions", "source") if isinstance(review.get(key), dict)]
+    if any("rubric_version" in item and item["rubric_version"] != rubric for item in declarations):
+        rubric = None
+    if "run_id" in review and review["run_id"] != run.get("id"):
+        rubric = None
+    reviewer = review.get("reviewer")
+    reviewer = reviewer if isinstance(reviewer, str) and reviewer.strip() else None
+    blind = review.get("blind") if type(review.get("blind")) is bool else None
+    provenance = "ai-suggestion" if blind is False and re.search(r"AI.*建议", reviewer or "", re.I) else "label-unverified"
+    return [rubric, provenance, blind, reviewer]
+
+
+def scope_key(scope):
+    return json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
+
+
+def scope_rankable(scope):
+    return (isinstance(scope, list) and len(scope) == 4 and scope[0] == "visual-v1"
+            and scope[1] in ("ai-suggestion", "label-unverified") and type(scope[2]) is bool
+            and isinstance(scope[3], str) and bool(scope[3].strip()))
+
+
+def review_timestamp(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?", value):
+        return -math.inf
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).timestamp()
+    except ValueError:
+        return -math.inf
+
+
+def score_summaries(run):
+    """Latest timestamp / available ID / source index within each exact scope.
+
+    No best-score selection, no backfill, and no transfer to a newer run.
+    Keep original reviews immutable; only the six validated numbers are projected.
+    """
+    selected = {}
+    for index, review in enumerate(run.get("reviews") or []):
+        if not isinstance(review, dict):
+            continue
+        key = scope_key(score_scope(run, review))
+        stamp = review.get("created_at") if isinstance(review.get("created_at"), str) else None
+        review_id = review.get("id")
+        if not (isinstance(review_id, str) or valid_number(review_id)):
+            review_id = None
+        tie_id = str(int(review_id)) if valid_number(review_id) and review_id == int(review_id) else str(review_id) if review_id is not None else ""
+        order = (review_timestamp(stamp), tie_id, index)
+        values = review.get("scores") if isinstance(review.get("scores"), dict) else {}
+        summary = {"scope": key, "created_at": stamp, "id": review_id, "index": index,
+                   "values": [valid_score(values.get(dimension)) for dimension in SCORE_LABELS]}
+        if key not in selected or order > selected[key][0]:
+            selected[key] = (order, summary)
+    return [selected[key][1] for key in sorted(selected)]
+
+
+def score_scopes(runs):
+    scopes = {scope_key(score_scope(run, review)): score_scope(run, review)
+              for run in runs for review in run.get("reviews") or [] if isinstance(review, dict)}
+    return [scopes[key] for key in sorted(scopes)]
+
+
+def default_score_source(scopes):
+    preferred = next((scope for scope in scopes if scope_rankable(scope) and scope[1] == "ai-suggestion" and scope[2] is False), None)
+    fallback = next((scope for scope in scopes if scope_rankable(scope)), None)
+    return scope_key(preferred or fallback or scopes[0]) if scopes else ""
+
+
+def scope_label(scope):
+    return " · ".join([scope[0] or "协议 unknown", "非盲 AI 建议" if scope[1] == "ai-suggestion" else "来源标签未核实",
+                       "盲评" if scope[2] is True else "非盲评" if scope[2] is False else "盲评属性 unknown", scope[3] or "Reviewer unknown"])
+
+
+def meter(run):
+    metrics = run.get("metrics") or {}
+    cost_source = metrics.get("cost_source")
+    return [run.get("duration_ms") if valid_number(run.get("duration_ms")) else None,
+            metrics.get("cost_usd") if valid_number(metrics.get("cost_usd")) else None,
+            cost_source if isinstance(cost_source, str) and cost_source else None]
+
+
+def meter_text(values):
+    duration, cost, source = values
+    duration = f"约 {math.floor(duration / 1000 + .5)} 秒（approx）" if valid_number(duration) and duration != 0 else "0 秒" if valid_number(duration) else "unknown"
+    cost = f"约 USD {cost:.2f}（approx）" if valid_number(cost) else "unknown"
+    origin = "CLI 未核验，非账单" if source == "cli_reported_unverified" else "来源未核实（原始记录可查）" if source else "来源未声明"
+    return f"生成会话 {duration}；费用 {cost} · {origin}"
 
 
 def _digest(raw):
@@ -77,7 +190,9 @@ def project_row(run, data):
         if info["mime"].startswith("image/"):
             image = {"thumb": thumb, "full": full, "width": info["width"],
                      "height": info["height"], "label": "desktop.png"}
-    return {"id": run_id, "model": run.get("model") or "unknown",
+    summaries = score_summaries(run)
+    return {**({"scores": summaries} if summaries else {}), "meter": meter(run),
+            "id": run_id, "model": run.get("model") or "unknown",
             "tool": run.get("tool") or "unknown", "task_id": run.get("task_id"),
             "purpose": run.get("purpose") or "unknown", "prompt_version": run.get("prompt_version"),
             "date": str(run.get("date") or run.get("started_at") or "")[:10] or None,
@@ -133,8 +248,10 @@ def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes):
     ordered_tasks = sorted(tasks.values(), key=lambda task: (task["id"] != "crocodile", task["id"]))
     full = _descriptor(full_bytes, "html")
     full["script_sha256"] = _digest(runtime_bytes + b"\n" + viewer_bytes)
-    seed = {"version": VERSION, "format": FORMAT, "tasks": ordered_tasks, "runs": runs,
-            "defaults": {"task_id": ordered_tasks[0]["id"] if ordered_tasks else "", "purpose": "benchmark", "page_size": 8},
+    scopes = score_scopes(data["runs"])
+    seed = {"version": VERSION, "format": FORMAT, "tasks": ordered_tasks, "runs": runs, "score_scopes": scopes,
+            "defaults": {"task_id": ordered_tasks[0]["id"] if ordered_tasks else "", "purpose": "benchmark",
+                         "page_size": 2, "mobile_page_size": 1, "score_source": default_score_source(scopes)},
             "counts": {"runs": len(runs), "full_runs": len(data["runs"]), "benchmark": sum(run.get("purpose") == "benchmark" for run in runs),
                        "full_benchmark": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
                        "reviews": sum(len(run.get("reviews") or []) for run in data["runs"])},
@@ -149,33 +266,45 @@ def initial_runs(seed):
             and run["purpose"] == defaults["purpose"] and run["registered_media"]]
 
 
-def render_card(run):
-    """Server markup has the same action/status/lazy-image contract as bootstrap."""
+def render_card(run, score_source=""):
+    """Server markup and bootstrap share canonical identity, score and meter facts."""
     e = lambda value: escape(str(value if value is not None else "unknown"), quote=True)
     run_id = e(run["id"])
     image = run["image"]
     cover = ('<img class="work-image" data-src="' + e(image["thumb"]) + '" width="' + e(image["width"])
              + '" height="' + e(image["height"]) + '" alt="' + e(run["model"] + ' · ' + run["id"] + ' · ' + image["label"])
-             + '" loading="lazy" decoding="async">') if image else '<p class="work-empty">本次未登记桌面首张截图；不替换为其他采样。</p>'
+             + '" decoding="async">') if image else '<p class="work-empty">' + ('本次未登记桌面首张截图；不替换为其他采样。' if run["registered_media"] else '本次无媒体登记；入口与会话状态仍保留。') + '</p>'
+    cover_style = ' style="aspect-ratio:' + e(image["width"]) + '/' + e(image["height"]) + '"' if image else ''
     disabled = '' if run["original"]["status"] in {"ready", "missing_dependencies"} else ' disabled'
     zoom_disabled = '' if image else ' disabled'
     history = int(run.get("history_count") or 0)
     history_badge = ('<span class="work-history-badge" title="历史尝试">历史 ' + e(history + 1) + ' 次 · 详情对照</span>'
                      if history else '<span class="work-history-badge" title="无历史尝试">最新</span>')
-    score = '<span class="work-score-note">评分状态 · 详情</span>'
-    return ('<article class="evidence-card" data-run-id="' + run_id + '">'
-            '<div class="work-heading"><div class="work-identity"><h2 class="work-name">' + e(run["model"]) + '</h2>'
-            '<p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["prompt_version"]) + '</p>'
-            + history_badge + '</div>'
-            '<span class="work-attempt" title="' + run_id + '">' + e(run["id"][:8]) + '</span></div>'
-            '<div class="work-cover">' + cover + '</div>'
+    summary = next((item for item in run.get("scores", []) if item["scope"] == score_source), None) if score_source else next(iter(run.get("scores", [])), None)
+    scope = json.loads(summary["scope"]) if summary else None
+    value = summary["values"][0] if scope and scope_rankable(scope) else None
+    score = '<div class="work-score"><span>指令遵循 ' + (e(value) + '/4' if value is not None else '未评') + '</span>'
+    if summary:
+        score += ('<details class="work-score-details"><summary>六项与来源</summary><p>' + e(scope_label(scope))
+                  + (' · 协议/来源条件未核实，不排序' if not scope_rankable(scope) else '') + ' · ' + e(summary["created_at"])
+                  + ' · review ' + e(summary["id"]) + ' · 原序 ' + e(summary["index"]) + '</p><dl>')
+        for label, rating in zip(SCORE_LABELS.values(), summary["values"]):
+            score += '<dt>' + label + '</dt><dd>' + (e(rating) + '/4' if rating is not None and scope_rankable(scope) else '未评') + '</dd>'
+        score += '</dl></details>'
+    score += '</div>'
+    model = run["model"][9:] if run["model"].startswith("opencode/") else run["model"]
+    return ('<article class="evidence-card' + ('' if run["registered_media"] else ' no-registered-media') + '" data-run-id="' + run_id + '" data-model-route="' + e(run["model"]) + '">'
+            '<div class="work-cover"' + cover_style + '>' + cover + '</div>'
+            '<div class="work-heading"><div class="work-identity"><h2 class="work-name" title="' + e(run["model"]) + '" aria-label="' + e(run["model"]) + '">' + e(model) + '</h2>'
+            '<p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["task_id"]) + ' · ' + e(run["purpose"]) + ' · ' + e(run["prompt_version"]) + '</p>'
+            + history_badge + '<button type="button" data-model-profile="' + e(run["model"]) + '">模型全史 ↗</button></div></div>'
+            + score + '<p class="work-metrics">' + e(meter_text(run.get("meter", [None, None, None]))) + '</p>'
             '<div class="work-status"><span>会话 ' + e(run["status"]) + '</span><span>入口 ' + e(run["entry_status"])
-            + '</span><span>评估 ' + e(run["evaluation_status"]) + '</span>' + score + '</div><div class="work-actions">'
+            + '</span><span>评估 ' + e(run["evaluation_status"]) + '</span></div><div class="work-actions">'
             '<button type="button" class="primary" data-run-original="' + run_id + '"' + disabled + '>运行原作</button>'
             '<button type="button" data-select-run="' + run_id + '" aria-pressed="false">加入对比</button>'
             '<button type="button" data-zoom-run="' + run_id + '"' + zoom_disabled + '>放大</button>'
             '<button type="button" data-detail-run="' + run_id + '">详情 ↗</button>'
-            '<button type="button" data-model-profile="' + e(run["model"]) + '">模型全史 ↗</button>'
             '</div></article>')
 
 
@@ -193,10 +322,9 @@ def render_gallery(seed, root=ROOT):
     encoded = json.dumps(seed, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).replace("<", "\\u003c")
     defaults = seed["defaults"]
     filtered = [run for run in seed["runs"] if run["task_id"] == defaults["task_id"] and run["purpose"] == defaults["purpose"]]
-    history_extra = sum(int(run.get("history_count") or 0) for run in filtered)
     values = {"PUBLIC_CSS": css, "PUBLIC_JS": bootstrap, "GALLERY_SEED": encoded,
-              "TASK_TABS": tabs, "GALLERY_CARDS": ''.join(render_card(run) for run in included[:8]),
-              "GALLERY_COUNT": f"{len(filtered)} 最新三元组 · 本页 {min(8, len(included))} 份媒体记录 · {len(filtered) - len(included)} 次无媒体 · 详情对照历史 {history_extra} 次",
+              "TASK_TABS": tabs, "GALLERY_CARDS": ''.join(render_card(run, defaults["score_source"]) for run in included[:defaults["page_size"]]),
+              "GALLERY_COUNT": f"{len(filtered)} 最新记录 · 本页{min(defaults['page_size'], len(included))} · 无媒体{len(filtered) - len(included)}",
               "GALLERY_TOTAL": str(seed["counts"]["full_runs"])}
     # One pass prevents a literal template marker in source data being expanded.
     result = re.sub(r"\{\{(" + '|'.join(MARKERS) + r")\}\}", lambda match: values[match.group(1)], template)

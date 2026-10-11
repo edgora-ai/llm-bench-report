@@ -29,6 +29,10 @@
 /* Original execution is opt-in and visually separate from captured evidence. */
 .card-heading{align-items:center;flex-wrap:nowrap}.card-title{min-width:0;display:grid;gap:4px}.card-title .chip{justify-self:start}.run-original{flex-shrink:0;font-size:12px;min-height:38px}.original-dialog{width:1500px}.original-preview{min-width:0;max-width:100%}.preview-controls{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-bottom:10px}.preview-controls label{min-width:140px}.preview-controls select{width:100%}.preview-state{padding:8px 10px;background:var(--surface-2);border-left:2px solid var(--blue);font-size:12px;overflow-wrap:anywhere}.original-preview[data-preview-state=error] .preview-state{border-color:var(--bad);color:var(--bad)}.preview-dimensions{font-size:11px;color:var(--muted);padding-block:6px;font-variant-numeric:tabular-nums}.preview-host{position:relative;width:100%;height:min(60dvh,720px);min-height:300px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line)}.preview-host:empty{height:100px;min-height:100px}.preview-host:empty:after{content:'原作未运行';position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:12px}.preview-provenance{margin-top:10px;color:var(--muted);overflow-wrap:anywhere}.preview-diagnostics{font-size:11px;color:var(--warn);padding-left:20px;overflow-wrap:anywhere;max-height:180px;overflow:auto}.compare-pair-picker{display:grid;gap:6px;margin-block:10px}.compare-pair-picker:empty{display:none}.compare-pair-picker label{min-width:0;overflow-wrap:anywhere}.compare-pair-picker input{flex-shrink:0}#start-original-pair{margin-block:8px}#original-content{min-width:0;max-width:100%}.no-registered-media .card-heading{flex-wrap:wrap}.no-registered-media .card-heading .run-original{margin-top:4px}
 @media(max-width:600px){.run-original{padding:7px 10px;font-size:12px;min-height:40px}.original-dialog{padding:16px;max-width:calc(100% - 16px);max-height:calc(100dvh - 20px)}.original-dialog .dialog-top{gap:8px;margin-bottom:12px;align-items:start}.original-dialog h2{font-size:19px;overflow-wrap:anywhere}.original-dialog .eyebrow{font-size:9px;margin-bottom:3px}.preview-controls{gap:6px}.preview-controls button{font-size:11px;padding:6px 9px;min-height:38px}.preview-controls label{flex:1 1 100%;font-size:10px}.preview-host{height:55dvh;min-height:280px}.preview-state{font-size:11px}.card-heading h3{overflow-wrap:anywhere}.compare-pair-picker .checkbox-label{font-size:11px}}
+/* Read-only scoring history stays local; the existing matrix is unchanged. */
+.snapshot .tabs{flex-wrap:wrap;gap:0 16px;justify-content:flex-start}
+.scores-view{min-width:0}.scores-view>.section-heading{margin-block:0 16px}.scores-view .score-controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin-bottom:16px}.scores-view .score-controls label{flex:1 1 180px;min-width:0;max-width:100%;font-size:13px}.scores-view .score-controls select{min-height:44px;font-size:14px}.scores-view #scores-coverage{font-size:13px;line-height:1.6;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.scores-view .scores-group{min-width:0;margin-block:24px}.scores-view .scores-group h3{font-size:16px;overflow-wrap:anywhere;margin-bottom:12px}.scores-view .table-scroll{width:100%;border-radius:8px;overflow:auto}.scores-view .score-history-table{min-width:1080px}.scores-view .score-history-table th{padding:12px;font-size:12px}.scores-view .score-history-table td{padding:12px;font-size:13px;overflow-wrap:anywhere}.scores-view .score-history-table td.numeric{font-variant-numeric:tabular-nums}.scores-view .score-history-table button{max-width:100%;min-height:44px;text-align:left;overflow-wrap:anywhere}.scores-view .score-history-table small{font-size:12px;display:block}.scores-view .footnote{font-size:12px;line-height:1.6}
+@media(max-width:600px){.scores-view .score-controls{padding:12px;gap:12px}.scores-view .score-controls label{flex-basis:100%}.scores-view .scores-group{margin-block:16px}.scores-view .score-history-table th,.scores-view .score-history-table td{padding:12px 8px}}
 @media print{.chart .bar{fill:var(--bar-pattern)}.topbar,.filters,.comparison-tray,.workspace-bar{display:none}.shell{max-width:none;padding:0}.panel{break-inside:avoid}}
 </style>
 
@@ -50,7 +54,7 @@
     </div>
     <section class="summary" id="summary" aria-label="当前筛选尝试与覆盖"></section>
     <details id="summary-explanation" class="summary-explanation"><summary>查看四项统计口径</summary><p>具体尝试包含首次、重复记录及显式重试；模型 × 任务组合不因重复尝试增加。证据登记、公开包包含、浏览器已加载是不同事实，均不代表验收或视觉质量。本地模式通过认证 API 按需读取，不预检所有附件。</p></details>
-    <nav class="tabs" aria-label="实验视图"><button data-view="gallery" class="active" aria-current="page">作品对比<span>01</span></button><button data-view="matrix">结果总览<span>02</span></button><button data-view="batch">成本与耗时<span>03</span></button><button data-view="evidence">完整记录<span>04</span></button><button data-view="trend">日期趋势</button><button data-view="blind">盲评分</button></nav>
+    <nav class="tabs" aria-label="实验视图"><button data-view="gallery" class="active" aria-current="page">作品对比<span>01</span></button><button data-view="matrix">结果总览<span>02</span></button><button data-view="batch">成本与耗时<span>03</span></button><button data-view="evidence">完整记录<span>04</span></button><button data-view="scores" hidden>评分历史</button><button data-view="trend">日期趋势</button><button data-view="blind">盲评分</button></nav>
     <div class="workspace-bar"><p id="result-label" aria-live="polite">正在连接实验数据…</p><div><button id="texture-toggle" aria-pressed="false">图表纹理</button><button data-export="csv">导出 CSV</button><button data-export="json">导出 JSON</button></div></div>
     <p id="notice" class="notice" role="status" hidden></p>
     <section id="workspace" tabindex="-1" aria-label="实验数据"><div id="view-content"></div></section>
@@ -515,6 +519,53 @@
   let comparePair = [];
   const state = { runs: [], tasks: [], options: {}, view: 'gallery', filters: {}, selected: new Set(), selectionRuns: new Map(), compareLimit: 2, mixed: false, compareRuns: [], compareStage: 'desktop', compareIndex: 0, galleryStage: 'desktop', defaultTaskPending: false, authenticated: false, loaded: false, request: 0, detailRequest: 0, controller: null, trendMetric: 'duration_ms', trendPage: 0, blindQueue: [], blindIndex: 0, blindSignature: '', texture: false, loading: false };
   const staticMedia = snapshot && (source.format === 'static-media-v1' || (source.format === 'static-media-v2' && source.transport === 'external'));
+  state.scoreSort = ''; state.scoreSource = '';
+  const scoreKeys = Object.keys(scoreLabels), scoreCache = snapshot ? new WeakMap() : null;
+  function scoreScope(run, review) {
+    let rubric = typeof run.conditions?.rubric_version === 'string' && run.conditions.rubric_version && run.conditions.rubric_version !== 'unknown' ? run.conditions.rubric_version : null;
+    const declarations = [review, ...['conditions', 'source'].map(key => review[key]).filter(item => item && typeof item === 'object' && !Array.isArray(item))];
+    if (declarations.some(item => Object.hasOwn(item, 'rubric_version') && item.rubric_version !== rubric) || (Object.hasOwn(review, 'run_id') && review.run_id !== run.id)) rubric = null;
+    const reviewer = typeof review.reviewer === 'string' && review.reviewer.trim() ? review.reviewer : null, blind = typeof review.blind === 'boolean' ? review.blind : null;
+    return [rubric, blind === false && /AI.*建议/i.test(reviewer || '') ? 'ai-suggestion' : 'label-unverified', blind, reviewer];
+  }
+  const scoreRankable = scope => Array.isArray(scope) && scope.length === 4 && scope[0] === 'visual-v1' && ['ai-suggestion', 'label-unverified'].includes(scope[1]) && typeof scope[2] === 'boolean' && typeof scope[3] === 'string' && !!scope[3].trim();
+  const scoreScopeLabel = scope => `${scope[0] || '协议 unknown'} · ${scope[1] === 'ai-suggestion' ? '非盲 AI 建议' : '来源标签未核实'} · ${scope[2] === true ? '盲评' : scope[2] === false ? '非盲评' : '盲评属性 unknown'} · ${scope[3] || 'Reviewer unknown'}`;
+  const validScore = value => finite(value) && value <= 4 ? value : null;
+  function reviewTimestamp(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(value)) return -Infinity;
+    const year = Number(value.slice(0, 4)), month = Number(value.slice(5, 7)), day = Number(value.slice(8, 10));
+    const days = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (!year || month < 1 || month > 12 || day < 1 || day > days[month - 1] || (value.length > 10 && (Number(value.slice(11, 13)) > 23 || Number(value.slice(14, 16)) > 59 || Number(value.slice(17, 19)) > 59))) return -Infinity;
+    const seconds = value.replace(/\.\d+/, ''), fraction = /\.(\d+)/.exec(value);
+    const ms = Date.parse(seconds.length > 10 && !/(?:Z|[+-]\d{2}:\d{2})$/.test(seconds) ? seconds + 'Z' : seconds);
+    return Number.isFinite(ms) ? ms / 1000 + (fraction ? Number('0.' + fraction[1].slice(0, 6)) : 0) : -Infinity;
+  }
+  function scoreSummaries(run) {
+    if (scoreCache?.has(run)) return scoreCache.get(run);
+    const selected = new Map();
+    (Array.isArray(run.reviews) ? run.reviews : []).forEach((review, index) => {
+      if (!review || typeof review !== 'object' || Array.isArray(review)) return;
+      const scope = JSON.stringify(scoreScope(run, review)), created_at = typeof review.created_at === 'string' ? review.created_at : null;
+      const id = typeof review.id === 'string' || finite(review.id) ? review.id : null;
+      const order = [reviewTimestamp(created_at), id === null ? '' : String(id), index], previous = selected.get(scope);
+      const later = !previous || order[0] > previous.order[0] || (order[0] === previous.order[0] && (order[1] > previous.order[1] || (order[1] === previous.order[1] && index > previous.order[2])));
+      if (later) selected.set(scope, { order, summary: { scope, created_at, id, index, values: scoreKeys.map(key => validScore(review.scores?.[key])) } });
+    });
+    const result = [...selected].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, item]) => item.summary);
+    scoreCache?.set(run, result); return result;
+  }
+  function snapshotScoreScopes() {
+    const unique = new Map();
+    for (const run of source.runs || []) for (const item of scoreSummaries(run)) unique.set(item.scope, JSON.parse(item.scope));
+    return [...unique].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, scope]) => scope);
+  }
+  function readScoreURL(params) {
+    if (!snapshot) return;
+    const scopes = snapshotScoreScopes(), preferred = scopes.find(scope => scoreRankable(scope) && scope[1] === 'ai-suggestion' && scope[2] === false) || scopes.find(scoreRankable) || scopes[0];
+    state.scoreSort = scoreKeys.includes(params.get('score_sort')) ? params.get('score_sort') : '';
+    const requested = params.get('score_source');
+    state.scoreSource = requested === '*' || scopes.some(scope => JSON.stringify(scope) === requested) ? requested : preferred ? JSON.stringify(preferred) : '';
+  }
   const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const valueOf = (run, key) => key === 'duration_ms' ? run.duration_ms : key === 'evaluation_duration_ms' ? run.evaluation?.duration_ms : run.metrics?.[key];
   const text = value => value == null || value === '' ? 'unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -568,6 +619,10 @@
     // Explicit empty purpose is meaningful: distinguish it from default benchmark on reload.
     if (!state.filters.purpose) url.searchParams.set('purpose', '');
     if (!state.filters.task_id && !state.defaultTaskPending) url.searchParams.set('task_id', '');
+    if (snapshot && state.view === 'scores') {
+      if (state.scoreSort) url.searchParams.set('score_sort', state.scoreSort); else url.searchParams.delete('score_sort');
+      if (state.scoreSource) url.searchParams.set('score_source', state.scoreSource); else url.searchParams.delete('score_source');
+    }
     url.hash = state.view;
     try { history.replaceState(null, '', url); } catch (error) { notify('当前查看器无法保存筛选 URL；筛选仍然有效。'); }
   }
@@ -742,6 +797,7 @@
     if (!state.loaded) { root.append(empty('实验数据尚未连接。', snapshot ? '快照无可用数据。' : '登录后加载真实运行；此处不会填入演示数据。')); return; }
     if (blind) { renderBlind(root); return; }
     if (state.view === 'matrix') { renderMatrix(root); return; }
+    if (snapshot && state.view === 'scores') { renderScores(root); return; }
     if (!state.runs.length) { root.append(empty()); return; }
     if (state.view === 'batch') renderBatch(root);
     else if (state.view === 'trend') renderTrend(root);
@@ -762,8 +818,8 @@
     const hide = () => { hideTooltip(); if (crosshair) crosshair.setAttribute('visibility', 'hidden'); };
     mark.addEventListener('pointermove', show); mark.addEventListener('focus', show); mark.addEventListener('pointerleave', hide); mark.addEventListener('blur', hide);
   }
-  function table(headers, rows, className = '') {
-    return el('div', { class: 'table-scroll' }, el('table', { class: className }, [el('thead', {}, el('tr', {}, headers.map(name => el('th', { scope: 'col', text: name })))), el('tbody', {}, rows.map(row => el('tr', {}, row.map(cell => cell instanceof Node && cell.tagName === 'TD' ? cell : el('td', {}, cell)))))]));
+  function table(headers, rows, className = '', rowAttrs = []) {
+    return el('div', { class: 'table-scroll' }, el('table', { class: className }, [el('thead', {}, el('tr', {}, headers.map(name => el('th', { scope: 'col', text: name })))), el('tbody', {}, rows.map((row, index) => el('tr', rowAttrs[index] || {}, row.map(cell => cell instanceof Node && cell.tagName === 'TD' ? cell : el('td', {}, cell)))))]));
   }
   function tableDisclosure(headers, rows) { return el('details', { class: 'chart-table' }, [el('summary', { text: '查看数据表 · 键盘可读' }), table(headers, rows)]); }
   let chartSequence = 0;
@@ -1221,12 +1277,58 @@
       groupGrid.append(el('section', { class: 'model-group', 'aria-label': `${text(first.tool)} / ${text(first.model)}` }, [el('div', { class: 'model-group-heading' }, [el('h2', { text: text(first.model) }), el('p', { text: `${text(first.tool)} · 展示 ${runs.length} / ${allRuns.length} 次${missing ? `；${missing} 次无媒体见上方历史` : ' · 未收折'} · 时间 / ID 升序` })]), el('div', { class: 'gallery' }, stableRuns(runs).map(galleryCard))]));
     }
   }
+  function renderScores(root) {
+    const scopes = snapshotScoreScopes(), dimension = state.scoreSort || 'compliance', dimensionIndex = scoreKeys.indexOf(dimension);
+    const wrapper = el('section', { class: 'scores-view' }); root.append(wrapper);
+    const reviews = (source.runs || []).flatMap(run => (run.reviews || []).map(review => ({ review, purpose: run.purpose })));
+    wrapper.append(el('div', { class: 'section-heading' }, el('div', {}, [el('h2', { text: '评分历史 · 只读' }), el('p', { text: `全局 ${reviews.length} 条已有评审 · 主评测 ${reviews.filter(item => item.purpose === 'benchmark').length} · 冒烟 ${reviews.filter(item => item.purpose === 'smoke').length}。历史评分属于原运行，不替代最新作品。` })])));
+    const sort = el('select', { id: 'scores-sort', onchange: event => { state.scoreSort = event.target.value; syncURL(); render(); } }, [el('option', { value: '', text: '默认顺序' }), ...scoreKeys.map(key => el('option', { value: key, text: scoreLabels[key] + ' ↓' }))]); sort.value = state.scoreSort;
+    const sourceSelect = el('select', { id: 'scores-source', onchange: event => { state.scoreSource = event.target.value; syncURL(); render(); } }, [el('option', { value: '*', text: '全部口径 · 分组，不合并排名' }), ...scopes.map(scope => el('option', { value: JSON.stringify(scope), text: scoreScopeLabel(scope) }))]); sourceSelect.value = state.scoreSource;
+    wrapper.append(el('div', { class: 'scores-controls score-controls' }, [el('label', {}, ['排序分项 · 各 0–4', sort]), el('label', {}, ['评分口径 · 来源标签非身份认证', sourceSelect]) ]));
+    const base = [...localFilter(source.runs || [])].sort((a, b) => text(a.tool).localeCompare(text(b.tool)) || text(a.model).localeCompare(text(b.model)) || String(a.started_at || a.date || '').localeCompare(String(b.started_at || b.date || '')) || String(a.id).localeCompare(String(b.id)));
+    const latest = new Map();
+    for (const run of stableRuns(source.runs || [])) latest.set(JSON.stringify([run.tool, run.model, run.task_id]), run.id);
+    const groups = new Map(), eligible = new Set(), anyEligible = new Set();
+    for (const run of base) {
+      const summaries = scoreSummaries(run);
+      if (summaries.some(item => scoreRankable(JSON.parse(item.scope)) && item.values[dimensionIndex] !== null)) anyEligible.add(run.id);
+      const items = state.scoreSource === '*' ? summaries.length ? summaries : [{ scope: JSON.stringify([null, 'label-unverified', null, null]), values: Array(6).fill(null), created_at: null, id: null, index: null }] : [summaries.find(item => item.scope === state.scoreSource) || { scope: state.scoreSource || JSON.stringify([null, 'label-unverified', null, null]), values: Array(6).fill(null), created_at: null, id: null, index: null }];
+      for (const summary of items) {
+        const scope = JSON.parse(summary.scope), value = scoreRankable(scope) ? summary.values[dimensionIndex] : null;
+        if (value !== null) eligible.add(run.id);
+        const key = JSON.stringify([run.task_id || null, run.purpose || null, summary.scope]);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ run, summary, scope, value, index: groups.get(key).length });
+      }
+    }
+    wrapper.append(el('p', { id: 'scores-coverage', text: `${scoreLabels[dimension]} · 当前口径 ${eligible.size}/${base.length} 已评；任一可核实口径 ${anyEligible.size}/${base.length}。未评不补零；无总分、均分或加权分。` }));
+    wrapper.append(el('p', { class: 'footnote', text: '仅同任务、同用途、同 rubric、同来源/盲评/Reviewer 的六项可比。每个运行每个口径取时间 / ID / 原序最近一条，不取最高、不补齐旧项。未知协议与显式冲突不参与排序；来源标签不等于身份认证。' }));
+    for (const [, entries] of [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+      const ordered = state.scoreSort ? [...entries].sort((a, b) => (a.value === null) - (b.value === null) || (a.value !== null && b.value !== null ? b.value - a.value : 0) || a.index - b.index) : entries;
+      const first = entries[0], section = el('section', { class: 'scores-group', 'data-score-group': JSON.stringify([first.run.task_id || null, first.run.purpose || null, first.summary.scope]) });
+      section.append(el('h3', { text: `${text(first.run.task_name || first.run.task_id)} · ${text(first.run.purpose)} · ${scoreScopeLabel(first.scope)} · ${entries.filter(item => item.value !== null).length}/${entries.length} 已评` }));
+      const rows = ordered.map(({ run, summary, scope }) => {
+        const current = latest.get(JSON.stringify([run.tool, run.model, run.task_id])) === run.id;
+        const identity = el('div', { 'data-model-route': run.model, 'aria-label': text(run.model) }, [detailButton(run, text(run.model).replace(/^opencode\//, '')), el('small', { text: `${text(run.tool)} · ${current ? '最新运行' : '历史运行'} · ${run.id}` })]);
+        const record = el('div', {}, [el('span', { text: text(summary.created_at) }), el('small', { text: `review ${text(summary.id)} · 原序 ${text(summary.index)}` })]);
+        const details = el('details', {}, [el('summary', { text: '原始评审' }), reviewList(run.reviews || [])]);
+        return [identity, text(run.started_at || run.date), record, ...summary.values.map(value => el('td', { class: 'numeric', text: scoreRankable(scope) && value !== null ? value + '/4' : '未评' })), el('div', {}, [detailButton(run, '运行详情'), originalButton(run), details])];
+      });
+      section.append(table(['模型 / 运行', '运行日期', '评审日期 / 记录', ...Object.values(scoreLabels), '检查原记录'], rows, 'scores-table score-history-table', ordered.map(({ run, summary }) => ({ 'data-score-run': run.id, 'data-score-scope': summary.scope }))));
+      wrapper.append(section);
+    }
+    if (!base.length) wrapper.append(empty('当前范围没有运行。', '调整任务、用途或更多筛选；历史记录不会自动替换当前范围。'));
+  }
   function renderEvidence(root) {
     root.append(el('div', { class: 'section-heading' }, el('div', {}, [el('h2', { text: '每个结论，都有出处。' }), el('p', { text: '从运行详情检查 manifest、metrics 来源、Checks、日志、附件与追加评分。' })])), runTable());
   }
   async function getRun(id) {
     if (snapshot) { const run = (source.runs || []).find(item => item.id === id); if (!run) throw new Error('快照中不存在此运行。'); return run; }
     const result = await json(`/api/runs/${encodeURIComponent(id)}`); if (!result.run) throw new Error('响应缺少运行详情。'); return result.run;
+  }
+  function snapshotHistory(run) {
+    const siblings = (source.runs || []).filter(item => item.tool === run.tool && item.model === run.model && item.task_id === run.task_id);
+    return detailBlock('同工具 / 模型 / 任务 · 历次原始记录', [el('p', { class: 'footnote', text: '每次记录独立；评分只属于该运行，不从最新记录借用。' }), el('ul', { class: 'evidence-paths' }, siblings.map(item => el('li', {}, el('button', { 'data-run-id': item.id, text: `${item.id} · ${dateOf(item)} · ${text(item.purpose)} · ${reviewStatus(item)}`, onclick: () => openDetail(item.id) }))))], true);
   }
   function metadata(pairs) { return el('dl', { class: 'metadata' }, pairs.flatMap(([name, value]) => [el('dt', { text: name }), el('dd', { text: text(value) })])); }
   function detailBlock(title, children, full = false) { return el('section', { class: `detail-block${full ? ' full-width' : ''}` }, [el('h3', { text: title }), ...children]); }
@@ -1239,6 +1341,7 @@
       const run = await getRun(id); if (!dialog.open || request !== state.detailRequest) return;
       $('#detail-title').textContent = text(run.id);
       const blocks = [detailBlock('原作实时预览', [originalButton(run), el('p', { class: 'footnote', text: originalGuidance(run) })], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), selectButton(run)], true)];
+      if (snapshot) blocks.push(snapshotHistory(run));
       blocks.push(detailBlock('实验条件 / Prompt', [metadata([
         ['运行状态', statusNames[run.status] || run.status], ['生成结论', run.generation_status || run.status], ['已记录 attempt（缺失为 unknown）', run.attempt], ['重试来源', run.retry_of], ['归档完整性', run.archive_status], ['评估结束', run.evaluation_finished_at], ['批次', run.batch_id], ['日期', dateOf(run)], ['工具 / 模型', `${text(run.tool)} / ${text(run.model)}`], ['任务', `${text(run.task_name)} (${text(run.task_id)})`], ['Purpose', run.purpose], ['Prompt 版本', run.prompt_version], ['条件指纹', run.condition_fingerprint], ['推理强度', effortText(run)], ['Prompt hash', run.prompt_hash || run.prompt?.sha256 || run.prompt?.hash], ['归档路径', run.archive_dir], ['开始 / 结束', `${text(run.started_at)} / ${text(run.finished_at)}`], ['错误', run.error]
       ]), el('details', {}, [el('summary', { text: 'Prompt 原文 / 元信息（如 manifest 提供）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: text(run.prompt || run.prompt_text) }))]) ]));
@@ -1428,7 +1531,7 @@
   }
   function setView(view) {
     cancelPreviewContext();
-    state.view = ['batch', 'trend', 'gallery', 'matrix', 'blind', 'evidence'].includes(view) ? view : 'gallery';
+    state.view = ['batch', 'trend', 'gallery', 'matrix', 'blind', 'evidence', ...(snapshot ? ['scores'] : [])].includes(view) ? view : 'gallery';
     $$('[data-view]').forEach(button => { const active = button.dataset.view === state.view; button.classList.toggle('active', active); if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
     // Entering anonymous review must not leave an identifying dialog open.
     if (state.view === 'blind') { ['detail-dialog', 'compare-dialog', 'zoom-dialog'].forEach(id => { releaseMedia($(`#${id}`)); $(`#${id}`).close(); }); }
@@ -1495,9 +1598,42 @@
   }));
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
   window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
-  window.addEventListener('popstate', () => { clearTimeout(filterTimer); const params = new URLSearchParams(location.search); state.defaultTaskPending = false; for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : ''); fillOptions(); setView(location.hash.slice(1)); loadData(); });
+  window.addEventListener('popstate', () => { clearTimeout(filterTimer); const params = new URLSearchParams(location.search); state.defaultTaskPending = false; for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : ''); readScoreURL(params); fillOptions(); setView(location.hash.slice(1)); loadData(); });
+  // The public shell may hand off only to this read-only snapshot viewer.
+  if (snapshot) window.BENCH_GALLERY_ACTION = async (action = {}) => {
+    clearTimeout(filterTimer);
+    state.defaultTaskPending = false;
+    if (action.kind === 'model') {
+      if (typeof action.model !== 'string' || !action.model) throw new Error('缺少具体模型。');
+      state.filters = Object.fromEntries(filterKeys.map(key => [key, '']));
+      state.filters.model = action.model;
+      fillOptions();
+    }
+    const ids = action.selected;
+    if (action.kind === 'compare' && (!Array.isArray(ids) || ids.length !== 2 || new Set(ids).size !== 2)) throw new Error('对照需要两个不同的运行。');
+    if (ids !== undefined) {
+      if (!Array.isArray(ids) || new Set(ids).size !== ids.length) throw new Error('运行选择必须是不同的记录。');
+      const runs = await Promise.all(ids.map(getRun));
+      state.selected = new Set(ids);
+      state.selectionRuns = new Map(runs.map(run => [run.id, run]));
+      state.mixed = action.mixed === true;
+      $('#mixed-comparison').checked = state.mixed;
+      updateSelection();
+    }
+    // Set the destination before loading: scores must never render a media gallery.
+    setView(action.view || 'gallery');
+    await loadData();
+    if (action.kind === 'detail') {
+      await getRun(action.run);
+      await openDetail(action.run);
+    } else if (action.kind === 'compare') {
+      await openComparison();
+    }
+  };
   const params = new URLSearchParams(location.search);
-  state.defaultTaskPending = !filterKeys.some(key => params.has(key)) && ['', '#gallery'].includes(location.hash);
+  readScoreURL(params);
+  $('[data-view="scores"]').hidden = !snapshot;
+  state.defaultTaskPending = !filterKeys.some(key => params.has(key)) && ['', '#gallery', ...(snapshot ? ['#scores'] : [])].includes(location.hash);
   for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : '');
   const offline = source?.offline;
   if (snapshot && staticMedia && offline?.path === 'offline.html' && /^[a-f0-9]{64}$/.test(offline.sha256) && Number.isSafeInteger(offline.size) && offline.size > 0) { $('#offline-download').href = 'offline.html'; $('#offline-download').hidden = false; $('#offline-download').title = `离线完整版 · ${number(offline.size)} bytes · SHA256 ${offline.sha256}`; }
