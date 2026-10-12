@@ -149,6 +149,9 @@ class ReportHTML(HTMLParser):
 
 SCORE_LABELS = {'compliance': '指令遵循', 'recognizability': '辨识度', 'motion': '运动表现',
                 'visual_detail': '视觉细节', 'interaction': '交互表现', 'completeness': '完整性'}
+# Independent ECMAScript trim / non-dotAll ASCII case-insensitive AI-label audit.
+REVIEWER_SPACE = '\u0009\u000b\u000c                　﻿\n\r  '
+AI_LABEL = re.compile(r'[aA][iI][^\n\r  ]*建议')
 
 
 def valid_number(value):
@@ -168,9 +171,9 @@ def score_scope(run, review):
             'run_id' in review and review['run_id'] != run.get('id')):
         rubric = None
     reviewer = review.get('reviewer')
-    reviewer = reviewer if isinstance(reviewer, str) and reviewer.strip() else None
+    reviewer = reviewer if isinstance(reviewer, str) and reviewer.strip(REVIEWER_SPACE) else None
     blind = review.get('blind') if type(review.get('blind')) is bool else None
-    return [rubric, 'ai-suggestion' if blind is False and re.search(r'AI.*建议', reviewer or '', re.I) else 'label-unverified', blind, reviewer]
+    return [rubric, 'ai-suggestion' if blind is False and AI_LABEL.search(reviewer or '') else 'label-unverified', blind, reviewer]
 
 
 def scope_key(scope):
@@ -180,7 +183,7 @@ def scope_key(scope):
 def scope_rankable(scope):
     return (isinstance(scope, list) and len(scope) == 4 and scope[0] == 'visual-v1'
             and scope[1] in ('ai-suggestion', 'label-unverified') and type(scope[2]) is bool
-            and isinstance(scope[3], str) and bool(scope[3].strip()))
+            and isinstance(scope[3], str) and bool(scope[3].strip(REVIEWER_SPACE)))
 
 
 def review_timestamp(value):
@@ -209,16 +212,21 @@ def score_summaries(run):
                    'values': [value if valid_number(value) and value <= 4 else None for value in (values.get(key) for key in SCORE_LABELS)]}
         if scope not in selected or order > selected[scope][0]:
             selected[scope] = (order, summary)
-    return [selected[key][1] for key in sorted(selected)]
+    return [selected[key][1] for key in sorted(selected, key=lambda key: key.encode('utf-16-be', 'surrogatepass'))]
 
 
 def score_scopes(runs):
     unique = {scope_key(score_scope(run, review)): score_scope(run, review)
               for run in runs for review in run.get('reviews') or [] if isinstance(review, dict)}
-    return [unique[key] for key in sorted(unique)]
+    return [unique[key] for key in sorted(unique, key=lambda key: key.encode('utf-16-be', 'surrogatepass'))]
 
 
-def default_score_source(scopes):
+def default_score_source(scopes, score_source=None):
+    if score_source is not None:
+        require(isinstance(score_source, str) and (score_source == '*' or
+                score_source in {scope_key(scope) for scope in scopes} or not scopes and score_source == ''),
+                'Preferred source must be an exact available scope')
+        return score_source
     preferred = next((scope for scope in scopes if scope_rankable(scope) and scope[1] == 'ai-suggestion' and scope[2] is False), None)
     fallback = next((scope for scope in scopes if scope_rankable(scope)), None)
     return scope_key(preferred or fallback or scopes[0]) if scopes else ''
@@ -228,7 +236,9 @@ def meter(run):
     metrics = run.get('metrics') or {}
     return [run.get('duration_ms') if valid_number(run.get('duration_ms')) else None,
             metrics.get('cost_usd') if valid_number(metrics.get('cost_usd')) else None,
-            metrics.get('cost_source') if isinstance(metrics.get('cost_source'), str) and metrics['cost_source'] else None]
+            metrics.get('cost_source') if isinstance(metrics.get('cost_source'), str) and metrics['cost_source'] else None,
+            metrics.get('total_tokens') if valid_number(metrics.get('total_tokens')) else None,
+            (run.get('evaluation') or {}).get('duration_ms') if valid_number((run.get('evaluation') or {}).get('duration_ms')) else None]
 
 
 def score_order(rows, dimension, scope):
@@ -291,7 +301,7 @@ def audit_html(html, trusted_script, trusted_runtime=None, descriptors_only=Fals
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             from make_originals import validate_originals
             validate_originals(data)
-        require(set(data) <= {'runs', 'tasks', 'evidence', 'format', 'transport', 'originals', 'assets', 'thumbnails', 'offline'}, "Unknown v2 report fields")
+        require(set(data) <= {'runs', 'tasks', 'evidence', 'format', 'transport', 'originals', 'assets', 'thumbnails', 'offline', 'preferred_score_source'}, "Unknown v2 report fields")
     else:
         require(parsed.scripts[1] == trusted_script, "Inline executable code does not match trusted web/app.js")
         require(not {'transport', 'originals'}.intersection(data), "v2 fields in legacy report")
@@ -331,6 +341,11 @@ def audit_html(html, trusted_script, trusted_runtime=None, descriptors_only=Fals
             for child in value:
                 walk(child)
     walk(data)
+    if v2 and 'preferred_score_source' in data:
+        preferred = data['preferred_score_source']
+        scopes = score_scopes(data['runs'])
+        require(isinstance(preferred, str) and (preferred == '*' or preferred in {scope_key(scope) for scope in scopes}
+                or not scopes and preferred == ''), 'Preferred source must be an exact available scope')
     require(not any(marker in match.group(1) for marker in ("/home/ubuntu/", "/workspace", "127.0.0.1")), "Public data contains private host details")
     return data
 

@@ -655,5 +655,397 @@ class StaticSiteV2Tests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
 
+class PreferredScoreSourceTests(unittest.TestCase):
+    """Optional root metadata selects a real scope; it never rewrites reviews."""
+    source_a = '["visual-v1","ai-suggestion",false,"AI A 建议评分"]'
+    source_z = '["visual-v1","ai-suggestion",false,"AI Z 建议评分 "]'
+
+    def setUp(self):
+        self.fixture = StaticSiteV2Tests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.upgrade()
+        self.legacy = self.fixture.legacy
+        self.online = self.scored(self.fixture.audit())
+        self.inline = self.scored(self.fixture.audit("offline.html"))
+
+    def scored(self, data):
+        data = copy.deepcopy(data)
+        run = data["runs"][0]
+        run["conditions"]["rubric_version"] = "visual-v1"
+        run["reviews"] = [
+            {"id": "a", "reviewer": "AI A 建议评分", "blind": False, "scores": {"compliance": 4}},
+            {"id": "z-old", "reviewer": "AI Z 建议评分 ", "blind": False,
+             "created_at": "2026-10-01", "scores": {"compliance": 4, "recognizability": 4, "motion": 4}},
+            {"id": "z-new", "reviewer": "AI Z 建议评分 ", "blind": False,
+             "created_at": "2026-10-02", "scores": {"compliance": 0, "motion": 2.5, "completeness": None}}]
+        data["preferred_score_source"] = self.source_z
+        return data
+
+    def render_audit(self, data):
+        html = make_snapshot.render_snapshot(data, root=self.legacy.project)
+        return make_site.audit_snapshot(html, self.legacy.viewer, static=data.get("transport") == "external")
+
+    def build_preferred(self):
+        self.legacy.data = self.scored(self.legacy.data)
+        self.legacy.write_input()
+        self.legacy.site = self.legacy.root / "preferred-legacy"
+        self.legacy.build()
+        self.fixture.destination = self.legacy.root / "preferred-v2"
+        self.fixture.upgrade()
+        return self.fixture.audit(), self.fixture.audit("offline.html")
+
+    def viewer_results(self, inputs):
+        # Evaluate only the real viewer's score functions, never snapshot text
+        # or the DOM/API runtime. Both transports use this same app.js block.
+        program = r'''
+const fs=require('fs'), code=fs.readFileSync(process.argv[1],'utf8');
+const inputs=JSON.parse(fs.readFileSync(0,'utf8')), scoreKeys=['compliance','recognizability','motion','visual_detail','interaction','completeness'];
+const snapshot=true, finite=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
+const start=code.indexOf('  function scoreScope('), end=code.indexOf('  const finite = value =>',start);
+if(start<0 || end<=start) throw new Error('Actual app.js score-function boundaries not found');
+const pure=code.slice(start,end);
+const results=inputs.map(source=>{
+  const scoreCache=new WeakMap(), state={};
+  return eval(pure+`;readScoreURL(new URLSearchParams()); const normal={scopes:snapshotScoreScopes(),default:defaultScoreSource(),selected:state.scoreSource,error:state.scoreError,summaries:source.runs.map(scoreSummaries)}; readScoreURL(new URLSearchParams('score_source=*')); ({...normal,handoff:state.scoreSource,handoffError:state.scoreError})`);
+});
+console.log(JSON.stringify(results));
+'''
+        result = subprocess.run(["node", "-e", program, str(make_snapshot.ROOT / "web/app.js")],
+                                input=json.dumps(inputs), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def assert_viewer_scope_cases(self, cases):
+        inputs, checks = [], []
+        for name, fields, scope, rejected_scope in cases:
+            preferred = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
+            rejected = json.dumps(rejected_scope, ensure_ascii=False, separators=(",", ":"))
+            self.assertNotEqual(preferred, rejected)
+            for source in (self.online, self.inline):
+                with self.subTest(case=name, transport=source["transport"]):
+                    data = copy.deepcopy(source)
+                    review = copy.deepcopy(data["runs"][0]["reviews"][-1])
+                    review.update(fields)
+                    data["runs"][0]["reviews"] = [review]
+                    data["preferred_score_source"] = preferred
+                    self.assertEqual(self.render_audit(data), data)
+                    invalid = copy.deepcopy(data)
+                    invalid["preferred_score_source"] = rejected
+                    with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                        self.render_audit(invalid)
+                    if source["transport"] == "inline":
+                        inputs.extend((data, invalid))
+                        checks.extend(((name, scope, preferred, True), (name, scope, rejected, False)))
+        results = self.viewer_results(inputs)
+        self.assertEqual(len(results), len(checks))
+        for result, (name, scope, preferred, valid) in zip(results, checks):
+            with self.subTest(case=name, viewer_valid=valid):
+                self.assertEqual(result["scopes"], [scope])
+                self.assertEqual(result["default"], preferred)
+                self.assertEqual(result["selected"], preferred)  # No automatic fallback.
+                self.assertEqual(bool(result["error"]), not valid)
+                summary, = result["summaries"][0]
+                self.assertEqual(summary["scope"], json.dumps(scope, ensure_ascii=False, separators=(",", ":")))
+                self.assertEqual((summary["id"], summary["values"]), ("z-new", [0, None, 2.5, None, None, None]))
+                self.assertEqual((result["handoff"], result["handoffError"]), ("*", ""))
+
+    def test_absent_preference_keeps_legacy_and_v2_bytes_without_reading_scopes(self):
+        import make_gallery
+        before = {str(path.relative_to(self.legacy.root)): path.read_bytes()
+                  for directory in (self.legacy.site, self.fixture.destination)
+                  for path in directory.rglob("*") if path.is_file()}
+        with (mock.patch.object(make_gallery, "score_scopes", side_effect=AssertionError("legacy path must not resolve scopes")),
+              mock.patch.object(make_gallery, "score_scope", side_effect=AssertionError("legacy path must not classify reviews"))):
+            self.legacy.build()
+            self.fixture.upgrade()
+            for name in ("index.html", "offline.html"):
+                for data in (self.legacy.audit(name), self.fixture.audit(name)):
+                    self.assertNotIn("preferred_score_source", data)
+            for name in ("index.html", "offline.html"):
+                self.assertEqual(make_snapshot.render_snapshot(self.fixture.audit(name), root=self.legacy.project).encode(),
+                                 (self.fixture.destination / name).read_bytes())
+        self.assertEqual(before, {str(path.relative_to(self.legacy.root)): path.read_bytes()
+                                  for directory in (self.legacy.site, self.fixture.destination)
+                                  for path in directory.rglob("*") if path.is_file()})
+
+    def test_exact_scope_preserves_zero_partial_reviews_through_static_build_and_upgrade(self):
+        online, inline = self.build_preferred()
+        expected = copy.deepcopy(self.legacy.data)
+        self.assertEqual(self.legacy.audit("offline.html"), expected)
+        for data in (self.legacy.audit(), online, inline):
+            self.assertEqual(data["preferred_score_source"], self.source_z)
+            self.assertEqual(data["runs"], expected["runs"])
+            self.assertEqual(data["tasks"], expected["tasks"])
+        self.assertEqual(online["runs"][0]["reviews"][-1]["scores"],
+                         {"compliance": 0, "motion": 2.5, "completeness": None})
+        self.assertEqual(self.render_audit(online), online)
+        self.assertEqual(self.render_audit(inline), inline)
+        before = {path.relative_to(self.fixture.destination): path.read_bytes()
+                  for path in self.fixture.destination.rglob("*") if path.is_file()}
+        second = self.legacy.root / "preferred-v2-second"
+        stats = make_site.upgrade_site(self.fixture.destination, second, self.legacy.viewer,
+                                      self.fixture.original.root, self.fixture.original.audit, root=self.legacy.project)
+        self.assertEqual(stats["reviews"], 3)
+        self.assertEqual(make_site.verify_site(second, self.legacy.viewer)["stats"], stats)
+        self.assertEqual(before, {path.relative_to(second): path.read_bytes()
+                                  for path in second.rglob("*") if path.is_file()})
+
+    def test_available_canonical_scopes_include_unverified_protocol_and_attributes(self):
+        cases = [({"rubric_version": "visual-v1"}, {"reviewer": "Declared source", "blind": True},
+                  ["visual-v1", "label-unverified", True, "Declared source"]),
+                 ({"rubric_version": "visual-v2"}, {"reviewer": "AI 建议", "blind": False},
+                  ["visual-v2", "ai-suggestion", False, "AI 建议"]),
+                 ({}, {"reviewer": "AI 建议", "blind": "false"},
+                  [None, "label-unverified", None, "AI 建议"]),
+                 ({"rubric_version": "unknown"}, {"reviewer": "  ", "blind": None},
+                  [None, "label-unverified", None, None])]
+        for conditions, review, scope in cases:
+            with self.subTest(scope=scope):
+                data = copy.deepcopy(self.inline)
+                data["runs"][0].update(conditions=conditions, reviews=[review])
+                data["preferred_score_source"] = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
+                self.assertEqual(self.render_audit(data), data)
+
+    def test_wrong_types_malformed_noncanonical_unknown_and_star_are_refused(self):
+        scope = json.loads(self.source_z)
+        bad = [None, True, False, 0, 1.5, [], {}, scope, "", "*", "[", "null", "{}", "[]",
+               '["visual-v1"]', json.dumps(scope), self.source_z + " ",
+               self.source_z.replace("建议", "\\u5efa\\u8bae"), self.source_z.replace("AI Z", "AI missing"),
+               self.source_z.replace("ai-suggestion", "label-unverified")]
+        for value in bad:
+            for source in (self.online, self.inline):
+                with self.subTest(value=value, transport=source["transport"]):
+                    data = copy.deepcopy(source)
+                    data["preferred_score_source"] = value
+                    with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                        self.render_audit(data)
+        self.legacy.data = self.scored(self.legacy.data)
+        self.legacy.data["preferred_score_source"] = "*"
+        self.legacy.write_input()
+        destination = self.legacy.root / "invalid-preference"
+        with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+            make_site.build_site(self.legacy.snapshot, destination, self.legacy.old_viewer, root=self.legacy.project)
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.legacy.root.glob(".static-site-*")), [])
+
+    def test_score_shape_validation_applies_only_when_preference_is_present(self):
+        for field, values in (("conditions", (["visual-v1"], "visual-v1", True, 1)),
+                              ("reviews", ({"reviewer": "AI Z 建议评分 "}, "review", True, 1))):
+            for value in values:
+                data = copy.deepcopy(self.inline)
+                data["runs"][0][field] = value
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(RuntimeError, "invalid preferred score source " + field):
+                        self.render_audit(data)
+                    data.pop("preferred_score_source")
+                    self.assertEqual(self.render_audit(data), data)
+
+    def test_no_reviews_nonreview_values_and_stale_scopes_cannot_supply_preference(self):
+        for reviews in (None, [], [None, False, 1, "review", ["not a review"]],
+                        [{"reviewer": "different", "blind": False}], [{"scores": {"compliance": 0}}]):
+            data = copy.deepcopy(self.inline)
+            data["runs"][0]["reviews"] = reviews
+            with self.subTest(reviews=reviews), self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                self.render_audit(data)
+        empty = {"format": "static-media-v2", "transport": "inline", "runs": [], "tasks": [],
+                 "evidence": {}, "originals": {}, "preferred_score_source": self.source_z}
+        for value in (self.source_z, "", "*"):
+            empty["preferred_score_source"] = value
+            with self.subTest(empty=value), self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                self.render_audit(empty)
+
+    def test_preference_uses_frozen_run_rubric_not_current_task(self):
+        for conditions in ({}, {"rubric_version": "unknown"}, {"rubric_version": None}, {"rubric_version": False}):
+            data = copy.deepcopy(self.inline)
+            data["tasks"][0]["rubric_version"] = "visual-v1"
+            data["runs"][0]["conditions"] = conditions
+            with self.subTest(conditions=conditions):
+                with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                    self.render_audit(data)
+                data["preferred_score_source"] = self.source_z.replace('"visual-v1"', "null")
+                self.assertEqual(self.render_audit(data), data)
+
+    def test_rubric_declarations_and_run_id_conflicts_invalidate_claimed_protocol(self):
+        conflicts = [{"rubric_version": "visual-v2"}, {"rubric_version": None},
+                     {"conditions": {"rubric_version": "visual-v2"}},
+                     {"source": {"rubric_version": "visual-v2"}}, {"run_id": "other-run"}, {"run_id": None}]
+        for fields in conflicts:
+            data = copy.deepcopy(self.inline)
+            review = copy.deepcopy(data["runs"][0]["reviews"][-1])
+            review.update(fields)
+            data["runs"][0]["reviews"] = [review]
+            with self.subTest(fields=fields):
+                with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                    self.render_audit(data)
+                # A conflict remains an existing but unverified scope, never visual-v1.
+                data["preferred_score_source"] = self.source_z.replace('"visual-v1"', "null")
+                self.assertEqual(self.render_audit(data), data)
+        data = copy.deepcopy(self.inline)
+        for review in data["runs"][0]["reviews"]:
+            review.update(run_id="r1", rubric_version="visual-v1", conditions={"rubric_version": "visual-v1"},
+                          source={"rubric_version": "visual-v1"})
+        self.assertEqual(self.render_audit(data), data)
+
+    def test_blind_boolean_and_exact_reviewer_are_not_coerced_or_trimmed(self):
+        for blind, provenance in ((True, "label-unverified"), (False, "ai-suggestion"), (None, "label-unverified"),
+                                  (0, "label-unverified"), (1, "label-unverified"), ("false", "label-unverified")):
+            data = copy.deepcopy(self.inline)
+            review = copy.deepcopy(data["runs"][0]["reviews"][-1])
+            review["blind"] = blind
+            data["runs"][0]["reviews"] = [review]
+            scope = ["visual-v1", provenance, blind if type(blind) is bool else None, review["reviewer"]]
+            data["preferred_score_source"] = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
+            with self.subTest(blind=blind):
+                self.assertEqual(self.render_audit(data), data)
+                if type(blind) is not bool:
+                    data["preferred_score_source"] = self.source_z
+                    with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+                        self.render_audit(data)
+        data = copy.deepcopy(self.inline)
+        data["preferred_score_source"] = self.source_z.replace("评分 ", "评分")
+        with self.assertRaisesRegex(RuntimeError, "preferred score source"):
+            self.render_audit(data)
+
+    def test_ai_suggestion_detection_matches_existing_heuristic(self):
+        for reviewer, provenance in (("prefix ai 内容建议", "ai-suggestion"), ("AI suggestion", "label-unverified"),
+                                     ("建议 AI", "label-unverified"), ("AI\n建议", "label-unverified")):
+            data = copy.deepcopy(self.inline)
+            data["runs"][0]["reviews"] = [{"reviewer": reviewer, "blind": False}]
+            scope = ["visual-v1", provenance, False, reviewer]
+            data["preferred_score_source"] = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
+            with self.subTest(reviewer=reviewer):
+                self.assertEqual(self.render_audit(data), data)
+
+    def test_ecmascript_reviewer_text_scopes_match_actual_viewer(self):
+        labels = [("ordinary", "AI Z 建议评分 ", "ai-suggestion"),
+                  ("carriage_return", "AI Z\r建议评分", "label-unverified"),
+                  ("line_feed", "AI Z\n建议评分", "label-unverified"),
+                  ("line_separator", "AI Z 建议评分", "label-unverified"),
+                  ("paragraph_separator", "AI Z 建议评分", "label-unverified"),
+                  ("dotted_i", "Aİ Z 建议评分", "label-unverified"),
+                  ("dotless_i", "Aı Z 建议评分", "label-unverified"),
+                  ("ascii_case", "prefix aI 内容建议", "ai-suggestion"),
+                  ("match_after_terminator", "AI\r ai 建议评分", "ai-suggestion"),
+                  ("terminator_after_match", "AI 建议 ", "ai-suggestion"),
+                  ("nel_within_match", "AI Z\u0085建议评分", "ai-suggestion")]
+        cases = []
+        for name, reviewer, provenance in labels:
+            opposite = "label-unverified" if provenance == "ai-suggestion" else "ai-suggestion"
+            cases.append((name, {"reviewer": reviewer, "blind": False},
+                          ["visual-v1", provenance, False, reviewer], ["visual-v1", opposite, False, reviewer]))
+        # Keep this fixture independent of the implementation's whitespace set.
+        ecmascript_blank = ("\t\v\f         "
+                            "       　\n\r  ")
+        for name, reviewer in (("bom_only", "﻿"), ("ecmascript_whitespace", ecmascript_blank),
+                               ("bom_mixed_whitespace", "\t ﻿\r  ")):
+            cases.append((name, {"reviewer": reviewer, "blind": False},
+                          ["visual-v1", "label-unverified", False, None],
+                          ["visual-v1", "label-unverified", False, reviewer]))
+        # Python strip also removes NEL and four information separators; JS trim
+        # does not. U+180E is likewise not whitespace in current ECMAScript.
+        for codepoint in (0x85, 0x1c, 0x1d, 0x1e, 0x1f, 0x180e):
+            reviewer = chr(codepoint)
+            cases.append(("nonblank_%04x" % codepoint, {"reviewer": reviewer, "blind": False},
+                          ["visual-v1", "label-unverified", False, reviewer],
+                          ["visual-v1", "label-unverified", False, None]))
+        reviewer = "﻿\u0085﻿"
+        cases.append(("bom_wrapped_nel", {"reviewer": reviewer, "blind": False},
+                      ["visual-v1", "label-unverified", False, reviewer],
+                      ["visual-v1", "label-unverified", False, None]))
+        reviewer = "﻿ AI Z 建议评分 ﻿"
+        cases.append(("untrimmed_nonblank_label", {"reviewer": reviewer, "blind": False},
+                      ["visual-v1", "ai-suggestion", False, reviewer],
+                      ["visual-v1", "ai-suggestion", False, "AI Z 建议评分"]))
+        self.assert_viewer_scope_cases(cases)
+
+    def test_ecmascript_text_scopes_keep_frozen_rubric_and_blind_rules(self):
+        cases = []
+        for name, fields, reviewer, provenance in (
+                ("review_rubric_conflict", {"rubric_version": "visual-v2"}, "AI Z\r建议评分", "label-unverified"),
+                ("conditions_conflict", {"conditions": {"rubric_version": "visual-v2"}}, "Aİ 建议", "label-unverified"),
+                ("source_conflict", {"source": {"rubric_version": "visual-v2"}}, "AI Z\u0085建议评分", "ai-suggestion"),
+                ("run_id_conflict", {"run_id": "another-run"}, "Aı 建议", "label-unverified")):
+            cases.append((name, {**fields, "reviewer": reviewer, "blind": False},
+                          [None, provenance, False, reviewer], ["visual-v1", provenance, False, reviewer]))
+        reviewer = "AI Z\u0085建议评分"
+        cases.append(("matching_declarations", {"reviewer": reviewer, "blind": False, "run_id": "r1",
+                                               "rubric_version": "visual-v1", "conditions": {"rubric_version": "visual-v1"},
+                                               "source": {"rubric_version": "visual-v1"}},
+                      ["visual-v1", "ai-suggestion", False, reviewer], [None, "ai-suggestion", False, reviewer]))
+        cases.append(("blind_true", {"reviewer": reviewer, "blind": True},
+                      ["visual-v1", "label-unverified", True, reviewer], ["visual-v1", "ai-suggestion", True, reviewer]))
+        cases.append(("blind_string", {"reviewer": "﻿", "blind": "false"},
+                      ["visual-v1", "label-unverified", None, None], ["visual-v1", "label-unverified", False, None]))
+        cases.append(("blind_number", {"reviewer": reviewer, "blind": 0},
+                      ["visual-v1", "label-unverified", None, reviewer], ["visual-v1", "ai-suggestion", False, reviewer]))
+        self.assert_viewer_scope_cases(cases)
+
+    def test_other_v2_unknown_fields_remain_refused(self):
+        for field in ("unknown", "score_scopes", "defaults", "preferredScoreSource", "scores"):
+            for source in (self.online, self.inline):
+                data = copy.deepcopy(source)
+                data[field] = self.source_z
+                with self.subTest(field=field, transport=source["transport"]):
+                    with self.assertRaisesRegex(RuntimeError, "unknown v2 report fields"):
+                        self.render_audit(data)
+
+    def test_preference_does_not_bypass_private_resource_or_script_guards(self):
+        data = copy.deepcopy(self.inline)
+        data["runs"][0]["reviews"][0]["extra"] = {"api_key": "fixture-private-field"}
+        with self.assertRaisesRegex(RuntimeError, "private field"):
+            self.render_audit(data)
+        data = copy.deepcopy(self.inline)
+        data["runs"][0]["reviews"][0]["note"] = "/home/private/report"
+        with self.assertRaisesRegex(RuntimeError, "private host detail"):
+            self.render_audit(data)
+        html = make_snapshot.render_snapshot(self.inline, root=self.legacy.project)
+        extras = ['<script>window.EXTRA=1</script>', '<img src="https://example.invalid/a.png">',
+                  '<style>@import "https://example.invalid/a.css";</style>', '<iframe srcdoc="bad"></iframe>']
+        for extra in extras:
+            with self.subTest(extra=extra), self.assertRaises(RuntimeError):
+                make_site.audit_snapshot(html.replace("</body>", extra + "</body>"), self.legacy.viewer)
+        changed = html.replace(self.legacy.viewer.read_text(), "window.UNTRUSTED=1;\n")
+        with self.assertRaisesRegex(RuntimeError, "viewer mismatch"):
+            make_site.audit_snapshot(changed, self.legacy.viewer)
+
+    def test_index_offline_default_mismatch_rejected_even_with_rehashed_files(self):
+        online, inline = self.build_preferred()
+        for preferred in (self.source_a, None):
+            data = copy.deepcopy(online)
+            if preferred is None:
+                data.pop("preferred_score_source")
+            else:
+                data["preferred_score_source"] = preferred
+            self.fixture.rewrite("index.html", data)
+            with self.subTest(preferred=preferred), self.assertRaisesRegex(RuntimeError, "index/offline metadata differ"):
+                make_site.verify_site(self.fixture.destination, self.legacy.viewer)
+        self.fixture.rewrite("index.html", online)
+        make_site.verify_site(self.fixture.destination, self.legacy.viewer)
+        inline["preferred_score_source"] = self.source_a
+        self.fixture.rewrite("offline.html", inline)
+        manifest = json.loads((self.fixture.destination / make_site.MANIFEST).read_text())
+        info = manifest["files"]["offline.html"]
+        online["offline"] = {"path": "offline.html", "sha256": info["sha256"], "size": info["size"]}
+        self.fixture.rewrite("index.html", online)
+        with self.assertRaisesRegex(RuntimeError, "index/offline metadata differ"):
+            make_site.verify_site(self.fixture.destination, self.legacy.viewer)
+
+    def test_real_viewer_default_and_explicit_star_handoff_keep_scopes_separate(self):
+        old = copy.deepcopy(self.inline)
+        old.pop("preferred_score_source")
+        old_result, preferred = self.viewer_results([old, self.inline])
+        self.assertEqual(old_result["default"], self.source_a)
+        self.assertEqual(preferred["default"], self.source_z)
+        self.assertEqual(preferred["selected"], self.source_z)
+        self.assertEqual(preferred["summaries"], old_result["summaries"])
+        z = next(summary for summary in preferred["summaries"][0] if summary["scope"] == self.source_z)
+        self.assertEqual((z["id"], z["values"]), ("z-new", [0, None, 2.5, None, None, None]))
+        for data in (old_result, preferred):
+            self.assertEqual(data["error"], "")
+            self.assertEqual(data["handoff"], "*")
+            self.assertEqual(data["handoffError"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

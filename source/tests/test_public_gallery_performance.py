@@ -202,7 +202,7 @@ class GalleryUtilityTests(unittest.TestCase):
         data = {'runs': [{'id': 'a', 'tool': 'tool', 'model': 'model', 'task_id': 'task', 'status': 'failed',
                           'evaluation': {'status': 'failed', 'evidence': ['evidence/mobile.png'], 'checks': [{'name': 'entrypoint', 'status': 'pass'}]}}],
                 'evidence': {'a/evidence/mobile.png': self.thumb}, 'thumbnails': {'a/evidence/mobile.png': self.thumb},
-                'assets': {self.thumb: {'width': 400, 'height': 850}}, 'originals': {'a': {'status': 'no_entrypoint'}}}
+                'assets': {self.thumb: {'width': 400, 'height': 850, 'mime': 'image/jpeg'}}, 'originals': {'a': {'status': 'no_entrypoint'}}}
         row = verifier.project_runs(data)[0]
         self.assertTrue(row['registered_media'])
         self.assertIsNone(row['image'])
@@ -235,13 +235,14 @@ class GalleryUtilityTests(unittest.TestCase):
                           'checks': [{'name': 'entrypoint', 'status': 'fail'}]}],
                 'tasks': [{'id': 'crocodile', 'name': 'Task'}],
                 'evidence': {'a/evidence/mobile.png': self.thumb}, 'thumbnails': {'a/evidence/mobile.png': self.thumb},
-                'assets': {self.thumb: {'width': 400, 'height': 850}}, 'originals': {'a': {'status': 'no_entrypoint'}},
+                'assets': {self.thumb: {'width': 400, 'height': 850, 'mime': 'image/jpeg'}}, 'originals': {'a': {'status': 'no_entrypoint'}},
                 'offline': {'path': 'offline.html', 'sha256': '1'*64, 'size': 100}}
         full_info = {k: self.files[self.full][k] for k in ('sha256', 'size')}
         full_info['path'] = self.full
         runtime_info = {k: self.files[self.js][k] for k in ('sha256', 'size')}
         runtime_info['path'] = self.js
-        seed = {'version': 3, 'format': 'progressive-static-v3', 'tasks': [{'id': 'crocodile', 'name': 'Task'}],
+        seed = {'version': 3, 'format': 'progressive-static-v3', 'score_encoding': 'scope-index-v1',
+                'tasks': [{'id': 'crocodile', 'name': 'Task'}],
                 'runs': verifier.project_runs(data), 'score_scopes': [],
                 'defaults': {'task_id': 'crocodile', 'purpose': 'benchmark', 'page_size': 2, 'mobile_page_size': 1, 'score_source': ''},
                 'counts': {'runs': 1, 'full_runs': 1, 'benchmark': 1, 'full_benchmark': 1, 'reviews': 0},
@@ -252,11 +253,17 @@ class GalleryUtilityTests(unittest.TestCase):
     def render_fixture(self, seed):
         payload = json.dumps(seed).replace('<', '\\u003c')
         model = escape(seed['runs'][0]['model'])
+        source = escape(seed['defaults']['score_source'], quote=True)
+        cells = ''.join('<div class="score-cell" data-dimension="' + key + '"><dt>' + label + '</dt><dd>未评审</dd></div>'
+                        for key, label in verifier.v2.SCORE_LABELS.items())
         return ('<style>trusted-css</style><article class="evidence-card" data-run-id="a" data-model-route="' + model + '">'
-                '<h2 class="work-name" aria-label="' + model + '" title="' + model + '">' + model + '</h2><p class="work-meta">tool · 2026-10-08</p>'
-                '<p class="work-status">会话 failed · 入口 fail · 评估 completed</p>'
+                '<div class="work-heading"><h2 class="work-name" aria-label="' + model + '" title="' + model + '">' + model + '</h2></div>'
+                '<div class="work-score" data-score-scope="' + source + '"><dl>' + cells + '</dl></div>'
+                '<div class="work-cover"></div><div class="work-actions">'
                 '<button data-run-original="a" disabled></button><button data-select-run="a"></button>'
-                '<button data-zoom-run="a" disabled></button><button data-detail-run="a"></button></article>'
+                '<button data-zoom-run="a" disabled></button><button data-detail-run="a"></button></div>'
+                '<details class="work-facts"><p class="work-meta">tool · 2026-10-08</p>'
+                '<p class="work-status">会话 failed · 入口 fail · 评估 completed</p></details></article>'
                 '<script>window.BENCH_GALLERY=' + payload + ';</script><script>trusted-bootstrap</script>')
 
     def test_seed_exact_projection_independent_code_and_descriptors(self):
@@ -281,6 +288,24 @@ class GalleryUtilityTests(unittest.TestCase):
             audit(seed, self.render_fixture(seed).replace('data-zoom-run="a" disabled', 'data-zoom-run="a"'))
         with self.assertRaises(AssertionError):
             audit(seed, self.render_fixture(seed).replace('会话 failed', '会话 completed'))
+
+    def test_independent_projection_rejects_wrong_raw_review_reference_and_values(self):
+        data, seed, full_info, runtime_info = self.gallery_fixture()
+        data['runs'][0].update(conditions={'rubric_version': 'visual-v1'}, reviews=[{
+            'id': 'real-fixture-review', 'reviewer': 'AI 建议评分', 'blind': False,
+            'created_at': '2026-10-08T10:12:13.765432Z', 'scores': {}}])
+        seed['score_scopes'] = verifier.v2.score_scopes(data['runs'])
+        seed['defaults']['score_source'] = verifier.v2.default_score_source(seed['score_scopes'])
+        seed['counts']['reviews'] = 1
+        seed['runs'][0]['scores'] = [[0, 0, [None] * 6]]
+        def audit(changed):
+            html = self.render_fixture(changed).replace('未评审', '分项缺失')
+            return verifier.audit_gallery(html, data, 'trusted-bootstrap', 'trusted-css', full_info, runtime_info, b'trusted-program')
+        self.assertEqual(audit(seed), seed)
+        for slot, replacement in ((1, 999), (2, [0, None, None, None, None, None])):
+            changed = copy.deepcopy(seed); changed['runs'][0]['scores'][0][slot] = replacement
+            with self.subTest(slot=slot), self.assertRaisesRegex(AssertionError, 'raw review reference'):
+                audit(changed)
 
     def test_empty_zoom_placeholder_is_not_an_initial_thumbnail(self):
         data, seed, full_info, runtime_info = self.gallery_fixture()
@@ -311,12 +336,39 @@ class GalleryUtilityTests(unittest.TestCase):
             self.assertTrue(parsed.unsafe)
 
 
-    def test_phone_gallery_heading_has_44px_target_without_extra_vertical_budget(self):
+    def test_score_first_phone_uses_header_history_target_and_compact_unfolded_sheet(self):
         css = (verifier.ROOT / 'web/public-gallery.css').read_text()
-        self.assertIn('.public-gallery .gallery-heading>button{min-height:44px;', css)
-        self.assertNotIn('.public-gallery .gallery-heading>button{min-height:36px;', css)
-        # +8px target height is offset by -8px combined heading padding.
-        self.assertIn('.public-gallery .gallery-heading{padding:4px 0;align-items:start;gap:8px}', css)
+        html = (verifier.ROOT / 'web/public-gallery.html').read_text()
+        self.assertIn('min-height:44px', css)
+        self.assertIn('.public-main{padding-top:4px}', css)
+        self.assertIn('.gallery-heading{padding:2px 0}', css)
+        self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', css)
+        self.assertIn('.score-cell strong{font-size:22px}', css)
+        self.assertIn('.score-cell dd{display:flex;align-items:center', css)
+        self.assertIn('object-fit:contain', css)
+        self.assertIn('data-full-view="scores"', html.split('</header>')[0])
+        self.assertNotIn('gallery-intro', html)
+        self.assertNotIn('work-score-details', css)
+
+    def test_gallery_score_and_preview_styles_do_not_override_full_viewer(self):
+        css = (verifier.ROOT / 'web/public-gallery.css').read_text()
+        for selector in ('.score-sheet', '.score-cell', '.score-unknown', '.score-caption',
+                         '.evidence-card', '.preview-controls', '.preview-host', '.dialog-footnote'):
+            with self.subTest(selector=selector):
+                self.assertIn('.public-gallery ' + selector, css)
+                self.assertNotIn('}' + selector, css)
+
+    def test_independent_server_audit_rejects_hidden_missing_or_changed_score_cells(self):
+        data, seed, full_info, runtime_info = self.gallery_fixture()
+        html = self.render_fixture(seed)
+        def audit(markup):
+            return verifier.audit_gallery(markup, data, 'trusted-bootstrap', 'trusted-css', full_info, runtime_info, b'trusted-program')
+        self.assertEqual(audit(html), seed)
+        for markup in (html.replace('未评审', '0/4', 1), html.replace('data-dimension="motion"', 'data-dimension="other"'),
+                       html.replace('<dl>', '<details><dl>').replace('</dl>', '</dl></details>'),
+                       html.replace('<div class="score-cell" data-dimension="motion"><dt>运动表现</dt><dd>未评审</dd></div>', '')):
+            with self.subTest(markup=markup[-64:]), self.assertRaises(AssertionError):
+                audit(markup)
 
 if __name__ == '__main__':
     unittest.main()

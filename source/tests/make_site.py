@@ -52,6 +52,11 @@ PRIVATE_TEXT = re.compile(r"/home/|/Users/|/workspace(?:/|\b)|/root/|127\.0\.0\.
 CREDENTIAL_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9]|gh[pousr]_|github_pat_|xox[baprs]-)|-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
 STATS_KEYS = {"runs", "benchmark_runs", "reviews", "evidence", "unique_evidence", "images", "videos",
               "thumbnails", "media_files", "media_bytes", "index_bytes", "offline_bytes"}
+# ECMAScript trim: WhiteSpace plus LineTerminator, not Python's broader strip.
+SCORE_REVIEWER_WHITESPACE = ("\t\v\f         "
+                             "       　﻿\n\r  ")
+# The viewer's /AI.*建议/i has neither Unicode folding nor dotAll semantics.
+SCORE_AI_SUGGESTION = re.compile(r"[aA][iI][^\n\r  ]*建议")
 
 
 def _require(condition, message):
@@ -247,6 +252,33 @@ class _ReportHTML(HTMLParser):
             self.in_style = False
 
 
+def _validate_preferred_score_source(data):
+    if "preferred_score_source" not in data:
+        return  # Preserve the legacy path without resolving or inventing scopes.
+    preferred = data["preferred_score_source"]
+    _require(isinstance(preferred, str), "preferred score source must be an exact available scope string")
+    for run in data["runs"]:
+        _require(isinstance(run.get("conditions") or {}, dict), "invalid preferred score source conditions")
+        _require(isinstance(run.get("reviews") or [], list), "invalid preferred score source reviews")
+    # make_gallery imports this module. Resolve only at audit time to avoid a
+    # module-level cycle; reuse its frozen-rubric, run_id, blind and key rules.
+    from make_gallery import scope_key, score_scope
+    available = set()
+    for run in data["runs"]:
+        for review in run.get("reviews") or []:
+            if not isinstance(review, dict):
+                continue
+            scope = score_scope(run, review)
+            # Only text classification differs: full/offline app.js uses
+            # ECMAScript trim and /AI.*建议/i. Never trim or rewrite a raw label.
+            reviewer = review.get("reviewer")
+            reviewer = reviewer if isinstance(reviewer, str) and reviewer.strip(SCORE_REVIEWER_WHITESPACE) else None
+            scope[3] = reviewer
+            scope[1] = "ai-suggestion" if scope[2] is False and SCORE_AI_SUGGESTION.search(reviewer or "") else "label-unverified"
+            available.add(scope_key(scope))
+    _require(preferred in available, "preferred score source is not an exact available scope")
+
+
 def audit_snapshot(html: str, viewer_script: Path, *, static=False, preview_runtime=None) -> dict:
     """Parse JSON, never evaluate input JavaScript; match the viewer byte-for-byte."""
     parsed = _ReportHTML(static)
@@ -261,7 +293,8 @@ def audit_snapshot(html: str, viewer_script: Path, *, static=False, preview_runt
     v2 = data.get("format") == FORMAT_V2
     if v2:
         _require(data.get("transport") == ("external" if static else "inline"), "invalid v2 transport/profile")
-        _require(set(data) <= {"runs", "tasks", "evidence", "format", "transport", "originals", "assets", "thumbnails", "offline"}, "unknown v2 report fields")
+        _require(set(data) <= {"runs", "tasks", "evidence", "format", "transport", "originals", "assets", "thumbnails", "offline",
+                               "preferred_score_source"}, "unknown v2 report fields")
     else:
         _require(data.get("format") == (FORMAT if static else None), "invalid report format/profile")
         _require(not {"transport", "originals"}.intersection(data), "v2 fields in legacy report")
@@ -300,6 +333,7 @@ def audit_snapshot(html: str, viewer_script: Path, *, static=False, preview_runt
         _require(all(ref in data["evidence"].values() for ref in parsed.references), "unlisted inline media")
     if v2:
         validate_originals(data)
+    _validate_preferred_score_source(data)
     return data
 
 

@@ -29,10 +29,11 @@
 /* Original execution is opt-in and visually separate from captured evidence. */
 .card-heading{align-items:center;flex-wrap:nowrap}.card-title{min-width:0;display:grid;gap:4px}.card-title .chip{justify-self:start}.run-original{flex-shrink:0;font-size:12px;min-height:38px}.original-dialog{width:1500px}.original-preview{min-width:0;max-width:100%}.preview-controls{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-bottom:10px}.preview-controls label{min-width:140px}.preview-controls select{width:100%}.preview-state{padding:8px 10px;background:var(--surface-2);border-left:2px solid var(--blue);font-size:12px;overflow-wrap:anywhere}.original-preview[data-preview-state=error] .preview-state{border-color:var(--bad);color:var(--bad)}.preview-dimensions{font-size:11px;color:var(--muted);padding-block:6px;font-variant-numeric:tabular-nums}.preview-host{position:relative;width:100%;height:min(60dvh,720px);min-height:300px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line)}.preview-host:empty{height:100px;min-height:100px}.preview-host:empty:after{content:'原作未运行';position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:12px}.preview-provenance{margin-top:10px;color:var(--muted);overflow-wrap:anywhere}.preview-diagnostics{font-size:11px;color:var(--warn);padding-left:20px;overflow-wrap:anywhere;max-height:180px;overflow:auto}.compare-pair-picker{display:grid;gap:6px;margin-block:10px}.compare-pair-picker:empty{display:none}.compare-pair-picker label{min-width:0;overflow-wrap:anywhere}.compare-pair-picker input{flex-shrink:0}#start-original-pair{margin-block:8px}#original-content{min-width:0;max-width:100%}.no-registered-media .card-heading{flex-wrap:wrap}.no-registered-media .card-heading .run-original{margin-top:4px}
 @media(max-width:600px){.run-original{padding:7px 10px;font-size:12px;min-height:40px}.original-dialog{padding:16px;max-width:calc(100% - 16px);max-height:calc(100dvh - 20px)}.original-dialog .dialog-top{gap:8px;margin-bottom:12px;align-items:start}.original-dialog h2{font-size:19px;overflow-wrap:anywhere}.original-dialog .eyebrow{font-size:9px;margin-bottom:3px}.preview-controls{gap:6px}.preview-controls button{font-size:11px;padding:6px 9px;min-height:38px}.preview-controls label{flex:1 1 100%;font-size:10px}.preview-host{height:55dvh;min-height:280px}.preview-state{font-size:11px}.card-heading h3{overflow-wrap:anywhere}.compare-pair-picker .checkbox-label{font-size:11px}}
-/* Read-only scoring history stays local; the existing matrix is unchanged. */
+/* Six independent figures share one read-only sheet across evidence and history. */
 .snapshot .tabs{flex-wrap:wrap;gap:0 16px;justify-content:flex-start}
-.scores-view{min-width:0}.scores-view>.section-heading{margin-block:0 16px}.scores-view .score-controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin-bottom:16px}.scores-view .score-controls label{flex:1 1 180px;min-width:0;max-width:100%;font-size:13px}.scores-view .score-controls select{min-height:44px;font-size:14px}.scores-view #scores-coverage{font-size:13px;line-height:1.6;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.scores-view .scores-group{min-width:0;margin-block:24px}.scores-view .scores-group h3{font-size:16px;overflow-wrap:anywhere;margin-bottom:12px}.scores-view .table-scroll{width:100%;border-radius:8px;overflow:auto}.scores-view .score-history-table{min-width:1080px}.scores-view .score-history-table th{padding:12px;font-size:12px}.scores-view .score-history-table td{padding:12px;font-size:13px;overflow-wrap:anywhere}.scores-view .score-history-table td.numeric{font-variant-numeric:tabular-nums}.scores-view .score-history-table button{max-width:100%;min-height:44px;text-align:left;overflow-wrap:anywhere}.scores-view .score-history-table small{font-size:12px;display:block}.scores-view .footnote{font-size:12px;line-height:1.6}
-@media(max-width:600px){.scores-view .score-controls{padding:12px;gap:12px}.scores-view .score-controls label{flex-basis:100%}.scores-view .scores-group{margin-block:16px}.scores-view .score-history-table th,.scores-view .score-history-table td{padding:12px 8px}}
+.score-summary{min-width:0;margin-bottom:12px}.score-summary-heading{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}.score-summary-heading h3{margin:0;font-size:13px}.score-summary-heading small{font-size:10px}.score-source-line{color:var(--muted);font-size:11px;line-height:1.5;margin:4px 0 8px;overflow-wrap:anywhere}.score-sheet+.score-sheet{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}.score-six{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin:0;border:1px solid var(--line);border-radius:5px;overflow:hidden;background:var(--surface)}.score-cell{min-width:0;padding:8px 10px;text-align:left}.score-six .score-cell:nth-child(-n+3){border-bottom:1px solid var(--line)}.score-six .score-cell:not(:nth-child(3n)){border-right:1px solid var(--line)}.score-cell dt{font-size:11px;color:var(--muted);font-weight:400;line-height:1.4}.score-cell dd{display:flex;align-items:baseline;gap:4px;flex-wrap:wrap;min-width:0;margin:3px 0 0;line-height:1.2}.score-number{font:600 24px/1.2 var(--head);color:var(--ink)}.score-scale{font-size:11px;color:var(--muted)}.score-gap{font-size:10px;line-height:1.4;color:var(--muted);overflow-wrap:anywhere}.score-unknown .score-number{font-weight:400;color:var(--muted)}.sort-dimension{background:var(--wash)}.sort-dimension dt{color:var(--ink);font-weight:600}.score-record{min-width:0;color:var(--muted);font-size:11px;overflow-wrap:anywhere}.score-record>summary{cursor:pointer;min-height:44px;display:list-item;padding:12px 0;line-height:20px;color:var(--muted)}.score-record>.metadata{margin:0 0 12px}.score-source-control{min-width:0;margin-bottom:10px}.score-source-control select{min-height:44px;max-width:100%;font-size:12px}.evidence-card>.score-summary{padding:0 14px 8px;margin:0}.evidence-card .score-source-line{margin:4px 0 6px}.evidence-card .score-summary-heading{display:none}.card-actions button,.card-actions .run-original{min-height:44px}.card-actions .run-original.primary{background:var(--surface);border-color:var(--line);color:var(--ink)}.card-actions .run-original.primary:hover{border-color:var(--blue);background:var(--wash)}.compare-column .score-summary{margin:0 0 12px}.compare-column .score-record>.metadata{grid-template-columns:85px minmax(0,1fr)}.original-dialog .score-summary{max-width:850px;margin-bottom:18px}.score-history-cell{margin:0}.score-history-cell .score-cell{padding:0}.score-history-cell dt{display:none}.score-row-source{display:none}
+.scores-view{min-width:0}.scores-view>.section-heading{margin-block:0 12px}.scores-view .score-controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding:12px;border:1px solid var(--line);border-radius:5px;background:var(--surface);margin-bottom:12px}.scores-view .score-controls label{flex:1 1 180px;min-width:0;max-width:100%;font-size:12px;margin:0}.scores-view .score-controls select{min-height:44px;font-size:13px}.scores-view #scores-coverage{font-size:13px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.scores-view .scores-group{min-width:0;margin-block:20px}.scores-view .scores-group h3{font-size:16px;overflow-wrap:anywhere;margin-bottom:4px}.scores-view .scores-group>.score-record{margin-bottom:6px}.scores-view .table-scroll{width:100%;border-radius:5px}.scores-view .score-history-table{min-width:1120px}.scores-view .score-history-table th{padding:10px;font-size:11px}.scores-view .score-history-table td{padding:12px 10px;font-size:12px;overflow-wrap:anywhere}.scores-view .score-history-table td.numeric{white-space:normal}.scores-view .score-history-table button{max-width:100%;min-height:44px;text-align:left;overflow-wrap:anywhere}.scores-view .score-history-table small{font-size:11px;display:block}.scores-view .score-history-table .card-actions{margin:0}.scores-view .footnote{font-size:11px;line-height:1.6}.unscored-history{margin-top:20px;padding:10px 12px;border:1px solid var(--line);border-radius:5px;background:var(--surface-2);min-width:0}.unscored-history>summary{min-height:44px;cursor:pointer;line-height:1.6;padding-block:10px;font-size:13px}.unscored-runs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}.unscored-run{min-width:0;padding:12px;border:1px solid var(--line);border-radius:4px;background:var(--surface)}.unscored-run h3{font-size:15px;overflow-wrap:anywhere}.unscored-run .mono{font-size:10px;color:var(--muted);overflow-wrap:anywhere}.no-media-history .no-registered-media{display:block}.no-media-history .no-registered-media .caption{border:0}
+@media(max-width:600px){.score-cell{padding:8px}.score-gap{font-size:9px}.evidence-card>.score-summary{padding-inline:12px}.scores-view .score-controls{padding:10px;gap:10px}.scores-view .score-controls label{flex-basis:100%}.scores-view .scores-group{margin-block:16px}.scores-view .table-scroll{border:0;background:none;overflow:visible}.scores-view .score-history-table{display:block;min-width:0}.score-history-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.score-history-table tbody{display:grid;gap:12px}.score-history-table tr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:12px;border:1px solid var(--line);border-radius:5px;background:var(--surface);min-width:0}.scores-view .score-history-table td{border:0;padding:0;min-width:0}.score-history-table td:nth-child(-n+3),.score-history-table td:last-child{grid-column:1/-1}.score-history-table td:nth-child(-n+3){margin-bottom:8px}.score-history-table td:nth-child(2),.score-history-table td:nth-child(3){order:3}.score-history-table td:last-child{order:2;margin-block:12px}.scores-view .score-history-table .score-history-value{order:1;border-top:1px solid var(--line);padding:10px 4px 8px}.score-row-source{display:block}.scores-view .score-history-table [data-model-route]>button{border:0;padding:0;background:none;font:600 17px/1.3 var(--head)}.score-history-cell dt{display:block}.score-history-table .score-cell dd{flex-wrap:wrap}.score-history-table .score-number{font-size:24px}.score-history-table .score-record>summary{padding-block:10px}.score-history-table .score-run-date{font-size:11px;color:var(--muted)}.score-history-table tbody tr:hover{background:var(--surface)}.unscored-runs{grid-template-columns:1fr}}
 @media print{.chart .bar{fill:var(--bar-pattern)}.topbar,.filters,.comparison-tray,.workspace-bar{display:none}.shell{max-width:none;padding:0}.panel{break-inside:avoid}}
 </style>
 
@@ -504,7 +505,7 @@
   const filterKeys = ['q', 'tool', 'model', 'task_id', 'purpose', 'prompt_version', 'status', 'date_from', 'date_to'];
   const scoreLabels = { compliance: '指令遵循', recognizability: '辨识度', motion: '运动表现', visual_detail: '视觉细节', interaction: '交互表现', completeness: '完整性' };
   const statusNames = { queued: '排队中', running: '运行中', generated: '待评估', completed: '已完成', failed: '失败', interrupted: '已中断', unavailable: '不可用', blocked: '被阻止' };
-  const metricDefs = { cost_usd: ['已知费用', 'USD'], duration_ms: ['生成会话耗时', '秒'], total_tokens: ['总 Token', 'token'], evaluation_duration_ms: ['评估耗时', '秒'], api_duration_ms: ['API 耗时', '秒'], input_tokens: ['输入 Token', 'token'], output_tokens: ['输出 Token', 'token'], source_bytes: ['源码体积（辅助）', 'byte'], source_file_count: ['源码文件数（辅助）', 'file'] };
+  const metricDefs = { cost_usd: ['已知费用', 'USD'], duration_ms: ['生成会话耗时', '秒'], total_tokens: ['总 Token', 'token'], evaluation_duration_ms: ['评估耗时', '秒'], api_duration_ms: ['API 耗时', '秒'], input_tokens: ['输入 Token（不含缓存）', 'token'], input_total: ['总输入 Token（含缓存，已采集）', 'token'], output_tokens: ['输出 Token', 'token'], source_bytes: ['源码体积（辅助）', 'byte'], source_file_count: ['源码文件数（辅助）', 'file'] };
   const stages = [
     { id: 'desktop', name: '桌面首张', file: 'desktop.png' },
     { id: 'later', name: '后续采样', file: 'frame-2.png' },
@@ -559,19 +560,30 @@
     for (const run of source.runs || []) for (const item of scoreSummaries(run)) unique.set(item.scope, JSON.parse(item.scope));
     return [...unique].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, scope]) => scope);
   }
+  function validScoreSource(value) {
+    const scopes = snapshotScoreScopes();
+    return typeof value === 'string' && (value === '*' || scopes.some(scope => JSON.stringify(scope) === value) || (value === '' && !scopes.length));
+  }
+  function defaultScoreSource() {
+    // A build-selected scope wins; old snapshots keep their existing fallback.
+    if (Object.hasOwn(source, 'preferred_score_source')) return source.preferred_score_source;
+    const scopes = snapshotScoreScopes(), preferred = scopes.find(scope => scoreRankable(scope) && scope[1] === 'ai-suggestion' && scope[2] === false) || scopes.find(scoreRankable) || scopes[0];
+    return preferred ? JSON.stringify(preferred) : '';
+  }
   function readScoreURL(params) {
     if (!snapshot) return;
-    const scopes = snapshotScoreScopes(), preferred = scopes.find(scope => scoreRankable(scope) && scope[1] === 'ai-suggestion' && scope[2] === false) || scopes.find(scoreRankable) || scopes[0];
-    state.scoreSort = scoreKeys.includes(params.get('score_sort')) ? params.get('score_sort') : '';
-    const requested = params.get('score_source');
-    state.scoreSource = requested === '*' || scopes.some(scope => JSON.stringify(scope) === requested) ? requested : preferred ? JSON.stringify(preferred) : '';
+    const requested = params.has('score_source') ? params.get('score_source') : defaultScoreSource();
+    state.scoreSource = requested;
+    const sort = params.get('score_sort') || '';
+    state.scoreSort = scoreKeys.includes(sort) ? sort : '';
+    state.scoreError = !validScoreSource(requested) ? '评分口径不存在或格式无效；请明确选择已有口径，不自动回退。' : sort && !scoreKeys.includes(sort) ? '排序分项无效；请选择六项之一，不生成综合评分。' : '';
   }
   const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const valueOf = (run, key) => key === 'duration_ms' ? run.duration_ms : key === 'evaluation_duration_ms' ? run.evaluation?.duration_ms : run.metrics?.[key];
   const text = value => value == null || value === '' ? 'unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const number = value => finite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : 'unknown';
-  const durationText = value => { const seconds = value / 1000; return seconds < 60 ? `${number(seconds)} 秒` : `${Math.floor(seconds / 60)} 分 ${number(seconds % 60)} 秒`; };
-  const metricFormat = (value, key) => !finite(value) ? 'unknown' : key.includes('duration') ? durationText(value) : key === 'cost_usd' ? `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}` : number(value);
+  const durationText = value => { const seconds = value / 1000; return value > 0 && value < 1000 ? '<1 秒' : seconds < 60 ? `${number(seconds)} 秒` : `${Math.floor(seconds / 60)} 分 ${number(seconds % 60)} 秒`; };
+  const metricFormat = (value, key) => !finite(value) ? '未上报' : key.includes('duration') ? durationText(value) : key === 'cost_usd' ? value > 0 && value < .01 ? '< USD 0.01' : `USD ${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}` : number(value);
   const dateOf = run => String(run.date || run.started_at || '').slice(0, 10);
   const coverage = (n, total) => total ? `${Math.round(n / total * 100)}%` : '—';
   function el(tag, attrs = {}, children = []) {
@@ -619,9 +631,9 @@
     // Explicit empty purpose is meaningful: distinguish it from default benchmark on reload.
     if (!state.filters.purpose) url.searchParams.set('purpose', '');
     if (!state.filters.task_id && !state.defaultTaskPending) url.searchParams.set('task_id', '');
-    if (snapshot && state.view === 'scores') {
+    if (snapshot) {
       if (state.scoreSort) url.searchParams.set('score_sort', state.scoreSort); else url.searchParams.delete('score_sort');
-      if (state.scoreSource) url.searchParams.set('score_source', state.scoreSource); else url.searchParams.delete('score_source');
+      if (typeof state.scoreSource === 'string' && state.scoreSource) url.searchParams.set('score_source', state.scoreSource); else url.searchParams.delete('score_source');
     }
     url.hash = state.view;
     try { history.replaceState(null, '', url); } catch (error) { notify('当前查看器无法保存筛选 URL；筛选仍然有效。'); }
@@ -750,17 +762,39 @@
     $('#task-context').replaceChildren(...requirements);
   }
   function generationStatus(run) { return run.generation_status || run.status; }
+  function runChecks(run) {
+    const checks = new Map();
+    // Top-level checks win by name; missing names fall back to Evaluation.
+    for (const list of [run.checks, run.evaluation?.checks]) for (const check of Array.isArray(list) ? list : []) {
+      if (check && typeof check === 'object' && !Array.isArray(check) && !checks.has(check.name)) checks.set(check.name, check);
+    }
+    return [...checks.values()];
+  }
   function entrypointStatus(run) {
     if (run.evaluation?.status && run.evaluation.status !== 'completed') return 'unknown';
-    const check = (run.checks || []).find(item => item.name === 'entrypoint') || (run.evaluation?.checks || []).find(item => item.name === 'entrypoint');
+    const check = runChecks(run).find(item => item.name === 'entrypoint');
     return ['pass', 'passed', 'ok'].includes(check?.status) ? 'pass' : ['fail', 'failed'].includes(check?.status) ? 'fail' : 'unknown';
+  }
+  const diagnosticNames = {
+    model_unavailable: '模型不可用', provider_unavailable: '供应商不可用', rate_limit: '限流', authentication_or_permission: '认证 / 权限问题', transport_interrupted: '传输中断', session_error: '生成会话故障', infrastructure: '基础设施故障', infrastructure_error: '基础设施故障', operator_interrupted: '操作者中断',
+    provider_rate_limited_or_out_of_credit: '供应商限流 / 额度不足', provider_unauthorized: '供应商认证失败', provider_forbidden: '供应商拒绝访问', provider_not_found: '供应商资源不存在', model_not_recognized: '模型未识别', provider_cooldown: '供应商冷却中', provider_out_of_credit: '供应商额度不足', timeout: '超时', connection_failure: '连接故障', other: '其他故障'
+  };
+  const evaluationNames = { completed: '已完成（不等于通过）', not_evaluated: '未评估', failed: '评估失败', infrastructure_error: '基础设施故障', interrupted: '评估中断', running: '评估中' };
+  const checkNames = { entrypoint: '作品入口', provider_route: '供应商路由', frame_change: '帧变化（非质量分）', load: '页面装载', svg: 'SVG 登记（非辨识度评分）', mobile_overflow: '移动溢出', javascript: 'JavaScript', external_requests: '外部请求' };
+  function diagnosticText(run) {
+    const categories = [run.error_category, run.error, run.evaluation?.error].filter(value => typeof value === 'string' && Object.hasOwn(diagnosticNames, value));
+    return [...new Set(categories)].map(value => diagnosticNames[value]).join(' / ') || (run.error || run.evaluation?.error ? '故障类别未声明；原始错误文本不展示' : '未记录故障类别');
+  }
+  function displayRecord(run) {
+    // Never alter getRun's object or echo arbitrary error / note / check detail.
+    return JSON.parse(JSON.stringify(run, (key, value) => ['error', 'note', 'detail', 'errors', 'blocked_requests'].includes(key) ? undefined : value));
   }
   function includedPaths(run) {
     if (!snapshot) return [];
     if (!includedLists.has(run)) includedLists.set(run, evidencePaths(run).filter(path => mediaURI(run, path)));
     return includedLists.get(run);
   }
-  function reviewStatus(run) { const reviews = run.reviews || [], pending = reviews.filter(review => !review.blind && /AI.*建议/i.test(review.reviewer || '')).length; return reviews.length ? `${reviews.length} 条已有记录${pending ? ` · ${pending} 条非盲 AI 建议待人工复核` : ''}` : '未评'; }
+  function reviewStatus(run) { const reviews = (Array.isArray(run.reviews) ? run.reviews : []).filter(review => review && typeof review === 'object' && !Array.isArray(review)), pending = reviews.filter(review => review.blind === false && /AI.*建议/i.test(review.reviewer || '')).length; return reviews.length ? `${reviews.length} 条已有记录${pending ? ` · ${pending} 条非盲 AI 建议待人工复核` : ''}` : '未评'; }
   function attemptText(run) {
     if (run.retry_of) return `显式重试 · attempt ${text(run.attempt)} · retry_of ${run.retry_of}`;
     if (run.attempt === 0) return '首次 · attempt 0（本运行链）';
@@ -875,12 +909,12 @@
     return el('span', { class: `chip ${cls}`, text: `${icon} ${statusNames[status] || text(status)}` });
   }
   function checksText(run) {
-    const checks = Array.isArray(run.checks) ? run.checks : [];
+    const checks = runChecks(run);
     if (!checks.length) return '未验收';
     // A collapsed check set is not a passing ratio: an evaluator failure that
     // only left provider_route must never read as "all checks passed".
     const evaluation = run.evaluation?.status;
-    if (evaluation && evaluation !== 'completed') return `未验收（${text(evaluation)}）`;
+    if (evaluation && evaluation !== 'completed') return `未验收（${evaluationNames[evaluation] || '评估状态未核实'}）`;
     const pass = checks.filter(check => ['pass', 'passed', 'ok'].includes(check.status)).length;
     return `${pass}/${checks.length} 通过`;
   }
@@ -1173,7 +1207,7 @@
     cancelPreviewContext();
     const dialog = $('#original-dialog'), content = $('#original-content'); releaseMedia(content);
     $('#original-title').textContent = `${text(run.model)} · 原作实时预览`;
-    const panel = previewPanel(run); content.replaceChildren(panel.node); dialog.showModal(); dialog.scrollTop = 0;
+    const panel = previewPanel(run); content.replaceChildren(scoreSummary(run, true), panel.node); dialog.showModal(); dialog.scrollTop = 0;
     if (originalAvailable(run)) panel.start();
   }
   function stagePath(run, stage) { const file = stages.find(item => item.id === stage)?.file; return file ? evidencePaths(run).find(path => path.split('/').at(-1) === file) : null; }
@@ -1240,11 +1274,11 @@
   function galleryCard(run) {
     const path = stagePath(run, state.galleryStage);
     return el('article', { class: `evidence-card${evidencePaths(run).length ? '' : ' no-registered-media'}`, 'data-run-id': run.id }, [
-      el('div', { class: 'card-heading' }, [el('div', { class: 'card-title' }, [el('h3', { text: text(run.model) }), el('span', { class: 'chip', text: `${text(run.tool)} · ${text(run.prompt_version)}` })]), originalButton(run)]),
-      media(run, path),
-      el('div', { class: 'caption' }, [el('p', { class: 'run-identity', text: `${dateOf(run) || 'unknown'} · ${text(run.task_name || run.task_id)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` }),
-        el('div', { class: 'run-facts' }, [el('span', {}, ['会话 ', statusChip(generationStatus(run))]), el('span', { text: `入口 ${entrypointStatus(run)}` }), el('span', { text: `评估 ${text(run.evaluation?.status)}` }), el('span', { text: checksText(run) })]),
-        el('div', { class: 'card-actions' }, [selectButton(run), el('button', { 'data-open-stage': run.id, text: '放大', disabled: !path || state.galleryStage === 'video' || !mediaURI(run, path), onclick: () => openZoom(run, path) }), el('button', { 'data-open-video': run.id, text: '看录像', disabled: !stagePath(run, 'video'), onclick: () => openDetail(run.id, 'video') }), detailButton(run, '本次详情 / 全部证据')])])
+      el('div', { class: 'card-heading' }, el('div', { class: 'card-title' }, [el('h3', { text: text(run.model) }), el('span', { class: 'chip', text: `${text(run.tool)} · ${text(run.prompt_version)}` })])),
+      scoreSummary(run), media(run, path),
+      el('div', { class: 'caption' }, [el('div', { class: 'card-actions' }, [originalButton(run), selectButton(run), el('button', { 'data-open-stage': run.id, text: '放大', disabled: !path || state.galleryStage === 'video' || !mediaURI(run, path), onclick: () => openZoom(run, path) }), el('button', { 'data-open-video': run.id, text: '看录像', disabled: !stagePath(run, 'video'), onclick: () => openDetail(run.id, 'video') }), detailButton(run, '本次详情 / 全部证据')]),
+        el('details', { class: 'score-record card-record' }, [el('summary', { text: '本次运行 / 条件 / 计量' }), el('p', { class: 'run-identity', text: `${dateOf(run) || 'unknown'} · ${text(run.task_name || run.task_id)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` }),
+          el('div', { class: 'run-facts' }, [el('span', {}, ['会话 ', statusChip(generationStatus(run))]), el('span', { text: `入口 ${entrypointStatus(run)}` }), el('span', { text: `评估 ${text(run.evaluation?.status)}` }), el('span', { text: checksText(run) })]), metadata(['duration_ms', 'cost_usd', 'total_tokens', 'evaluation_duration_ms'].map(key => [metricDefs[key][0], metricFormat(valueOf(run, key), key)]))])])
     ]);
   }
   function renderGallery(root) {
@@ -1277,22 +1311,70 @@
       groupGrid.append(el('section', { class: 'model-group', 'aria-label': `${text(first.tool)} / ${text(first.model)}` }, [el('div', { class: 'model-group-heading' }, [el('h2', { text: text(first.model) }), el('p', { text: `${text(first.tool)} · 展示 ${runs.length} / ${allRuns.length} 次${missing ? `；${missing} 次无媒体见上方历史` : ' · 未收折'} · 时间 / ID 升序` })]), el('div', { class: 'gallery' }, stableRuns(runs).map(galleryCard))]));
     }
   }
+  function scoreReason(run, summary, key) {
+    if (snapshot && state.scoreError) return '口径无效';
+    if (!summary) return scoreSummaries(run).length ? '当前来源无记录' : '未评审';
+    const scope = JSON.parse(summary.scope);
+    if (!scoreRankable(scope)) return scope[0] !== 'visual-v1' ? '协议不明 / 冲突' : '来源属性不完整';
+    const value = run.reviews?.[summary.index]?.scores?.[key];
+    return value == null ? '证据不足' : '分项数据无效';
+  }
+  function scoreCell(run, summary, key, index) {
+    const value = summary && scoreRankable(JSON.parse(summary.scope)) && !(snapshot && state.scoreError) ? summary.values[index] : null;
+    const reason = value === null ? scoreReason(run, summary, key) : '';
+    return el('div', { class: `score-cell${state.scoreSort === key ? ' sort-dimension' : ''}${value === null ? ' score-unknown' : ''}`, 'data-score-key': key, 'data-score-value': value, 'data-score-reason': reason || null }, [
+      el('dt', { text: scoreLabels[key] }), el('dd', {}, [el('strong', { class: 'score-number', text: value === null ? '—' : String(value) }), ...(value === null ? [el('span', { class: 'score-gap', text: reason })] : [el('span', { class: 'score-scale', text: '/4' })])])
+    ]);
+  }
+  function scoreSheet(run, summary) {
+    const scope = summary ? JSON.parse(summary.scope) : null;
+    const shortSource = snapshot && state.scoreError ? '口径无效 · 未回退' : !summary ? scoreReason(run, null) : scope[1] === 'ai-suggestion' ? '非盲 AI 建议 · 待人工复核' : `${scope[2] === true ? '盲评' : scope[2] === false ? '非盲评' : '盲评属性未记录'} · 来源标签未核实`;
+    const grid = el('dl', { class: 'score-six', 'aria-label': '六项独立评分，各 0–4' }, scoreKeys.map((key, index) => scoreCell(run, summary, key, index)));
+    const sheet = el('section', { class: 'score-sheet', 'data-score-scope': summary?.scope || null }, [el('p', { class: 'score-source-line', text: shortSource }), grid]);
+    if (summary) sheet.append(el('details', { class: 'score-record' }, [el('summary', { text: '评分来源 / 原记录' }), metadata([
+      ['Rubric', scope[0]], ['来源属性', scope[1] === 'ai-suggestion' ? 'AI 建议，非身份认证' : '来源标签未核实'], ['Reviewer 标签', scope[3]], ['盲评', typeof scope[2] === 'boolean' ? scope[2] ? '是' : '否' : 'unknown'], ['评审日期', summary.created_at], ['评审 ID / 原序', `${text(summary.id)} / ${text(summary.index)}`]
+    ]), el('p', { class: 'footnote', text: '只属于本次运行 / 当前口径；取最近记录，不取最高、不借旧项。交互表现衡量可用性与响应式，不强制提供控制器。' })]));
+    return sheet;
+  }
+  function scoreSourceControl(id) {
+    const select = el('select', { id, 'data-score-source': '', 'aria-label': '评分口径，来源标签非身份认证', onchange: event => {
+      const requested = event.target.value;
+      if (!validScoreSource(requested)) { notify('评分口径无效；未切换、未回退。', true); return; }
+      state.scoreSource = requested; state.scoreError = ''; syncURL();
+      if (state.view === 'scores') { const root = $('#view-content'); releaseMedia(root); root.replaceChildren(); renderScores(root); }
+      $$('[data-score-summary]').forEach(node => node.drawScores());
+      $$('[data-score-source]').forEach(node => { node.value = state.scoreSource; });
+    } }, [el('option', { value: '*', text: '全部口径 · 分别展示，不合并' }), ...snapshotScoreScopes().map(scope => el('option', { value: JSON.stringify(scope), text: scoreScopeLabel(scope) }))]);
+    if (!validScoreSource(state.scoreSource)) select.prepend(el('option', { value: state.scoreSource, disabled: true, text: '口径无效 · 请重新选择' }));
+    select.value = state.scoreSource;
+    return el('label', { class: 'score-source-control' }, ['评分口径 · 来源标签非身份认证', select]);
+  }
+  function scoreSummary(run, controls = false) {
+    const sheets = el('div', { class: 'score-sheets' });
+    const node = el('section', { class: 'score-summary', 'data-score-summary': run.id, 'aria-label': `${text(run.model)} 的六项评分` }, [el('div', { class: 'score-summary-heading' }, [el('h3', { text: '六项独立评分' }), el('small', { text: '各 0–4 · 无综合分' })]), ...(snapshot && controls ? [scoreSourceControl()] : []), sheets]);
+    node.drawScores = () => {
+      const summaries = scoreSummaries(run), selected = snapshot ? state.scoreSource === '*' ? summaries : summaries.filter(item => item.scope === state.scoreSource) : summaries;
+      sheets.replaceChildren(...(selected.length ? selected.map(summary => scoreSheet(run, summary)) : [scoreSheet(run, null)]));
+    };
+    node.drawScores(); return node;
+  }
   function renderScores(root) {
-    const scopes = snapshotScoreScopes(), dimension = state.scoreSort || 'compliance', dimensionIndex = scoreKeys.indexOf(dimension);
+    const dimension = state.scoreSort || 'compliance', dimensionIndex = scoreKeys.indexOf(dimension);
     const wrapper = el('section', { class: 'scores-view' }); root.append(wrapper);
-    const reviews = (source.runs || []).flatMap(run => (run.reviews || []).map(review => ({ review, purpose: run.purpose })));
-    wrapper.append(el('div', { class: 'section-heading' }, el('div', {}, [el('h2', { text: '评分历史 · 只读' }), el('p', { text: `全局 ${reviews.length} 条已有评审 · 主评测 ${reviews.filter(item => item.purpose === 'benchmark').length} · 冒烟 ${reviews.filter(item => item.purpose === 'smoke').length}。历史评分属于原运行，不替代最新作品。` })])));
-    const sort = el('select', { id: 'scores-sort', onchange: event => { state.scoreSort = event.target.value; syncURL(); render(); } }, [el('option', { value: '', text: '默认顺序' }), ...scoreKeys.map(key => el('option', { value: key, text: scoreLabels[key] + ' ↓' }))]); sort.value = state.scoreSort;
-    const sourceSelect = el('select', { id: 'scores-source', onchange: event => { state.scoreSource = event.target.value; syncURL(); render(); } }, [el('option', { value: '*', text: '全部口径 · 分组，不合并排名' }), ...scopes.map(scope => el('option', { value: JSON.stringify(scope), text: scoreScopeLabel(scope) }))]); sourceSelect.value = state.scoreSource;
-    wrapper.append(el('div', { class: 'scores-controls score-controls' }, [el('label', {}, ['排序分项 · 各 0–4', sort]), el('label', {}, ['评分口径 · 来源标签非身份认证', sourceSelect]) ]));
+    const reviews = (source.runs || []).flatMap(run => (Array.isArray(run.reviews) ? run.reviews : []).filter(review => review && typeof review === 'object' && !Array.isArray(review)).map(review => ({ review, purpose: run.purpose })));
+    wrapper.append(el('div', { class: 'section-heading' }, el('div', {}, [el('h2', { text: '评分历史 · 只读' }), el('p', { text: `全局 ${reviews.length} 条已有评审 · 主评测 ${reviews.filter(item => item.purpose === 'benchmark').length} · 冒烟 ${reviews.filter(item => item.purpose === 'smoke').length}。只展示真实评审，未评分尝试在下方；历史分数不替代最新作品。` })])));
+    const sort = el('select', { id: 'scores-sort', onchange: event => { state.scoreSort = event.target.value; readScoreURL(new URLSearchParams({ score_source: state.scoreSource, score_sort: state.scoreSort })); syncURL(); render(); } }, [el('option', { value: '', text: '默认顺序' }), ...scoreKeys.map(key => el('option', { value: key, text: scoreLabels[key] + ' ↓' }))]); sort.value = state.scoreSort;
+    wrapper.append(el('div', { class: 'scores-controls score-controls' }, [el('label', {}, ['排序分项 · 各 0–4', sort]), scoreSourceControl('scores-source')]));
+    if (state.scoreError) { wrapper.append(el('p', { class: 'notice error', role: 'status', text: state.scoreError })); return; }
     const base = [...localFilter(source.runs || [])].sort((a, b) => text(a.tool).localeCompare(text(b.tool)) || text(a.model).localeCompare(text(b.model)) || String(a.started_at || a.date || '').localeCompare(String(b.started_at || b.date || '')) || String(a.id).localeCompare(String(b.id)));
     const latest = new Map();
     for (const run of stableRuns(source.runs || [])) latest.set(JSON.stringify([run.tool, run.model, run.task_id]), run.id);
-    const groups = new Map(), eligible = new Set(), anyEligible = new Set();
+    const groups = new Map(), eligible = new Set(), anyEligible = new Set(), unmatched = [];
     for (const run of base) {
       const summaries = scoreSummaries(run);
       if (summaries.some(item => scoreRankable(JSON.parse(item.scope)) && item.values[dimensionIndex] !== null)) anyEligible.add(run.id);
-      const items = state.scoreSource === '*' ? summaries.length ? summaries : [{ scope: JSON.stringify([null, 'label-unverified', null, null]), values: Array(6).fill(null), created_at: null, id: null, index: null }] : [summaries.find(item => item.scope === state.scoreSource) || { scope: state.scoreSource || JSON.stringify([null, 'label-unverified', null, null]), values: Array(6).fill(null), created_at: null, id: null, index: null }];
+      const items = state.scoreSource === '*' ? summaries : summaries.filter(item => item.scope === state.scoreSource);
+      if (!items.length) unmatched.push(run);
       for (const summary of items) {
         const scope = JSON.parse(summary.scope), value = scoreRankable(scope) ? summary.values[dimensionIndex] : null;
         if (value !== null) eligible.add(run.id);
@@ -1302,20 +1384,32 @@
       }
     }
     wrapper.append(el('p', { id: 'scores-coverage', text: `${scoreLabels[dimension]} · 当前口径 ${eligible.size}/${base.length} 已评；任一可核实口径 ${anyEligible.size}/${base.length}。未评不补零；无总分、均分或加权分。` }));
-    wrapper.append(el('p', { class: 'footnote', text: '仅同任务、同用途、同 rubric、同来源/盲评/Reviewer 的六项可比。每个运行每个口径取时间 / ID / 原序最近一条，不取最高、不补齐旧项。未知协议与显式冲突不参与排序；来源标签不等于身份认证。' }));
+    wrapper.append(el('p', { class: 'footnote', text: '仅同任务、用途、rubric、来源 / 盲评 / Reviewer 可比。每个运行每个口径取时间 / ID / 原序最近一条；此前真实评审可展开，不取最高、不借旧项。未知协议与显式冲突不参与排序。' }));
     for (const [, entries] of [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       const ordered = state.scoreSort ? [...entries].sort((a, b) => (a.value === null) - (b.value === null) || (a.value !== null && b.value !== null ? b.value - a.value : 0) || a.index - b.index) : entries;
       const first = entries[0], section = el('section', { class: 'scores-group', 'data-score-group': JSON.stringify([first.run.task_id || null, first.run.purpose || null, first.summary.scope]) });
-      section.append(el('h3', { text: `${text(first.run.task_name || first.run.task_id)} · ${text(first.run.purpose)} · ${scoreScopeLabel(first.scope)} · ${entries.filter(item => item.value !== null).length}/${entries.length} 已评` }));
-      const rows = ordered.map(({ run, summary, scope }) => {
+      const label = first.scope[1] === 'ai-suggestion' ? '非盲 AI 建议 · 待人工复核' : first.scope[2] === true ? '盲评 · 来源标签未核实' : '非盲评 / 属性待核实 · 来源标签未核实';
+      section.append(el('h3', { text: `${text(first.run.task_name || first.run.task_id)} · ${text(first.run.purpose)} · ${entries.filter(item => item.value !== null).length}/${entries.length} 分项已评` }), el('p', { class: 'score-source-line', text: label }), el('details', { class: 'score-record' }, [el('summary', { text: '本组评分口径 / Reviewer' }), el('p', { text: scoreScopeLabel(first.scope) })]));
+      const rows = ordered.map(({ run, summary }) => {
         const current = latest.get(JSON.stringify([run.tool, run.model, run.task_id])) === run.id;
-        const identity = el('div', { 'data-model-route': run.model, 'aria-label': text(run.model) }, [detailButton(run, text(run.model).replace(/^opencode\//, '')), el('small', { text: `${text(run.tool)} · ${current ? '最新运行' : '历史运行'} · ${run.id}` })]);
-        const record = el('div', {}, [el('span', { text: text(summary.created_at) }), el('small', { text: `review ${text(summary.id)} · 原序 ${text(summary.index)}` })]);
-        const details = el('details', {}, [el('summary', { text: '原始评审' }), reviewList(run.reviews || [])]);
-        return [identity, text(run.started_at || run.date), record, ...summary.values.map(value => el('td', { class: 'numeric', text: scoreRankable(scope) && value !== null ? value + '/4' : '未评' })), el('div', {}, [detailButton(run, '运行详情'), originalButton(run), details])];
+        const identity = el('div', { 'data-model-route': run.model, 'aria-label': text(run.model) }, [detailButton(run, text(run.model).replace(/^opencode\//, '')), el('p', { class: 'score-row-source score-source-line', text: label }), el('small', { text: `${text(run.tool)} · ${current ? '最新运行' : '历史运行'} · ${run.id}` })]);
+        const scopedReviews = (run.reviews || []).filter(review => review && typeof review === 'object' && !Array.isArray(review) && JSON.stringify(scoreScope(run, review)) === summary.scope);
+        const record = el('div', {}, [el('span', { text: text(summary.created_at) }), el('small', { text: `最近真实评审 · ${scopedReviews.length} 条本口径记录` }), el('details', { class: 'score-record' }, [el('summary', { text: '评审 ID / 原序' }), el('p', { text: `${text(summary.id)} / ${text(summary.index)}` })])]);
+        const details = el('details', { class: 'score-record' }, [el('summary', { text: `全部本口径评审 (${scopedReviews.length})` }), reviewList(scopedReviews, run)]);
+        return [identity, el('span', { class: 'score-run-date', text: `运行 ${text(run.started_at || run.date)}` }), record, ...scoreKeys.map((key, index) => el('td', { class: 'numeric score-history-value' }, el('dl', { class: 'score-history-cell' }, scoreCell(run, summary, key, index)))), el('div', { class: 'card-actions' }, [detailButton(run, '运行详情'), originalButton(run), details])];
       });
       section.append(table(['模型 / 运行', '运行日期', '评审日期 / 记录', ...Object.values(scoreLabels), '检查原记录'], rows, 'scores-table score-history-table', ordered.map(({ run, summary }) => ({ 'data-score-run': run.id, 'data-score-scope': summary.scope }))));
       wrapper.append(section);
+    }
+    if (unmatched.length) {
+      const list = el('div', { class: 'unscored-runs' }), disclosure = el('details', { id: 'scores-unscored', class: 'unscored-history' }, [el('summary', { text: `当前口径无记录 / 未评审 · ${unmatched.length} 次尝试（展开全部）` }), el('p', { class: 'footnote', text: '这是生成尝试清单，不是评审行。已有其他口径不会冒充当前评分；会话失败但有作品仍可运行。' }), list]);
+      let populated = false;
+      disclosure.addEventListener('toggle', () => {
+        if (!disclosure.open || populated) return;
+        populated = true;
+        list.replaceChildren(...unmatched.map(run => el('article', { class: 'unscored-run', 'data-unscored-run': run.id }, [el('h3', { text: text(run.model) }), el('p', { class: 'footnote', text: `${scoreReason(run, null)} · ${text(run.task_name || run.task_id)} · ${text(run.purpose)} · ${dateOf(run)} · 会话 ${statusNames[generationStatus(run)] || '状态未记录'} / 入口 ${entrypointStatus(run)}` }), el('p', { class: 'mono', text: run.id }), el('div', { class: 'card-actions' }, [detailButton(run, '本次详情 / 全部证据'), originalButton(run), selectButton(run)])])));
+      });
+      wrapper.append(disclosure);
     }
     if (!base.length) wrapper.append(empty('当前范围没有运行。', '调整任务、用途或更多筛选；历史记录不会自动替换当前范围。'));
   }
@@ -1339,27 +1433,32 @@
     content.replaceChildren(el('p', { class: 'muted', text: '正在读取运行详情…' })); if (!dialog.open) dialog.showModal();
     try {
       const run = await getRun(id); if (!dialog.open || request !== state.detailRequest) return;
-      $('#detail-title').textContent = text(run.id);
-      const blocks = [detailBlock('原作实时预览', [originalButton(run), el('p', { class: 'footnote', text: originalGuidance(run) })], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), selectButton(run)], true)];
+      $('#detail-title').textContent = `${text(run.model)} · 本次详情`;
+      const blocks = [detailBlock('本次效果评分', [scoreSummary(run, true)], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), el('div', { class: 'card-actions' }, [originalButton(run), selectButton(run)])], true)];
       if (snapshot) blocks.push(snapshotHistory(run));
       blocks.push(detailBlock('实验条件 / Prompt', [metadata([
-        ['运行状态', statusNames[run.status] || run.status], ['生成结论', run.generation_status || run.status], ['已记录 attempt（缺失为 unknown）', run.attempt], ['重试来源', run.retry_of], ['归档完整性', run.archive_status], ['评估结束', run.evaluation_finished_at], ['批次', run.batch_id], ['日期', dateOf(run)], ['工具 / 模型', `${text(run.tool)} / ${text(run.model)}`], ['任务', `${text(run.task_name)} (${text(run.task_id)})`], ['Purpose', run.purpose], ['Prompt 版本', run.prompt_version], ['条件指纹', run.condition_fingerprint], ['推理强度', effortText(run)], ['Prompt hash', run.prompt_hash || run.prompt?.sha256 || run.prompt?.hash], ['归档路径', run.archive_dir], ['开始 / 结束', `${text(run.started_at)} / ${text(run.finished_at)}`], ['错误', run.error]
+        ['运行 ID', run.id], ['运行状态', statusNames[run.status] || run.status], ['生成结论', run.generation_status || run.status], ['已记录 attempt（缺失为 unknown）', run.attempt], ['重试来源', run.retry_of], ['归档完整性', run.archive_status], ['评估结束', run.evaluation_finished_at], ['批次', run.batch_id], ['日期', dateOf(run)], ['工具 / 模型', `${text(run.tool)} / ${text(run.model)}`], ['任务', `${text(run.task_name)} (${text(run.task_id)})`], ['Purpose', run.purpose], ['Prompt 版本', run.prompt_version], ['条件指纹', run.condition_fingerprint], ['推理强度', effortText(run)], ['Prompt hash', run.prompt_hash || run.prompt?.sha256 || run.prompt?.hash], ['归档路径', run.archive_dir], ['开始 / 结束', `${text(run.started_at)} / ${text(run.finished_at)}`], ['故障摘要（白名单类别）', diagnosticText(run)]
       ]), el('details', {}, [el('summary', { text: 'Prompt 原文 / 元信息（如 manifest 提供）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: text(run.prompt || run.prompt_text) }))]) ]));
       const metrics = run.metrics || {};
-      blocks.push(detailBlock('计量与来源', [metadata([...Object.entries(metricDefs).map(([key, [label]]) => [label, metricFormat(valueOf(run, key), key)]), ['评估耗时来源', 'evaluation.duration_ms（不从时间戳 / 捕获时长推算）'], ['首 CLI 事件（非供应商 TTFT）', metricFormat(run.first_model_event_ms, 'duration_ms')], ['缓存读取', number(metrics.cache_read_tokens)], ['缓存写入', number(metrics.cache_write_tokens)], ['推理 Token', number(metrics.reasoning_tokens)], ['轮数', number(metrics.num_turns)], ['费用来源', metrics.cost_source], ['Metrics 来源', run.metrics_source || metrics.source || 'manifest.metrics（来源未声明）']]), el('p', { class: 'footnote', text: '生成会话耗时不是完整评估的端到端耗时。计量缺失是 unknown，零值仅在来源明确记录为 0 时展示。源码体积与帧变化均不是质量分。' })]));
-      blocks.push(detailBlock('Checks / Evaluation', [el('p', { class: 'footnote', text: `Evaluation: ${text(run.evaluation?.status)} · 完成状态不自动转换为 pass` }), ...(run.checks?.length ? run.checks.map(check => el('p', {}, [el('span', { class: 'chip', text: `${text(check.status)} · ${text(check.name)}` }), el('span', { text: ` ${text(check.detail)}` })])) : [el('p', { class: 'muted', text: '未提供 Checks；未验收。' })]) ]));
-      blocks.push(detailBlock('追加评分记录', [el('p', { class: 'footnote', text: reviewStatus(run) }), reviewList(run.reviews || [])]));
+      blocks.push(detailBlock('计量与来源', [metadata([...Object.entries(metricDefs).map(([key, [label]]) => [label, metricFormat(valueOf(run, key), key)]), ['评估耗时来源', 'evaluation.duration_ms（不从时间戳 / 捕获时长推算）'], ['首 CLI 事件（非供应商 TTFT）', metricFormat(run.first_model_event_ms, 'duration_ms')], ['缓存读取', number(metrics.cache_read_tokens)], ['缓存写入', number(metrics.cache_write_tokens)], ['推理 Token', number(metrics.reasoning_tokens)], ['轮数', number(metrics.num_turns)], ['费用来源', metrics.cost_source], ['Metrics 来源', run.metrics_source || metrics.source || 'manifest.metrics（来源未声明）']]), el('p', { class: 'footnote', text: '生成会话耗时不是完整评估的端到端耗时。计量缺失为“未上报”；零值仅在来源明确记录为 0 时展示。input_tokens 是不含缓存的输入，input_total 是已采集的含缓存总输入；不自行相加补齐，也不改 total_tokens / 费用定义。CLI 报告费用未核验，非账单、非实际免费。源码体积与帧变化均不是质量分。' })]));
+      const checks = runChecks(run);
+      blocks.push(detailBlock('Checks / Evaluation', [el('p', { class: 'footnote', text: `评估：${evaluationNames[run.evaluation?.status] || '状态未核实'} · ${checksText(run)}。只展示已登记检查状态，不转为效果评分；任意错误文本不展示。` }), ...checks.map(check => el('p', {}, el('span', { class: 'chip', text: `${['pass', 'passed', 'ok'].includes(check.status) ? '通过' : ['fail', 'failed'].includes(check.status) ? '未通过' : '状态未核实'} · ${checkNames[check.name] || '其他已登记检查'}` }))), ...(!checks.length ? [el('p', { class: 'muted', text: '未提供 Checks；未验收。' })] : [])]));
+      blocks.push(detailBlock('全部追加评分记录', [el('p', { class: 'footnote', text: reviewStatus(run) }), el('details', { class: 'score-record' }, [el('summary', { text: '逐条查看真实评审 · 不合并来源' }), reviewList(run.reviews || [], run)])]));
       const paths = evidencePaths(run);
       blocks.push(detailBlock('证据登记与公开包含', [el('p', { class: 'footnote', text: `附件登记 ${(run.artifacts || []).length} 份；安全证据登记 ${paths.length} 份；${snapshot ? `公开包含 ${includedPaths(run).length} 份` : '本地 API 按需读取，未预检文件'}。浏览器加载 / 失败另在预览下方显示。` }), el('ul', { class: 'evidence-paths' }, paths.map(path => el('li', { class: 'mono', text: `${path} · ${snapshot ? mediaURI(run, path) ? '公开包含' : '未包含 / 无效映射' : '已登记 · 未预检'}` })))], true));
       blocks.push(detailBlock('产物附件 / 完整性', [attachments(run)], true));
       blocks.push(detailBlock('文本日志', [logViewer(run)], true));
-      blocks.push(detailBlock('Manifest · 原始记录', [el('details', {}, [el('summary', { text: '展开 JSON（纯文本，不执行内容）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: JSON.stringify(run, null, 2) }))])], true));
+      blocks.push(detailBlock('Manifest · 只读字段', [el('details', {}, [el('summary', { text: '展开 JSON（纯文本；错误 / Note / 检查原文不展示）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: JSON.stringify(displayRecord(run), null, 2) }))])], true));
       content.replaceChildren(el('div', { class: 'detail-grid' }, blocks));
     } catch (error) { if (request === state.detailRequest && dialog.open) content.replaceChildren(el('p', { class: 'error', text: error.message })); }
   }
-  function reviewList(reviews) {
-    if (!reviews.length) return el('p', { class: 'muted', text: '暂无评分；不会推算或自动补齐。' });
-    return el('ol', { class: 'review-list' }, reviews.map(review => el('li', {}, [el('strong', { text: `${text(review.reviewer)} · ${review.blind ? '盲评' : '非盲评'}` }), el('small', { text: ` ${text(review.created_at)}` }), el('p', { text: Object.entries(scoreLabels).map(([key, label]) => `${label} ${review.scores?.[key] == null ? '未评' : review.scores[key]}`).join(' / ') }), el('p', { text: review.note || '无附注' })])));
+  function reviewList(reviews, run) {
+    const records = (Array.isArray(reviews) ? reviews : []).filter(review => review && typeof review === 'object' && !Array.isArray(review));
+    if (!records.length) return el('p', { class: 'muted', text: '暂无评分；不会推算或自动补齐。' });
+    return el('ol', { class: 'review-list' }, records.map(review => {
+      const summary = { scope: JSON.stringify(scoreScope(run, review)), id: review.id, created_at: review.created_at, index: run.reviews.indexOf(review), values: scoreKeys.map(key => validScore(review.scores?.[key])) };
+      return el('li', { 'data-review-record': text(review.id) }, [scoreSheet(run, summary)]);
+    }));
   }
   function attachments(run) {
     if (!run.artifacts?.length) return el('p', { class: 'muted', text: '无产物附件。' });
@@ -1432,7 +1531,8 @@
     $('#compare-pair-picker').replaceChildren();
     const issue = comparisonIssue(runs), tooMany = !live && runs.length > selectionLimit();
     $('#compare-condition-warning').textContent = [state.mixed ? '跨条件查看 · 仅观察证据，不生成合并排名。' : '同题 / 同 Prompt 比较；模型身份不同不等于条件相同。', differences.length ? `不同或 unknown：${differences.map(row => `${row.name}（${row.status}）`).join('、')}。` : '已列条件一致；这不代表像素级对齐或质量结论。'].join(' ');
-    $('#compare-conditions').replaceChildren(el('summary', { text: `查看逐项条件 · ${differences.length} 项不同 / unknown（不使用含模型身份的趋势指纹判定）` }), table(['条件', '判定', ...runs.map((run, i) => `${String.fromCharCode(65 + i)} · ${text(run.model)}`)], rows.map(row => [row.name, row.status, ...row.values.map(text)]), 'condition-table'));
+    $('#compare-conditions').replaceChildren(el('summary', { text: `查看逐项条件 · ${differences.length} 项不同 / unknown（不使用含模型身份的趋势指纹判定）` }), ...(snapshot ? [scoreSourceControl('compare-score-source')] : []), table(['条件', '判定', ...runs.map((run, i) => `${String.fromCharCode(65 + i)} · ${text(run.model)}`)], rows.map(row => [row.name, row.status, ...row.values.map(text)]), 'condition-table'));
+    if (snapshot) $('#compare-condition-warning').textContent += ' 评分只用当前精确口径；全部口径分别列示，不跨来源 / 分项补齐。';
     if (tooMany || issue || runs.length < 2) {
       content.append(el('div', { class: 'comparison-recovery' }, [el('h3', { text: tooMany ? `选择已全部保留；当前最多 ${selectionLimit()} 次` : '请调整比较对象或条件' }), el('p', { text: issue || '请明确选择保留哪两次；不会自动移除或替换运行。' }), ...runs.map(run => el('div', {}, [el('p', { class: 'mono', text: `${text(run.model)} · ${run.id}` }), el('button', { text: '移除此运行', onclick: () => { toggleSelection(run); renderComparison(); } })]))])); return;
     }
@@ -1444,6 +1544,7 @@
       const path = stagePath(run, state.compareStage);
       return el('article', { class: 'compare-column', 'data-run-id': run.id }, [
         el('div', { class: 'compare-identity' }, [el('p', { class: 'eyebrow', text: `${String.fromCharCode(65 + i)} / ${text(run.tool)}` }), el('h3', { text: text(run.model) }), el('p', { class: 'condition-key', text: `${dateOf(run)} · ${text(run.task_name || run.task_id)} · ${text(run.prompt_version)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` })]),
+        scoreSummary(run),
         media(run, path, false, { full: true, defer: narrowScreen.matches && i !== state.compareIndex }),
         el('div', { class: 'card-actions' }, [el('button', { 'data-open-stage': run.id, text: '放大当前图像', disabled: !path || state.compareStage === 'video' || !mediaURI(run, path), onclick: () => openZoom(run, path) }), detailButton(run, '运行详情')]),
         el('div', { class: 'compare-facts' }, compareFacts(run))
@@ -1467,7 +1568,7 @@
     const pairPanels = []; let pairStarted = false;
     content.replaceChildren(...pair.map((run, i) => {
       const panel = previewPanel(run, { comparison: true, canRunTogether: () => pairStarted }); pairPanels.push(panel);
-      return el('article', { class: 'compare-column', 'data-run-id': run.id }, [el('div', { class: 'compare-identity' }, [el('p', { class: 'eyebrow', text: `${String.fromCharCode(65 + i)} / ${text(run.tool)}` }), el('h3', { text: text(run.model) }), el('p', { class: 'mono run-id', text: run.id })]), panel.node, el('div', { class: 'compare-facts' }, compareFacts(run))]);
+      return el('article', { class: 'compare-column', 'data-run-id': run.id }, [el('div', { class: 'compare-identity' }, [el('p', { class: 'eyebrow', text: `${String.fromCharCode(65 + i)} / ${text(run.tool)}` }), el('h3', { text: text(run.model) }), el('p', { class: 'mono run-id', text: run.id })]), scoreSummary(run), panel.node, el('div', { class: 'compare-facts' }, compareFacts(run))]);
     }));
     $('#compare-ab').replaceChildren(...pair.map((run, i) => el('button', { 'data-compare-index': i, 'aria-pressed': String(state.compareIndex === i), text: `${String.fromCharCode(65 + i)} · ${text(run.model)}`, onclick: () => showCompareSide(i) })));
     const startPair = $('#start-original-pair'); startPair.hidden = narrowScreen.matches; startPair.disabled = !pair.every(originalAvailable);
@@ -1601,34 +1702,31 @@
   window.addEventListener('popstate', () => { clearTimeout(filterTimer); const params = new URLSearchParams(location.search); state.defaultTaskPending = false; for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : ''); readScoreURL(params); fillOptions(); setView(location.hash.slice(1)); loadData(); });
   // The public shell may hand off only to this read-only snapshot viewer.
   if (snapshot) window.BENCH_GALLERY_ACTION = async (action = {}) => {
-    clearTimeout(filterTimer);
-    state.defaultTaskPending = false;
-    if (action.kind === 'model') {
-      if (typeof action.model !== 'string' || !action.model) throw new Error('缺少具体模型。');
-      state.filters = Object.fromEntries(filterKeys.map(key => [key, '']));
-      state.filters.model = action.model;
-      fillOptions();
-    }
+    // Validate exact scope before any destination, filter or selection changes.
+    if (Object.hasOwn(action, 'score_source') && !validScoreSource(action.score_source)) throw new Error('评分口径不存在或格式无效；未自动回退。');
+    if (Object.hasOwn(action, 'score_sort') && action.score_sort !== '' && !scoreKeys.includes(action.score_sort)) throw new Error('排序分项必须是六项之一或空值。');
+    if (action.kind === 'model' && (typeof action.model !== 'string' || !action.model)) throw new Error('缺少具体模型。');
     const ids = action.selected;
     if (action.kind === 'compare' && (!Array.isArray(ids) || ids.length !== 2 || new Set(ids).size !== 2)) throw new Error('对照需要两个不同的运行。');
-    if (ids !== undefined) {
-      if (!Array.isArray(ids) || new Set(ids).size !== ids.length) throw new Error('运行选择必须是不同的记录。');
-      const runs = await Promise.all(ids.map(getRun));
-      state.selected = new Set(ids);
-      state.selectionRuns = new Map(runs.map(run => [run.id, run]));
-      state.mixed = action.mixed === true;
-      $('#mixed-comparison').checked = state.mixed;
-      updateSelection();
+    if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length)) throw new Error('运行选择必须是不同的记录。');
+    const runs = ids === undefined ? null : await Promise.all(ids.map(getRun));
+    if (action.kind === 'detail') await getRun(action.run);
+    clearTimeout(filterTimer); state.defaultTaskPending = false;
+    if (Object.hasOwn(action, 'score_source')) { state.scoreSource = action.score_source; state.scoreError = ''; }
+    if (Object.hasOwn(action, 'score_sort')) state.scoreSort = action.score_sort;
+    if (action.kind === 'model') {
+      state.filters = Object.fromEntries(filterKeys.map(key => [key, '']));
+      state.filters.model = action.model; fillOptions();
     }
-    // Set the destination before loading: scores must never render a media gallery.
+    if (runs) {
+      state.selected = new Set(ids); state.selectionRuns = new Map(runs.map(run => [run.id, run]));
+      state.mixed = action.mixed === true; $('#mixed-comparison').checked = state.mixed; updateSelection();
+    }
+    // Scope and destination are set before loading; scores cannot flash a gallery.
     setView(action.view || 'gallery');
     await loadData();
-    if (action.kind === 'detail') {
-      await getRun(action.run);
-      await openDetail(action.run);
-    } else if (action.kind === 'compare') {
-      await openComparison();
-    }
+    if (action.kind === 'detail') await openDetail(action.run);
+    else if (action.kind === 'compare') await openComparison();
   };
   const params = new URLSearchParams(location.search);
   readScoreURL(params);

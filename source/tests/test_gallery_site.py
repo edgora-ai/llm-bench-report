@@ -135,7 +135,8 @@ class GallerySiteTests(GalleryFixture):
     def test_projection_covers_latest_triples_preserves_status_and_originals(self):
         self.build()
         seed = self.seed()
-        self.assertEqual(set(seed), {"version", "format", "tasks", "runs", "score_scopes", "defaults", "counts", "full", "runtime", "offline"})
+        self.assertEqual(set(seed), {"version", "format", "score_encoding", "tasks", "runs", "score_scopes", "defaults", "counts", "full", "runtime", "offline"})
+        self.assertEqual(seed['score_encoding'], 'scope-index-v1')
         # Fixture: 11 crocodile + 1 blackhole. First seven share "Unit Model"
         # (i=0..6) so latest drops 6; remaining distinct models stay (7 total).
         self.assertEqual(seed["counts"], {"runs": 7, "full_runs": 12, "benchmark": 7, "full_benchmark": 12, "reviews": 1})
@@ -285,6 +286,19 @@ class GallerySiteTests(GalleryFixture):
         self.rewrite_payload("index.html", original)
         self.verify()
 
+    def test_score_reference_cannot_replace_its_raw_review_even_with_rehashed_markup(self):
+        self.build()
+        original = (self.site / 'index.html').read_bytes()
+        for slot, replacement in ((1, 999), (2, [0, None, None, None, None, None])):
+            seed = self.seed()
+            row = next(row for row in seed['runs'] if 'scores' in row)
+            row['scores'][0][slot] = replacement
+            self.rewrite_payload('index.html', make_gallery.render_gallery(seed, self.project))
+            with self.subTest(slot=slot), self.assertRaisesRegex(RuntimeError, 'projection differs'):
+                self.verify(baseline=False)
+            self.rewrite_payload('index.html', original)
+        self.verify()
+
     def test_full_viewer_runtime_and_retained_assets_tampering_rejected(self):
         self.build()
         seed = self.seed()
@@ -423,12 +437,12 @@ class GallerySiteTests(GalleryFixture):
 
     def test_cli_help_required_arguments_and_real_fixture_build(self):
         script = str(Path(make_gallery.__file__).resolve())
-        help_result = subprocess.run([sys.executable, script, "--help"], capture_output=True, text=True)
+        help_result = subprocess.run([sys.executable, '-I', '-B', script, "--help"], capture_output=True, text=True)
         self.assertEqual(help_result.returncode, 0)
         self.assertIn("--input-runtime", help_result.stdout)
-        missing = subprocess.run([sys.executable, script], capture_output=True, text=True)
+        missing = subprocess.run([sys.executable, '-I', '-B', script], capture_output=True, text=True)
         self.assertEqual(missing.returncode, 2)
-        command = [sys.executable, "-I", script, str(self.baseline), str(self.site), "--input-viewer", str(self.viewer),
+        command = [sys.executable, "-I", '-B', script, str(self.baseline), str(self.site), "--input-viewer", str(self.viewer),
                    "--input-runtime", str(self.runtime), "--root", str(self.project)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -500,9 +514,9 @@ class ScoreEdgeContractTests(unittest.TestCase):
 
     def test_metrics_preserve_real_zero_and_unknown_without_mutating_source(self):
         row = {"duration_ms": 0, "metrics": {"cost_usd": 0, "cost_source": "cli_reported_unverified"}}
-        self.assertEqual(make_gallery.meter(row), [0, 0, "cli_reported_unverified"])
+        self.assertEqual(make_gallery.meter(row), [0, 0, "cli_reported_unverified", None, None])
         for bad in (None, "0", True, -1, float("nan")):
-            self.assertEqual(make_gallery.meter({"duration_ms": bad, "metrics": {"cost_usd": bad}}), [None, None, None])
+            self.assertEqual(make_gallery.meter({"duration_ms": bad, "metrics": {"cost_usd": bad}}), [None, None, None, None, None])
 
 
 class ScoreContractTests(unittest.TestCase):
@@ -613,21 +627,21 @@ console.log(JSON.stringify(eval(pure+';runs.map(scoreSummaries)')));
         projected = make_gallery.project_runs(data)
         self.assertEqual([row['id'] for row in projected], [new['id']])
         self.assertNotIn('scores', projected[0])
-        self.assertEqual(projected[0]['meter'], [None, None, None])
+        self.assertEqual(projected[0]['meter'], [None, None, None, None, None])
         self.assertEqual(data, before)
 
     def test_meter_preserves_real_zero_and_source_without_inventing_unknown(self):
-        self.assertEqual(make_gallery.meter({}), [None, None, None])
+        self.assertEqual(make_gallery.meter({}), [None, None, None, None, None])
         self.assertEqual(make_gallery.meter({"duration_ms": 0, "metrics": {"cost_usd": 0, "cost_source": "cli_reported_unverified"}}),
-                         [0, 0, "cli_reported_unverified"])
-        self.assertIn("CLI 未核验", make_gallery.meter_text([0, 0, "cli_reported_unverified"]))
-        self.assertIn("生成会话 0 秒", make_gallery.meter_text([0, 0, None]))
+                         [0, 0, "cli_reported_unverified", None, None])
+        self.assertIn("CLI 未核验", make_gallery.meter_text([0, 0, "cli_reported_unverified", None, None]))
+        self.assertIn("生成会话 0 秒", make_gallery.meter_text([0, 0, None, None, None]))
         for invalid in (True, "0", -2, float("inf")):
-            self.assertEqual(make_gallery.meter({"duration_ms": invalid, "metrics": {"cost_usd": invalid}}), [None, None, None])
+            self.assertEqual(make_gallery.meter({"duration_ms": invalid, "metrics": {"cost_usd": invalid}}), [None, None, None, None, None])
 
 
     def test_compact_metrics_round_only_display_with_javascript_parity(self):
-        values = [3850664, 3.8506648000000006, 'cli_reported_unverified']
+        values = [3850664, 3.8506648000000006, 'cli_reported_unverified', 127854, 12001]
         original = copy.deepcopy(values)
         display = make_gallery.meter_text(values)
         self.assertIn('约 USD 3.85（approx）', display)
@@ -636,23 +650,138 @@ console.log(JSON.stringify(eval(pure+';runs.map(scoreSummaries)')));
         self.assertNotIn('cli_reported_unverified', display)
         self.assertNotIn('manifest.duration_ms', display)
         self.assertEqual(values, original)
-        self.assertIn('费用 unknown', make_gallery.meter_text([None, None, None]))
+        self.assertIn('费用 未上报', make_gallery.meter_text([None, None, None, None, None]))
         program = r"""
 const fs=require('fs'); const code=fs.readFileSync(process.argv[1],'utf8');
 const finite=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
 const pure=code.slice(code.indexOf('  function meterText('),code.indexOf('  const allowedOriginal'));
 console.log(JSON.stringify(eval(pure+';JSON.parse(fs.readFileSync(0,"utf8")).map(meter=>meterText({meter}))')));
 """
-        cases = [values, [0, 0, 'cli_reported_unverified'], [None, None, None], [1, .00001, 'undeclared_internal']]
+        cases = [values, [0, 0, 'cli_reported_unverified', 0, 0], [None, None, None, None, None],
+                 [1, .00001, 'undeclared_internal', None, 999], [1000, .01, None, 4.5, 1000]]
         result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/public-gallery.js')],
                                 input=json.dumps(cases), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [make_gallery.meter_text(case) for case in cases])
-        self.assertNotIn('undeclared_internal', json.loads(result.stdout)[-1])
+        self.assertNotIn('undeclared_internal', json.loads(result.stdout)[3])
+        self.assertIn('< USD 0.01', json.loads(result.stdout)[3])
+        self.assertIn('生成会话 <1 秒', json.loads(result.stdout)[3])
+        self.assertIn('评估 <1 秒', json.loads(result.stdout)[3])
+        self.assertIn('总 Token 0', json.loads(result.stdout)[1])
+
+
+class ScoreFirstPresentationTests(unittest.TestCase):
+    """Synthetic unit records only; not new benchmark reviews or UI evidence."""
+    review = ScoreContractTests.review
+    run_record = ScoreContractTests.run_record
+
+    def projected(self, reviews, **fields):
+        run = self.run_record(reviews, model='Test model', tool='Test tool', started_at='2026-01-01', evaluation={}, **fields)
+        data = {'runs': [run], 'tasks': [{'id': 'crocodile', 'name': 'Synthetic task'}],
+                'format': 'static-media-v2', 'transport': 'external', 'evidence': {}, 'thumbnails': {}, 'assets': {},
+                'originals': {run['id']: {'status': 'no_entrypoint'}}, 'offline': {'path': 'offline.html', 'size': 1, 'sha256': 'a' * 64}}
+        return run, data, make_gallery.project_runs(data)[0]
+
+    def test_six_unfolded_values_zero_and_missing_reasons_stay_distinct(self):
+        import verify_public_gallery as audit
+        run, data, row = self.projected([self.review(0, scores={'compliance': 0, 'motion': 2.5, 'interaction': 4})])
+        source = make_gallery.scope_key(make_gallery.score_scope(run, run['reviews'][0]))
+        html = make_gallery.render_card(row, source)
+        parsed = audit.GalleryHTML(); parsed.feed(html)
+        cells = parsed.score_cells[row['id']]
+        self.assertEqual([cell['dimension'] for cell in cells], list(make_gallery.SCORE_LABELS))
+        self.assertEqual([''.join(cell['value']) for cell in cells], ['0/4', '分项缺失', '2.5/4', '分项缺失', '4/4', '分项缺失'])
+        self.assertTrue(all(not cell['folded'] for cell in cells))
+        self.assertIn('非盲 AI 建议 · 待人工复核', html)
+        self.assertEqual(parsed.structure[row['id']], ['work-heading', 'work-score', 'work-cover', 'work-actions', 'work-facts'])
+        foreign = make_gallery.scope_key(['visual-v1', 'ai-suggestion', False, 'Other AI 建议'])
+        self.assertEqual(make_gallery.render_card(row, foreign).count('本来源无记录'), 6)
+        unreviewed = copy.deepcopy(row); unreviewed.pop('scores')
+        self.assertEqual(make_gallery.render_card(unreviewed, source).count('未评审</span>'), 6)
+        _, _, conflict = self.projected([self.review(4, rubric_version='conflicting-protocol')])
+        self.assertEqual(make_gallery.render_card(conflict, conflict['scores'][0]['scope']).count('协议未核实</span>'), 6)
+
+    def test_explicit_source_selection_not_reviewer_order_and_star_not_merged(self):
+        run, data, row = self.projected([self.review(4, reviewer='AI A 建议'), self.review(0, reviewer='AI Z 建议')])
+        scopes = make_gallery.score_scopes([run]); requested = make_gallery.scope_key(scopes[-1])
+        seed = make_gallery.project_gallery(data, b'full', b'runtime', b'viewer', score_source=requested)
+        self.assertEqual(seed['preferred_score_source'], requested)
+        self.assertEqual(seed['defaults']['score_source'], requested)
+        self.assertNotEqual(make_gallery.default_score_source(scopes), requested)
+        for bad in ('["visual-v1"]', json.dumps(scopes[-1]), 1, '', '["visual-v1","ai-suggestion",false,"AI nonexistent 建议"]'):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                make_gallery.default_score_source(scopes, bad)
+        html = make_gallery.render_card(row, '*')
+        self.assertEqual(html.count('class="score-cell"'), 12)
+        self.assertIn('口径 1', html); self.assertIn('口径 2', html)
+        self.assertIn('4</strong><span>/4', html); self.assertIn('0</strong><span>/4', html)
+        self.assertEqual(make_gallery.default_score_source(scopes, '*'), '*')
+        # Legacy empty snapshots retain their empty default, not a future source.
+        self.assertEqual(make_gallery.default_score_source([]), '')
+        self.assertEqual(make_gallery.default_score_source([], ''), '')
+
+    def test_five_slot_meter_uses_only_direct_valid_totals_and_evaluation_duration(self):
+        import verify_public_snapshot as audit
+        record = {'duration_ms': 1, 'started_at': '2026-01-01', 'finished_at': '2026-02-01',
+                  'metrics': {'cost_usd': .00001, 'total_tokens': 0, 'input_total': 800, 'input_tokens': 300,
+                              'output_tokens': 500, 'cache_read_tokens': 200}, 'evaluation': {'duration_ms': 0, 'sample_seconds': 15}}
+        before = copy.deepcopy(record)
+        self.assertEqual(make_gallery.meter(record), [1, .00001, None, 0, 0])
+        self.assertEqual(audit.meter(record), make_gallery.meter(record))
+        self.assertEqual(record, before)
+        for bad in (None, True, False, '0', -1, float('nan'), float('inf')):
+            record['metrics']['total_tokens'] = bad; record['evaluation']['duration_ms'] = bad
+            self.assertEqual(make_gallery.meter(record)[3:], [None, None])
+        del record['metrics']['total_tokens']; record['evaluation'].pop('duration_ms')
+        self.assertEqual(make_gallery.meter(record)[3:], [None, None])
+
+    def test_media_counts_deduplicate_registration_and_never_equate_inclusion_with_load(self):
+        import verify_public_gallery as audit
+        run, data, _ = self.projected([])
+        run['evaluation']['evidence'] = ['evidence/desktop.png', 'evidence/mobile.png', 'evidence/mobile.png', 'output/index.html']
+        data['evidence'][run['id'] + '/evidence/mobile.png'] = 'media/' + 'b' * 64 + '.jpg'
+        row = make_gallery.project_runs(data)[0]
+        self.assertEqual(row['media_counts'], [2, 1])
+        self.assertTrue(row['registered_media']); self.assertIsNone(row['image'])
+        self.assertEqual(row['media_gaps'], ['media_not_included', 'desktop_not_included'])
+        self.assertEqual(audit.project_runs(data), [row])
+        self.assertIn('媒体登记 2 · 公开包含 1（非加载结果）', make_gallery.media_text(row))
+        self.assertIn('未交付作品（无入口）', make_gallery.media_text(row))
+        self.assertNotIn('output/index.html', json.dumps(row))
 
 
 class SnapshotHandoffRegressionTests(unittest.TestCase):
     """Trusted source unit fixture; never executes packaged/archived candidate scripts."""
+    def test_public_handoff_carries_exact_scope_and_sort_before_mount_for_every_action(self):
+        program = r'''
+const fs=require('fs'),assert=require('assert'); const code=fs.readFileSync(process.argv[1],'utf8');
+const start=code.indexOf('  async function fullAction('), end=code.indexOf('  function changeFilter(',start);
+const a={id:'a'.repeat(32),task_id:'crocodile',purpose:'benchmark'},b={id:'b'.repeat(32),task_id:'crocodile',purpose:'benchmark'};
+const records=new Map([[a.id,a],[b.id,b]]), original=JSON.stringify([a,b]);
+const state={task:'crocodile',purpose:'benchmark',model:'',source:'["visual-v1","ai-suggestion",false,"AI Z 建议"]',sort:'motion',selected:new Set([a.id,b.id]),mixed:true};
+let fullIntent=0,returnURL=null,mounted=0; const location={href:'https://example.test/report/?score_sort=compliance#gallery'},calls=[];
+const history={pushState(_,__,url){location.href=String(url)},replaceState(_,__,url){location.href=String(url)}};
+const $=()=>null,destroyPreview=()=>{},notice=()=>{};
+const mountFull=async()=>{mounted++;const url=new URL(location.href);assert.strictEqual(url.searchParams.get('score_source'),state.source);assert.strictEqual(url.searchParams.get('score_sort'),state.sort)};
+const window={BENCH_GALLERY_ACTION:async action=>calls.push(action)};
+eval(code.slice(start,end));
+(async()=>{
+ for(const action of [{kind:'view',view:'scores'},{kind:'view',view:'matrix'},{kind:'detail',view:'evidence',run:a.id},{kind:'model',view:'matrix',model:'M'},{kind:'compare',view:'gallery'}]){
+  await fullAction(action);const received=calls.at(-1);
+  assert.strictEqual(received.score_source,state.source);assert.strictEqual(received.score_sort,'motion');
+  assert.deepStrictEqual(received.selected,[a.id,b.id]);assert.strictEqual(received.mixed,true);
+ }
+ assert.strictEqual(calls.length,5);assert.strictEqual(mounted,5);
+ state.source='*';state.sort='';await fullAction({kind:'view',view:'scores'});
+ assert.strictEqual(calls.at(-1).score_source,'*');assert.strictEqual(calls.at(-1).score_sort,'');
+ assert.strictEqual(JSON.stringify([a,b]),original);
+ console.log('public exact scope/sort URL and action handoff passed before mount');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/public-gallery.js')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('passed before mount', result.stdout)
+
     def test_bridge_uses_exact_runs_clears_model_blockers_and_preserves_scores_selection(self):
         program = r"""
 const fs=require('fs'), assert=require('assert'); const code=fs.readFileSync(process.argv[1],'utf8');
@@ -722,6 +851,115 @@ eval(bridge); assert.strictEqual(window.BENCH_GALLERY_ACTION,undefined); snapsho
         result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/app.js')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('snapshot bridge contracts passed', result.stdout)
+
+class CompactScoreCodecTests(unittest.TestCase):
+    """Versioned wire DATA only; all production/raw summary APIs remain unchanged."""
+    def fixture(self):
+        return {'score_encoding': 'scope-index-v1',
+                'score_scopes': [['visual-v1', 'ai-suggestion', False, 'AI 建议评分']],
+                'runs': [{'id': 'a' * 32, 'scores': [[0, 2, [0, None, 2.5, 4, None, 1]]]}]}
+
+    def test_strict_python_independent_and_native_js_decoders_agree(self):
+        import verify_public_gallery as audit
+        good = self.fixture()
+        expected = [{'id': 'a' * 32, 'scores': [{'scope': '["visual-v1","ai-suggestion",false,"AI 建议评分"]',
+                    'index': 2, 'values': [0, None, 2.5, 4, None, 1]}]}]
+        before = copy.deepcopy(good)
+        self.assertEqual(make_gallery.decode_scores(good), expected)
+        self.assertEqual(audit.decode_score_rows(good), expected)
+        self.assertEqual(good, before)
+        mutations = [lambda s: s.pop('score_encoding'), lambda s: s.update(score_encoding=True),
+            lambda s: s.update(score_encoding='scope-index-v0'), lambda s: s.update(score_scopes=None),
+            lambda s: s.update(runs=None), lambda s: s.update(runs=[None]),
+            lambda s: s['score_scopes'].append(s['score_scopes'][0]),
+            lambda s: s['score_scopes'][0].append('extra'),
+            lambda s: s['score_scopes'][0].__setitem__(0, 'unknown'),
+            lambda s: s['score_scopes'][0].__setitem__(1, 'authenticated-reviewer'),
+            lambda s: s['score_scopes'][0].__setitem__(2, 0),
+            lambda s: s['score_scopes'][0].__setitem__(2, True),
+            lambda s: s['score_scopes'][0].__setitem__(3, '﻿'),
+            lambda s: s['score_scopes'][0].__setitem__(3, 'AI\r建议评分'),
+            lambda s: s['runs'][0].update(scores=None), lambda s: s['runs'][0].update(scores=[]),
+            lambda s: s['runs'][0].update(scores=[{}]),
+            lambda s: s['runs'][0]['scores'].append(s['runs'][0]['scores'][0]),
+            lambda s: s['runs'][0]['scores'][0].append('hidden metadata'),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(0, True),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(0, -1),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(0, 1),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(0, 0.5),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(1, False),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(1, -1),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(1, 9007199254740992),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(2, None),
+            lambda s: s['runs'][0]['scores'][0].__setitem__(2, [0, None]),
+            lambda s: s['runs'][0]['scores'][0][2].__setitem__(0, False),
+            lambda s: s['runs'][0]['scores'][0][2].__setitem__(0, '0'),
+            lambda s: s['runs'][0]['scores'][0][2].__setitem__(0, -1),
+            lambda s: s['runs'][0]['scores'][0][2].__setitem__(0, 4.01)]
+        cases = [good]
+        for index, mutate in enumerate(mutations):
+            changed = copy.deepcopy(good); mutate(changed); cases.append(changed)
+            with self.subTest(index=index):
+                with self.assertRaises(RuntimeError): make_gallery.decode_scores(changed)
+                with self.assertRaises(AssertionError): audit.decode_score_rows(changed)
+        program = r'''
+const fs=require('fs'),code=fs.readFileSync(process.argv[1],'utf8');
+const start=code.indexOf('  function decodeScores('),end=code.indexOf('\n  seed.runs',start);
+if(start<0||end<0)throw Error('trusted decoder fixture bounds');
+eval(code.slice(start,end));
+const cases=JSON.parse(fs.readFileSync(0,'utf8'));
+console.log(JSON.stringify(cases.map(seed=>{try{return{valid:true,rows:decodeScores(seed)}}catch(error){return{valid:false}}})));
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT/'web/public-gallery.js')],
+                                input=json.dumps(cases), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answers = json.loads(result.stdout)
+        self.assertEqual(answers[0], {'valid': True, 'rows': expected})
+        self.assertTrue(all(answer == {'valid': False} for answer in answers[1:]))
+        for invalid in (float('inf'), float('nan')):
+            changed = copy.deepcopy(good); changed['runs'][0]['scores'][0][2][0] = invalid
+            with self.assertRaises(RuntimeError): make_gallery.decode_scores(changed)
+            with self.assertRaises(AssertionError): audit.decode_score_rows(changed)
+
+    def test_conflicting_protocol_stays_unknown_and_partial_is_not_backfilled(self):
+        seed = self.fixture(); seed['score_scopes'][0][0] = None
+        rows = make_gallery.decode_scores(seed)
+        self.assertIsNone(json.loads(rows[0]['scores'][0]['scope'])[0])
+        self.assertFalse(make_gallery.scope_rankable(json.loads(rows[0]['scores'][0]['scope'])))
+        self.assertEqual(rows[0]['scores'][0]['values'], [0, None, 2.5, 4, None, 1])
+        self.assertEqual(set(rows[0]['scores'][0]), {'scope', 'index', 'values'})
+
+    def test_scope_blankness_provenance_and_utf16_order_match_exact_js(self):
+        import verify_public_snapshot as audit
+        labels = ['AI Z 建议评分 ', 'AI Z\r建议评分', 'AI Z\n建议评分',
+                  'AI Z 建议评分', 'AI Z 建议评分', 'aı 内容建议',
+                  'aİ 内容建议', 'AI\r ai 建议评分', 'AI 建议 ',
+                  'AI Z\u0085建议评分', '﻿', '\t\v\f                　﻿\n\r  ',
+                  '\u0085', '\u001c', '\u001d', '\u001e', '\u001f', '᠎', '​',
+                  '﻿\u0085﻿', '﻿ AI Z 建议评分 ﻿', '', '\U00010000']
+        tests = ScoreContractTests()
+        run = tests.run_record([tests.review(reviewer=label) for label in labels])
+        runs = [run] + [tests.run_record([tests.review(reviewer=label, **fields)])
+                for label in labels for fields in ({}, {'blind': True}, {'blind': 'false'}, {'blind': 0},
+                                                  {'source': {'rubric_version': 'visual-v2'}})]
+        expected = [make_gallery.score_summaries(run) for run in runs]
+        self.assertEqual([audit.score_summaries(run) for run in runs], expected)
+        self.assertEqual(audit.score_scopes(runs), make_gallery.score_scopes(runs))
+        program = r'''
+const fs=require('fs'),code=fs.readFileSync(process.argv[1],'utf8'),runs=JSON.parse(fs.readFileSync(0,'utf8'));
+const scoreKeys=['compliance','recognizability','motion','visual_detail','interaction','completeness'];
+const scoreCache=new WeakMap(),snapshot=true,source={runs},state={};
+const finite=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+const pure=code.slice(code.indexOf('  function scoreScope('),code.indexOf('  const finite = value =>'));
+console.log(JSON.stringify(eval(pure+';({summaries:runs.map(scoreSummaries),scopes:snapshotScoreScopes()})')));
+'''
+        result = subprocess.run(['node','-e',program,str(make_snapshot.ROOT/'web/app.js')],
+                                input=json.dumps(runs),capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        observed=json.loads(result.stdout)
+        self.assertEqual(observed['summaries'],expected)
+        self.assertEqual(observed['scopes'],make_gallery.score_scopes(runs))
+
 
 if __name__ == "__main__":
     unittest.main()

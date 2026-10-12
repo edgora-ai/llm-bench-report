@@ -86,6 +86,7 @@ def arguments(argv=None):
     p.add_argument('--expected-benchmark', type=int, default=35)
     p.add_argument('--expected-reviews', type=int, default=14)
     p.add_argument('--expected-latest-runs', type=int, default=0, help='Latest-per-triple card census; 0 means derive from candidate seed')
+    p.add_argument('--score-source', help='Independently expected build preference: exact JSON scope or *; omitted requires legacy default')
     a = p.parse_args(argv)
     require(a.timeout_ms > 0, 'Timeout must be positive')
     require(a.expected_runs > 0 and a.expected_benchmark >= 0 and a.expected_reviews >= 0 and a.expected_latest_runs >= 0, 'Invalid census')
@@ -171,6 +172,11 @@ class GalleryHTML(HTMLParser):
         self.name_attrs = {}
         self.card = None
         self.field = None
+        self.score_cells, self.structure = {}, {}
+        self.scope = None
+        self.cell = None
+        self.score_field = None
+        self.detail_depth = 0
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -189,7 +195,22 @@ class GalleryHTML(HTMLParser):
             self.card = attrs.get('data-run-id')
             self.card_details[self.card] = {}
             self.card_attrs[self.card] = attrs
+            self.score_cells[self.card], self.structure[self.card] = [], []
+        if tag == 'details':
+            self.detail_depth += 1
         if self.card:
+            classes = attrs.get('class', '').split()
+            for role in ('work-heading', 'work-score', 'work-cover', 'work-actions', 'work-facts'):
+                if role in classes:
+                    self.structure[self.card].append(role)
+            if 'work-score' in classes:
+                self.scope = attrs.get('data-score-scope')
+            if 'score-cell' in classes:
+                self.cell = {'dimension': attrs.get('data-dimension'), 'scope': self.scope,
+                             'folded': self.detail_depth > 0, 'label': [], 'value': []}
+                self.score_cells[self.card].append(self.cell)
+            if self.cell and tag in ('dt', 'dd'):
+                self.score_field = 'label' if tag == 'dt' else 'value'
             if 'work-name' in attrs.get('class', '').split():
                 self.name_attrs[self.card] = attrs
             for field in ('work-name', 'work-meta', 'work-status'):
@@ -210,8 +231,16 @@ class GalleryHTML(HTMLParser):
             self.current[1].append(text)
         if self.card and self.field:
             self.card_details[self.card][self.field[1]].append(text)
+        if self.cell and self.score_field:
+            self.cell[self.score_field].append(text)
 
     def handle_endtag(self, tag):
+        if tag == 'details':
+            self.detail_depth -= 1
+        if tag in ('dt', 'dd'):
+            self.score_field = None
+        if tag == 'div' and self.cell:
+            self.cell = None
         if self.field and self.field[0] == tag:
             self.field = None
         if tag == 'article':
@@ -236,13 +265,31 @@ def project_runs(data):
     for r in data['runs']:
         declared = [(item.get('path') if isinstance(item, dict) else item)
                     for item in (r.get('evaluation') or {}).get('evidence', [])]
-        keys = [r['id'] + '/' + path for path in declared]
+        keys = []
+        for path in declared:
+            if isinstance(path, str) and re.search(r'\.(png|jpe?g|webp|gif|webm|mp4)$', path, re.I):
+                candidate = r['id'] + '/' + path
+                if candidate not in keys:
+                    keys.append(candidate)
+        included = sum(key in data['evidence'] for key in keys)
         key = next((key for key in keys if key.rsplit('/', 1)[-1] == 'desktop.png'), None)
+        gaps = []
+        if not keys:
+            gaps.append('no_media_registered')
+        if included != len(keys):
+            gaps.append('media_not_included')
+        if keys and key is None:
+            gaps.append('no_desktop_capture')
+        elif key is not None and key not in data['evidence']:
+            gaps.append('desktop_not_included')
+        elif key is not None and key not in data.get('thumbnails', {}):
+            gaps.append('desktop_no_thumbnail')
         full, thumb = data['evidence'].get(key), data.get('thumbnails', {}).get(key)
         image = None
         if full and thumb:
             asset = data['assets'][full]
-            image = {'thumb': thumb, 'full': full, 'width': asset['width'], 'height': asset['height'], 'label': 'desktop.png'}
+            if asset['mime'].startswith('image/'):
+                image = {'thumb': thumb, 'full': full, 'width': asset['width'], 'height': asset['height'], 'label': 'desktop.png'}
         summaries = v2.score_summaries(r)
         rows.append({**({'scores': summaries} if summaries else {}), 'meter': v2.meter(r),
                      **{k: r.get(k) for k in ('id', 'task_id', 'prompt_version', 'started_at')},
@@ -250,7 +297,8 @@ def project_runs(data):
                      'date': str(r.get('date') or r.get('started_at') or '')[:10] or None,
                      'status': r.get('generation_status') or r.get('status') or 'unknown', 'entry_status': entry_status(r),
                      'evaluation_status': (r.get('evaluation') or {}).get('status') or 'unknown',
-                     'registered_media': any(key in data['evidence'] for key in keys),
+                     'registered_media': included > 0, 'media_counts': [len(keys), included],
+                     **({'media_gaps': gaps} if gaps else {}),
                      'image': image, 'original': data['originals'][r['id']], 'history_count': 0})
     ordered = sorted(rows, key=lambda r: (r['tool'], r['model'], r['task_id'] or '', r['started_at'] or r['date'] or '', r['id']))
     latest = {}
@@ -272,7 +320,46 @@ def full_history_ids(data):
     return [r['id'] for r in ordered if latest_ids[(r.get('tool') or 'unknown', r.get('model') or 'unknown', r.get('task_id') or '')] != r['id']]
 
 
-def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_program):
+def decode_score_rows(seed):
+    """Independent strict scope-index-v1 reader; never imports the producer codec."""
+    require(seed.get('score_encoding') == 'scope-index-v1', 'Unknown gallery score encoding')
+    table = seed.get('score_scopes')
+    require(isinstance(table, list), 'Score scope table shape')
+    labels = []
+    for item in table:
+        require(isinstance(item, list) and len(item) == 4, 'Score scope shape')
+        rubric, provenance, blind, reviewer = item
+        require(rubric is None or isinstance(rubric, str) and rubric not in ('', 'unknown'), 'Score rubric shape')
+        require(provenance in ('ai-suggestion', 'label-unverified') and (blind is None or type(blind) is bool), 'Score provenance/blind shape')
+        require(reviewer is None or isinstance(reviewer, str) and reviewer.strip(v2.REVIEWER_SPACE), 'Score reviewer shape')
+        inferred = 'ai-suggestion' if blind is False and v2.AI_LABEL.search(reviewer or '') else 'label-unverified'
+        require(provenance == inferred, 'Conflicting score provenance')
+        labels.append(v2.scope_key(item))
+    require(labels == sorted(set(labels), key=lambda value: value.encode('utf-16-be', 'surrogatepass')), 'Duplicate/unordered score scopes')
+    require(isinstance(seed.get('runs'), list), 'Score rows shape')
+    decoded = []
+    for record in seed['runs']:
+        require(isinstance(record, dict), 'Score row shape')
+        row = dict(record)
+        if 'scores' in record:
+            entries = record['scores']
+            require(isinstance(entries, list) and entries, 'Score entries shape')
+            summaries, last = [], -1
+            for entry in entries:
+                require(isinstance(entry, list) and len(entry) == 3, 'Score tuple shape')
+                slot, source_index, values = entry
+                require(type(slot) is int and last < slot < len(labels), 'Score scope index')
+                require(type(source_index) is int and 0 <= source_index <= 9007199254740991, 'Score raw review index')
+                require(isinstance(values, list) and len(values) == len(v2.SCORE_LABELS), 'Score values shape')
+                require(all(value is None or v2.valid_number(value) and value <= 4 for value in values), 'Score value range/type')
+                summaries.append({'scope': labels[slot], 'index': source_index, 'values': values[:]})
+                last = slot
+            row['scores'] = summaries
+        decoded.append(row)
+    return decoded
+
+
+def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_program, *, score_source=None):
     parsed = GalleryHTML()
     parsed.feed(html)
     parsed.close()
@@ -281,9 +368,19 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(match is not None and '<' not in parsed.scripts[0], 'Unescaped gallery seed')
     seed = json.loads(match[1])
     require(parsed.scripts[1].strip() == bootstrap.strip() and parsed.styles[0].strip() == css.strip(), 'Gallery executable/style differs from trusted source')
-    require(set(seed) == {'version', 'format', 'tasks', 'runs', 'score_scopes', 'defaults', 'counts', 'full', 'runtime', 'offline'}, 'Gallery seed schema')
+    expected_keys = {'version', 'format', 'score_encoding', 'tasks', 'runs', 'score_scopes', 'defaults', 'counts', 'full', 'runtime', 'offline'}
+    if score_source is not None:
+        expected_keys.add('preferred_score_source')
+        require(seed.get('preferred_score_source') == score_source, 'Independent preferred source differs')
+    require(set(seed) == expected_keys, 'Gallery seed schema')
     require(type(seed['version']) is int and seed['version'] == 3 and seed['format'] == 'progressive-static-v3', 'Gallery version/profile')
-    require(same(seed['runs'], project_runs(data)), 'Exact latest-per-triple projection/order differs')
+    rows = decode_score_rows(seed)
+    # Independently verify every deferred reference and six values against the raw record.
+    expected_rows = project_runs(data)
+    for row in expected_rows:
+        if 'scores' in row:
+            row['scores'] = [{key: summary[key] for key in ('scope', 'index', 'values')} for summary in row['scores']]
+    require(same(rows, expected_rows), 'Exact latest-per-triple projection/order or raw review reference differs')
     tasks = {t['id']: {'id': t['id'], 'name': t.get('name') or t['id']} for t in data['tasks']}
     for row in data['runs']:
         if row.get('task_id') and row['task_id'] not in tasks:
@@ -294,7 +391,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     scopes = v2.score_scopes(data['runs'])
     require(same(seed['score_scopes'], scopes), 'Exact score scope census/order differs')
     require(same(seed['defaults'], {'task_id': default_task, 'purpose': 'benchmark', 'page_size': PAGE_SIZE,
-                                   'mobile_page_size': PHONE_PAGE_SIZE, 'score_source': v2.default_score_source(scopes)}), 'Defaults differ')
+                                   'mobile_page_size': PHONE_PAGE_SIZE, 'score_source': v2.default_score_source(scopes, score_source)}), 'Defaults differ')
     require(same(seed['counts'], {'runs': len(seed['runs']), 'full_runs': len(data['runs']),
                               'benchmark': sum(r.get('purpose') == 'benchmark' for r in seed['runs']),
                               'full_benchmark': sum(r.get('purpose') == 'benchmark' for r in data['runs']),
@@ -302,7 +399,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(same(seed['offline'], data['offline']), 'Offline descriptor changed')
     require(same(seed['full'], {**full_info, 'script_sha256': digest(trusted_program)}), 'Full viewer descriptor differs')
     require(same(seed['runtime'], runtime_info), 'Runtime descriptor differs')
-    expected = [r for r in seed['runs'] if r['task_id'] == default_task and r['purpose'] == 'benchmark' and r['registered_media']][:PAGE_SIZE]
+    expected = [r for r in rows if r['task_id'] == default_task and r['purpose'] == 'benchmark' and r['registered_media']][:PAGE_SIZE]
     require(parsed.cards == [r['id'] for r in expected], 'Server-rendered initial card IDs differ')
     thumbnails = [i for i in parsed.images if 'work-image' in i.get('class', '').split()]
     require([i.get('data-src') for i in thumbnails] == [r['image']['thumb'] for r in expected if r['image']], 'Initial thumbnail mapping differs')
@@ -315,6 +412,24 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
                 and row['tool'] in fields.get('work-meta', '') and str(row['date']) in fields.get('work-meta', ''), 'Initial visible label/canonical identity/tool/date differs')
         status = fields.get('work-status', '')
         require(all(value in status for value in (row['status'], row['entry_status'], row['evaluation_status'])), 'Initial card source status presentation differs')
+        source = seed['defaults']['score_source']
+        summaries = row.get('scores', [])
+        selected = summaries if source == '*' and summaries else [next((s for s in summaries if s['scope'] == source), None)]
+        cells = parsed.score_cells[row['id']]
+        require(len(cells) == 6 * len(selected) and all(not cell['folded'] for cell in cells), 'Six scores must remain unfolded per exact scope')
+        require(parsed.structure[row['id']] == ['work-heading'] + ['work-score'] * len(selected) +
+                ['work-cover', 'work-actions', 'work-facts'], 'Score-first card order differs')
+        for index, summary in enumerate(selected):
+            scope = json.loads(summary['scope']) if summary else json.loads(source) if source not in ('', '*') else None
+            valid = v2.scope_rankable(scope)
+            for dimension_index, (key, label) in enumerate(v2.SCORE_LABELS.items()):
+                cell = cells[index * 6 + dimension_index]
+                value = summary['values'][dimension_index] if summary and valid else None
+                missing = ('未评审' if not summaries else '本来源无记录') if not summary else '协议未核实' if not valid else '分项缺失'
+                figure = str(int(value)) if value is not None and value == int(value) else str(value)
+                require(cell['dimension'] == key and cell['scope'] == (summary['scope'] if summary else source)
+                        and ''.join(cell['label']) == label and ''.join(cell['value']) == (figure + '/4' if value is not None else missing),
+                        'Server six-score value/missing state or scope differs')
         for attr in ('data-run-original', 'data-select-run', 'data-zoom-run', 'data-detail-run'):
             buttons = [b for b in parsed.buttons if b.get(attr) == row['id']]
             require(len(buttons) == 1, 'Missing/duplicate server card action: ' + attr)
@@ -436,7 +551,7 @@ def load_sources(args, report):
     full_info = {'path': full_path, 'sha256': digest(full_html), 'size': len(full_html)}
     runtime_info = {'path': runtime_path, 'sha256': digest(runtime), 'size': len(runtime)}
     seed = audit_gallery(html.decode(), current_data, approved['web/public-gallery.js'].decode(), approved['web/public-gallery.css'].decode(),
-                         full_info, runtime_info, runtime + b'\n' + approved['web/app.js'])
+                         full_info, runtime_info, runtime + b'\n' + approved['web/app.js'], score_source=args.score_source)
     require(len(html) <= 102400 and len(gzip.compress(html, compresslevel=6, mtime=0)) <= 25600, 'Initial HTML decoded/gzip budget exceeded')
     report['audit'] = {'baseline_html_sha256': digest(old_html), 'full_html_sha256': digest(full_html), 'runtime_sha256': digest(runtime),
                        'frozen_v2_helper_sha256': digest(helper_path.read_bytes()), 'current_v2_helper_sha256': digest(approved['tests/verify_public_snapshot.py']),
@@ -858,6 +973,29 @@ def strict_overflow(page, label, report):
     require(result['doc'] <= result['width'] and result['body'] <= result['width'], 'Horizontal page overflow: ' + label)
 
 
+def score_first_layout(page, viewport, seed):
+    """Actual geometry, not source CSS assertions or a count of hidden scores."""
+    measured = page.evaluate('''()=>({width:innerWidth,overflow:Math.max(document.body.scrollWidth,document.documentElement.scrollWidth),
+      first_image_y:document.querySelector('#public-grid .work-image')?.getBoundingClientRect().top??null,
+      cards:[...document.querySelectorAll('#public-grid .evidence-card')].map(card=>({id:card.dataset.runId,left:card.getBoundingClientRect().left,
+        sheets:[...card.querySelectorAll('.score-sheet')].map(sheet=>({cells:sheet.querySelectorAll('.score-cell').length,
+          visible:[...sheet.querySelectorAll('.score-cell')].filter(cell=>cell.getClientRects().length&&getComputedStyle(cell).visibility==='visible'&&cell.getBoundingClientRect().height>0).length})),
+        figure_fonts:[...card.querySelectorAll('.score-cell strong')].map(el=>parseFloat(getComputedStyle(el).fontSize)),
+        action_heights:[...card.querySelectorAll('.work-actions button')].map(el=>el.getBoundingClientRect().height)}))})''')
+    require(measured['overflow'] <= measured['width'], 'Score-first page horizontal overflow')
+    require(len(measured['cards']) == (min(PHONE_PAGE_SIZE if viewport == 'phone' else PAGE_SIZE,
+                len([r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == seed['defaults']['purpose'] and r['registered_media']]))), 'Initial 2/1 cards differ')
+    for card in measured['cards']:
+        require(card['sheets'] and all(s['cells'] == 6 and s['visible'] == 6 for s in card['sheets']), 'Six score cells not visible')
+        require(all(22 <= size <= 24 for size in card['figure_fonts']), 'Score figures not 22–24px')
+        require(len(card['action_heights']) == 4 and min(card['action_heights']) >= 44, 'Work actions below 44px')
+    if viewport == 'phone':
+        require(all(abs(card['left'] - 16) <= .5 for card in measured['cards']), 'Phone gutter differs from 16px')
+        if seed['defaults']['score_source'] != '*':
+            require(measured['first_image_y'] is not None and measured['first_image_y'] <= 300, 'Default phone first real image below y=300')
+    return measured
+
+
 def gallery_ux(browser, url, sources, args, report):
     seed = sources['seed']
     context, page, requests, errors = observed_context(browser, url, args)
@@ -988,6 +1126,7 @@ def gallery_ux(browser, url, sources, args, report):
                 page.wait_for_function('''()=>[...document.querySelectorAll('#public-grid .work-image')].some(i=>{
                     let r=i.getBoundingClientRect();return i.complete&&i.naturalWidth>0&&r.top<innerHeight&&r.bottom>0;})''')
                 strict_overflow(page, 'public-'+viewport+'-'+theme, report)
+                checks.setdefault('score_layout', []).append({'viewport': viewport, 'theme': theme, **score_first_layout(page, viewport, seed)})
                 file = 'public-' + viewport + '-' + theme + '.png'
                 page.screenshot(path=str(args.output / file))
                 report['screenshots'].append(file)
