@@ -220,6 +220,37 @@ class GallerySiteTests(GalleryFixture):
         self.assertIn("disabled", original_buttons[self.runs[7]["id"]])
         self.assertNotIn("disabled", original_buttons[self.runs[0]["id"]])
 
+    def test_direct_preview_visibility_stop_and_stale_async_cleanup(self):
+        program = r'''
+const fs=require('fs'),assert=require('assert'),code=fs.readFileSync(process.argv[1],'utf8');
+const start=code.indexOf('  function previewButtons('),end=code.indexOf('  async function digest(',start);
+let activePreview=null,created=0,destroyed=0,disconnected=0;
+const cardPreviews=new Map(),previewObserver={disconnect(){disconnected++}};
+const document={hidden:false},$=()=>({open:false});
+const allowedOriginal=run=>['ready','missing_dependencies'].includes(run.original.status);
+const sdk={create(host,options){created++;assert.strictEqual(options.transport,'external');assert.strictEqual(options.descriptor.status,'ready');return{async start(){options.onState({status:'loaded',message:'loaded'});},destroy(){destroyed++;}};}};
+let ensureSDK=async()=>sdk;
+eval(code.slice(start,end));
+(async()=>{
+ const c={run:{id:'a'.repeat(32),original:{status:'ready'}},node:{isConnected:true,dataset:{}},host:{style:{},replaceChildren(){}},status:{},start:{},viewport:'fit',token:0,runtime:null,alive:true,inline:true,visible:false,paused:false};
+ cardPreviews.set(c.run.id,c);
+ await startPreview(c);assert.strictEqual(created,0);
+ c.visible=true;await startPreview(c);assert.strictEqual(created,1);assert.strictEqual(c.node.dataset.previewState,'loaded');assert.strictEqual(c.host.style.visibility,'visible');assert.match(c.status.textContent,/实时原作.*非录像/);
+ togglePreview(c);assert.strictEqual(destroyed,1);assert.strictEqual(c.runtime,null);assert.match(c.status.textContent,/静态回退/);
+ resumeCards();assert.strictEqual(created,1);
+ togglePreview(c);await new Promise(resolve=>setImmediate(resolve));assert.strictEqual(created,2);
+ c.visible=false;stopPreview(c);assert.strictEqual(destroyed,2);assert.strictEqual(c.runtime,null);
+ let release;ensureSDK=()=>new Promise(resolve=>{release=resolve});c.visible=true;
+ const pending=startPreview(c);c.visible=false;stopPreview(c);release(sdk);await pending;assert.strictEqual(created,2);assert.strictEqual(c.runtime,null);
+ ensureSDK=async()=>{throw new Error('test download failure')};c.visible=true;c.paused=false;await startPreview(c);assert.strictEqual(c.node.dataset.previewState,'error');assert.match(c.status.textContent,/静态回退/);assert.strictEqual(c.runtime,null);
+ clearCards();assert.strictEqual(cardPreviews.size,0);assert.strictEqual(c.alive,false);assert.strictEqual(disconnected,1);
+ console.log('direct original visibility, explicit stop, stale async, error fallback and cleanup passed');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/public-gallery.js')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cleanup passed', result.stdout)
+
     def test_first_desktop_only_and_registration_requires_included_evidence(self):
         data = copy.deepcopy(self.full_data)
         run = data["runs"][0]
@@ -761,7 +792,7 @@ const records=new Map([[a.id,a],[b.id,b]]), original=JSON.stringify([a,b]);
 const state={task:'crocodile',purpose:'benchmark',model:'',source:'["visual-v1","ai-suggestion",false,"AI Z 建议"]',sort:'motion',selected:new Set([a.id,b.id]),mixed:true};
 let fullIntent=0,returnURL=null,mounted=0; const location={href:'https://example.test/report/?score_sort=compliance#gallery'},calls=[];
 const history={pushState(_,__,url){location.href=String(url)},replaceState(_,__,url){location.href=String(url)}};
-const $=()=>null,destroyPreview=()=>{},notice=()=>{};
+const $=()=>null,destroyPreview=()=>{},clearCards=()=>{},notice=()=>{};
 const mountFull=async()=>{mounted++;const url=new URL(location.href);assert.strictEqual(url.searchParams.get('score_source'),state.source);assert.strictEqual(url.searchParams.get('score_sort'),state.sort)};
 const window={BENCH_GALLERY_ACTION:async action=>calls.push(action)};
 eval(code.slice(start,end));

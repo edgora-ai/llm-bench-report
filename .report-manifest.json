@@ -3,8 +3,8 @@
     "index.html": {
       "mime": "text/html",
       "role": "index",
-      "sha256": "f18a49163e52e490be48fd4d69c3be8f741bd46375e0df0c68cb65add91b9907",
-      "size": 88613
+      "sha256": "993c2eaf8134f89ea009edbfcd38b349b8ef7fd42388b6a575226fa2dd2ee7e1",
+      "size": 89328
     },
     "media/00431e4b3d81a837aa9f77dd4bf8127e024062eb96e400bc4982bb42d3f3b650.webm": {
       "height": 640,
@@ -3366,7 +3366,7 @@
     "benchmark_runs": 67,
     "evidence": 220,
     "images": 176,
-    "index_bytes": 88613,
+    "index_bytes": 89328,
     "media_bytes": 35466101,
     "media_files": 384,
     "offline_bytes": 46990679,
