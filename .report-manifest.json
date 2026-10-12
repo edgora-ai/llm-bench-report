@@ -3,8 +3,8 @@
     "index.html": {
       "mime": "text/html",
       "role": "index",
-      "sha256": "993c2eaf8134f89ea009edbfcd38b349b8ef7fd42388b6a575226fa2dd2ee7e1",
-      "size": 89328
+      "sha256": "76948c3fc95265cd25b6d958bfa2bdf58ecab97cc56cf987910f694d255d321b",
+      "size": 89601
     },
     "media/00431e4b3d81a837aa9f77dd4bf8127e024062eb96e400bc4982bb42d3f3b650.webm": {
       "height": 640,
@@ -3081,8 +3081,8 @@
     "offline.html": {
       "mime": "text/html",
       "role": "offline",
-      "sha256": "fbf351ad2ccb144d692fc3f5ff271a15e8e13b10bca1451c57dd57ee735e20e8",
-      "size": 46990679
+      "sha256": "155115a1f3a0df0ff78428096a5ef91d158bbd2727178672b468c3008f98b117",
+      "size": 46994549
     },
     "originals/02951516812e7e7d82236b3289548375df5e13e3a2a2848eaf9cce34fd93e713.json": {
       "mime": "application/json",
@@ -3354,27 +3354,27 @@
       "sha256": "50f44020c5464433c28c9a27a944b83588002c435e7ce33508866afb249b67cf",
       "size": 27601
     },
-    "viewer/79a0b150904739e426e07f00a87f4607498dcf07fade05123590e7023bca73ed.html": {
+    "viewer/c23bcb18a755909515a876b4f504f0e58744ad104fde21bb24e7e5e058861ce4.html": {
       "mime": "text/html",
       "role": "viewer",
-      "sha256": "79a0b150904739e426e07f00a87f4607498dcf07fade05123590e7023bca73ed",
-      "size": 953163
+      "sha256": "c23bcb18a755909515a876b4f504f0e58744ad104fde21bb24e7e5e058861ce4",
+      "size": 957033
     }
   },
   "format": "progressive-static-v3",
   "stats": {
-    "benchmark_runs": 67,
+    "benchmark_runs": 68,
     "evidence": 220,
     "images": 176,
-    "index_bytes": 89328,
+    "index_bytes": 89601,
     "media_bytes": 35466101,
     "media_files": 384,
-    "offline_bytes": 46990679,
+    "offline_bytes": 46994549,
     "original_bytes": 2003664,
     "original_files": 65,
     "original_packages": 44,
     "reviews": 40,
-    "runs": 90,
+    "runs": 91,
     "thumbnails": 176,
     "unique_evidence": 214,
     "videos": 44

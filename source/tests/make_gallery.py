@@ -258,6 +258,9 @@ def project_row(run, data):
                      "height": info["height"], "label": "desktop.png"}
     summaries = score_summaries(run)
     return {**({"scores": summaries} if summaries else {}), "meter": meter(run),
+            **({"termination": evaluation["generation_termination_reason"]}
+               if run.get("prompt_version") == "standalone-svg-v1"
+               and evaluation.get("generation_termination_reason") in {"length", "stop"} else {}),
             "id": run_id, "model": run.get("model") or "unknown",
             "tool": run.get("tool") or "unknown", "task_id": run.get("task_id"),
             "purpose": run.get("purpose") or "unknown", "prompt_version": run.get("prompt_version"),
@@ -351,7 +354,9 @@ def media_text(run):
     facts = f"媒体登记 {registered} · 公开包含 {included}（非加载结果）"
     gaps = [MEDIA_GAPS[key] for key in run.get("media_gaps", []) if key in MEDIA_GAPS]
     if run["original"]["status"] == "no_entrypoint":
-        gaps.insert(0, "未交付作品（无入口）")
+        gaps.insert(0, "未交付，没有可展示 SVG/HTML")
+    if run.get("prompt_version") == "standalone-svg-v1":
+        gaps.insert(0, "SVG 补测" + (" · length 截断" if run.get("termination") == "length" else ""))
     return facts + (" · " + " · ".join(gaps) if gaps else "")
 
 

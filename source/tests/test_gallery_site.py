@@ -484,6 +484,132 @@ eval(code.slice(start,end));
         self.verify()
 
 
+class ModelVisibilityTests(unittest.TestCase):
+    """Synthetic UI contracts only; do not create benchmark runs or reviews."""
+    def test_existing_model_controls_are_open_and_in_normal_flow(self):
+        class Markup(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parents = []
+                self.model_parent = None
+                self.model_attrs = None
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if attrs.get('id') == 'public-models':
+                    self.model_parent = self.parents[-1]
+                    self.model_attrs = attrs
+                if tag not in {'meta', 'input', 'link', 'img'}:
+                    self.parents.append((tag, attrs))
+            def handle_endtag(self, tag):
+                if self.parents and self.parents[-1][0] == tag:
+                    self.parents.pop()
+        web = make_snapshot.ROOT / 'web'
+        parsed = Markup()
+        parsed.feed((web / 'public-gallery.html').read_text())
+        self.assertIn('open', parsed.model_attrs)
+        self.assertEqual(parsed.model_parent, ('div', {'class': 'gallery-controls'}))
+        css = (web / 'public-gallery.css').read_text()
+        menu = css.split('.model-menu{', 1)[1].split('}', 1)[0]
+        models = css.split('.public-model-list{', 1)[1].split('}', 1)[0]
+        self.assertNotIn('position:absolute', menu)
+        self.assertNotIn('max-height', models)
+        self.assertNotIn('overflow', models)
+
+    def test_model_filter_exposes_attempts_without_media_without_reordering(self):
+        program = r'''
+const fs=require('fs'),assert=require('node:assert/strict');
+const code=fs.readFileSync(process.argv[1],'utf8');
+const start=code.indexOf('  function cardRuns('),end=code.indexOf('  const shortScope=',start);
+const state={model:'',sort:''},sortedRuns=runs=>runs;
+const runs=[{id:'synthetic-media',registered_media:true},{id:'synthetic-original-only',registered_media:false},{id:'synthetic-no-entrypoint',registered_media:false}];
+const before=JSON.stringify(runs);
+eval(code.slice(start,end));
+assert.deepEqual(cardRuns(runs),[runs[0]]);
+state.model=' synthetic ';assert.deepEqual(cardRuns(runs),runs);
+state.model='   ';assert.deepEqual(cardRuns(runs),[runs[0]]);
+state.sort='compliance';assert.deepEqual(cardRuns(runs),runs);
+assert.equal(JSON.stringify(runs),before);
+console.log('selected model retains media-free and missing attempts');
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/public-gallery.js')],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('retains media-free and missing attempts', result.stdout)
+
+    def test_missing_card_names_the_model_and_keeps_scores_uninvented(self):
+        run = {'id': 'a' * 32, 'model': 'Synthetic absent model', 'tool': 'Synthetic tool',
+               'task_id': 'crocodile', 'purpose': 'benchmark', 'started_at': '2026-01-01',
+               'evaluation': {}, 'reviews': [], 'metrics': {}}
+        data = {'runs': [run], 'evidence': {}, 'thumbnails': {}, 'assets': {},
+                'originals': {run['id']: {'status': 'no_entrypoint', 'package': None}}}
+        row = make_gallery.project_runs(data)[0]
+        html = make_gallery.render_card(row)
+        self.assertIn('class="evidence-card no-registered-media"', html)
+        self.assertIn('aria-label="Synthetic absent model"', html)
+        self.assertIn('未交付，没有可展示 SVG/HTML', html)
+        self.assertEqual(html.count('未评审</span>'), 6)
+        self.assertIn('data-run-original="' + run['id'] + '" disabled', html)
+        self.assertNotIn('scores', row)
+        self.assertIsNone(row['original']['package'])
+
+
+class ModelDiscoverabilityTests(unittest.TestCase):
+    """Synthetic selection contracts only; never new model output or grading."""
+
+    def test_model_controls_are_expanded_in_normal_flow_without_internal_scroll(self):
+        root = make_snapshot.ROOT
+        template = (root / 'web/public-gallery.html').read_text()
+        css = (root / 'web/public-gallery.css').read_text()
+        class Controls(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.models = None
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if attrs.get('id') == 'public-models':
+                    self.models = (tag, attrs)
+        parsed = Controls(); parsed.feed(template)
+        self.assertEqual(parsed.models[0], 'details')
+        self.assertIn('open', parsed.models[1])
+        for selector in ('.model-menu{', '.public-model-list{'):
+            rule = css.split(selector, 1)[1].split('}', 1)[0]
+            self.assertNotIn('position:absolute', rule)
+            self.assertNotIn('max-height', rule)
+            self.assertNotIn('overflow:auto', rule)
+
+    def test_selected_missing_model_is_a_named_card_without_invented_delivery(self):
+        source = (make_snapshot.ROOT / 'web/public-gallery.js').read_text()
+        self.assertEqual(source.count('  function cardRuns('), 1)
+        program = r'''
+const fs=require('fs'),assert=require('node:assert/strict'),code=fs.readFileSync(process.argv[1],'utf8');
+const start=code.indexOf('  function cardRuns('),end=code.indexOf('  const shortScope=',start);
+const state={sort:'',model:''},sortedRuns=runs=>runs;
+eval(code.slice(start,end));
+const ready={id:'ready',registered_media:true,original:{status:'ready'}};
+const absent={id:'missing',model:'fixture-missing-model',registered_media:false,original:{status:'no_entrypoint'}};
+const runs=[ready,absent];
+assert.deepEqual(cardRuns(runs),[ready]);
+state.model='fixture-missing-model';assert.deepEqual(cardRuns(runs),runs);
+state.model=' ';assert.deepEqual(cardRuns(runs),[ready]);
+state.sort='compliance';assert.deepEqual(cardRuns(runs),runs);
+assert.equal(absent.original.status,'no_entrypoint');assert.equal(absent.scores,undefined);
+assert.match(code,/m\.hidden=!!state\.sort\|\|!!state\.model\.trim\(\)/);
+console.log('selected no-media model remains in the named-card projection');
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/public-gallery.js')], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = {'id': 'a' * 32, 'model': 'fixture-missing-model', 'tool': 'fixture-tool', 'task_id': 'crocodile',
+               'purpose': 'benchmark', 'registered_media': False, 'media_counts': [0, 0], 'image': None,
+               'original': {'status': 'no_entrypoint'}, 'meter': [None] * 5,
+               'date': '2026-01-01', 'prompt_version': 'fixture-v1', 'status': 'failed',
+               'entry_status': 'fail', 'evaluation_status': 'completed'}
+        html = make_gallery.render_card(run)
+        self.assertIn('fixture-missing-model</h2>', html)
+        self.assertIn('未交付，没有可展示 SVG/HTML', html)
+        self.assertIn('未评审', html)
+        self.assertIn('data-run-original="' + run['id'] + '" disabled', html)
+
+
 class ScoreEdgeContractTests(unittest.TestCase):
     def run_fixture(self, reviews, **fields):
         return {"id": "a" * 32, "task_id": "crocodile", "purpose": "benchmark",
