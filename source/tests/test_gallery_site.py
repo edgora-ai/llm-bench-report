@@ -224,15 +224,17 @@ class GallerySiteTests(GalleryFixture):
         program = r'''
 const fs=require('fs'),assert=require('assert'),code=fs.readFileSync(process.argv[1],'utf8');
 const start=code.indexOf('  function previewButtons('),end=code.indexOf('  async function digest(',start);
-let activePreview=null,created=0,destroyed=0,disconnected=0;
+let activePreview=null,fullPending=false,created=0,destroyed=0,disconnected=0;
 const cardPreviews=new Map(),previewObserver={disconnect(){disconnected++}};
 const document={hidden:false},$=()=>({open:false});
 const allowedOriginal=run=>['ready','missing_dependencies'].includes(run.original.status);
-const sdk={create(host,options){created++;assert.strictEqual(options.transport,'external');assert.strictEqual(options.descriptor.status,'ready');return{async start(){options.onState({status:'loaded',message:'loaded'});},destroy(){destroyed++;}};}};
+const sdk={async readPackage(){return new Uint8Array(0);},create(host,options){created++;assert.strictEqual(options.transport,'external');assert.strictEqual(options.descriptor.status,'ready');return{async start(bytes){await bytes;options.onState({status:'loaded',message:'loaded'});},destroy(){destroyed++;}};}};
 let ensureSDK=async()=>sdk;
+const pathURL=path=>'https://example.test/report/'+path;
+const fetch=async()=>new Response();
 eval(code.slice(start,end));
 (async()=>{
- const c={run:{id:'a'.repeat(32),original:{status:'ready'}},node:{isConnected:true,dataset:{}},host:{style:{},replaceChildren(){}},status:{},start:{},viewport:'fit',token:0,runtime:null,alive:true,inline:true,visible:false,paused:false};
+ const c={run:{id:'a'.repeat(32),original:{status:'ready',package:{path:'originals/'+'a'.repeat(64)+'.json',sha256:'a'.repeat(64)}}},node:{isConnected:true,dataset:{}},host:{style:{},replaceChildren(){}},status:{},start:{},viewport:'fit',token:0,loading:false,runtime:null,alive:true,inline:true,visible:false,paused:false};
  cardPreviews.set(c.run.id,c);
  await startPreview(c);assert.strictEqual(created,0);
  c.visible=true;await startPreview(c);assert.strictEqual(created,1);assert.strictEqual(c.node.dataset.previewState,'loaded');assert.strictEqual(c.host.style.visibility,'visible');assert.match(c.status.textContent,/实时原作.*非录像/);
@@ -903,7 +905,7 @@ class ScoreFirstPresentationTests(unittest.TestCase):
         self.assertEqual(row['media_gaps'], ['media_not_included', 'desktop_not_included'])
         self.assertEqual(audit.project_runs(data), [row])
         self.assertIn('媒体登记 2 · 公开包含 1（非加载结果）', make_gallery.media_text(row))
-        self.assertIn('未交付作品（无入口）', make_gallery.media_text(row))
+        self.assertIn('未交付，没有可展示 SVG/HTML', make_gallery.media_text(row))
         self.assertNotIn('output/index.html', json.dumps(row))
 
 
@@ -916,19 +918,20 @@ const start=code.indexOf('  async function fullAction('), end=code.indexOf('  fu
 const a={id:'a'.repeat(32),task_id:'crocodile',purpose:'benchmark'},b={id:'b'.repeat(32),task_id:'crocodile',purpose:'benchmark'};
 const records=new Map([[a.id,a],[b.id,b]]), original=JSON.stringify([a,b]);
 const state={task:'crocodile',purpose:'benchmark',model:'',source:'["visual-v1","ai-suggestion",false,"AI Z 建议"]',sort:'motion',selected:new Set([a.id,b.id]),mixed:true};
-let fullIntent=0,returnURL=null,mounted=0; const location={href:'https://example.test/report/?score_sort=compliance#gallery'},calls=[];
+let fullIntent=0,fullPending=false,returnURL=null,mounted=0,suspended=0,fatal=false; const location={href:'https://example.test/report/?score_sort=compliance#gallery'},calls=[];
 const history={pushState(_,__,url){location.href=String(url)},replaceState(_,__,url){location.href=String(url)}};
-const $=()=>null,destroyPreview=()=>{},clearCards=()=>{},notice=()=>{};
-const mountFull=async()=>{mounted++;const url=new URL(location.href);assert.strictEqual(url.searchParams.get('score_source'),state.source);assert.strictEqual(url.searchParams.get('score_sort'),state.sort)};
+const $=()=>null,destroyPreview=()=>{},suspendCards=()=>{suspended++},resumeCards=()=>{throw new Error('successful mount must not resume inline previews')},notice=()=>{};
+const mountFull=async()=>{mounted++;assert.strictEqual(fullPending,true);const url=new URL(location.href);assert.strictEqual(url.searchParams.get('score_source'),state.source);assert.strictEqual(url.searchParams.get('score_sort'),state.sort)};
 const window={BENCH_GALLERY_ACTION:async action=>calls.push(action)};
 eval(code.slice(start,end));
 (async()=>{
  for(const action of [{kind:'view',view:'scores'},{kind:'view',view:'matrix'},{kind:'detail',view:'evidence',run:a.id},{kind:'model',view:'matrix',model:'M'},{kind:'compare',view:'gallery'}]){
   await fullAction(action);const received=calls.at(-1);
+  assert.strictEqual(fullPending,false);
   assert.strictEqual(received.score_source,state.source);assert.strictEqual(received.score_sort,'motion');
   assert.deepStrictEqual(received.selected,[a.id,b.id]);assert.strictEqual(received.mixed,true);
  }
- assert.strictEqual(calls.length,5);assert.strictEqual(mounted,5);
+ assert.strictEqual(calls.length,5);assert.strictEqual(mounted,5);assert.strictEqual(suspended,5);
  state.source='*';state.sort='';await fullAction({kind:'view',view:'scores'});
  assert.strictEqual(calls.at(-1).score_source,'*');assert.strictEqual(calls.at(-1).score_sort,'');
  assert.strictEqual(JSON.stringify([a,b]),original);

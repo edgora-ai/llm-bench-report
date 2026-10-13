@@ -15,6 +15,7 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser', choices=('chromium', 'firefox', 'webkit'), default='chromium')
     parser.add_argument('--runtime', help='Optional trusted preview-runtime.js path for integration checks')
+    parser.add_argument('--output', type=Path, help='Optional dedicated directory for synthetic SVG preview screenshots')
     return parser.parse_args()
 
 
@@ -47,8 +48,8 @@ def fixture(html, assets=None, missing=None, urls=None):
 def describe(pack, raw=None):
     if raw is None:
         raw = json.dumps(pack, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    return {'status': 'missing_dependencies' if pack['missing'] else 'ready', 'entrypoint': 'index.html',
-            'entry_sha256': pack['files']['index.html']['sha256'], 'missing': pack['missing'],
+    return {'status': 'missing_dependencies' if pack['missing'] else 'ready', 'entrypoint': pack['entrypoint'],
+            'entry_sha256': pack['files'][pack['entrypoint']]['sha256'], 'missing': pack['missing'],
             'policy': 'opaque-srcdoc-v1', 'package': {'sha256': sha(raw), 'size': len(raw), 'base64': b64(raw)}}
 
 
@@ -147,6 +148,171 @@ def encoded_transport_checks(page, resources, descriptor, decoded):
     page.evaluate('transport.destroy()')
     resources[path] = decoded
     return {'wire_size': len(compressed), 'decoded_size': len(decoded), 'cases': results + ['gzip_cancel']}
+
+
+def svg_fixture(raw, entrypoint='index.svg'):
+    # Synthetic isolated runtime input only; never written into a benchmark run.
+    return {'version': 1, 'run_id': 'synthetic-fixture', 'entrypoint': entrypoint,
+            'files': {entrypoint: {'mime': 'image/svg+xml', 'size': len(raw), 'sha256': sha(raw), 'base64': b64(raw)}},
+            'adaptation': {'version': 1, 'protocol': 'standalone-svg-v1'}, 'missing': []}
+
+
+def svg_runtime_checks(page, args, resources, hits):
+    import io
+    from PIL import Image, ImageChops
+    raw = ('﻿<?xml version="1.0" encoding="UTF-8"?>\r\n'
+           '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 80">\r\n'
+           '<title>Synthetic animated SVG</title><rect width="160" height="80" fill="#123456"/>'
+           '<circle cx="20" cy="40" r="10" fill="#ff5050"><animate attributeName="cx" values="20;140;20" '
+           'dur="1s" repeatCount="indefinite"/></circle>\r\n</svg>\r\n').encode('utf-8')
+    def nested_frames():
+        for _ in range(100):
+            inner_frames = [f for f in page.frames if f.parent_frame and f.parent_frame.parent_frame]
+            if len(inner_frames) == 1:
+                return inner_frames[0].parent_frame, inner_frames[0]
+            page.wait_for_timeout(20)
+        raise AssertionError('SVG inner browsing context was not created')
+
+    def removed_frames():
+        assert page.locator('iframe').count() == 0, 'SVG retained a host iframe'
+        for _ in range(100):
+            if len(page.frames) == 1:
+                return
+            page.wait_for_timeout(20)
+        raise AssertionError('SVG retained a native browsing context')
+
+    checkpoint = len(hits)
+    results = []
+    for transport, entrypoint in [('inline', 'index.svg'), ('external', 'scene.SVG')]:
+        pack = svg_fixture(raw, entrypoint)
+        descriptor = describe(pack)
+        package_bytes = base64.b64decode(descriptor['package']['base64'])
+        if transport == 'external':
+            descriptor['package'].pop('base64')
+            descriptor['package']['path'] = 'originals/' + sha(package_bytes) + '.json'
+            resources['/' + descriptor['package']['path']] = package_bytes
+        before = len(hits)
+        page.evaluate("([d,t])=>{window.svgPreview=BenchPreview.create(document.querySelector('#a'),{runId:'synthetic-fixture',descriptor:d,transport:t,viewport:{width:400,height:300}})}", [descriptor, transport])
+        assert len(hits) == before and len(page.frames) == 1, 'SVG create eagerly started'
+        page.evaluate('svgPreview.start()')
+        page.wait_for_function("['loaded','error'].includes(svgPreview.getState().status)")
+        assert page.evaluate('svgPreview.getState().status') == 'loaded', page.evaluate('svgPreview.getState()')
+        outer, inner = nested_frames()
+        assert len(page.frames) == 3, 'SVG must use exactly two nested contexts'
+        assert [f.frame_element().get_attribute('sandbox') for f in (outer, inner)] == ['allow-scripts', 'allow-scripts']
+        assert all(f.evaluate('location.origin') == 'null' for f in (outer, inner))
+        assert page.locator('svg').count() == outer.locator('svg').count() == inner.locator('svg').count() == 0, 'SVG source entered document DOM'
+        image = inner.locator('img')
+        for _ in range(100):
+            if image.evaluate('e=>e.complete&&e.naturalWidth>0'):
+                break
+            page.wait_for_timeout(20)
+        assert image.evaluate('e=>e.complete&&e.naturalWidth>0'), 'SVG image did not decode/display'
+        data_url = image.get_attribute('src')
+        assert data_url.startswith('data:image/svg+xml;base64,')
+        assert base64.b64decode(data_url.split(',', 1)[1]) == raw, 'SVG render source bytes were rewritten'
+        denial = inner.evaluate('''() => {
+            const results={};
+            for(const [name, fn] of Object.entries({parentDOM:()=>parent.document.body,
+              topDOM:()=>top.document.body,localStorage:()=>localStorage.length,
+              sessionStorage:()=>sessionStorage.length,sandboxRemoval:()=>frameElement.removeAttribute('sandbox')})) {
+              try {fn(); results[name]=false;} catch(e){results[name]=true;}
+            }
+            return results;
+        }''')
+        assert all(denial.values()), denial
+        box = inner.frame_element().bounding_box()
+        assert box and box['width'] == 400 and box['height'] == 300
+        first = page.screenshot(clip=box, animations='allow')
+        page.wait_for_timeout(230)
+        second = page.screenshot(clip=box, animations='allow')
+        a, b = Image.open(io.BytesIO(first)).convert('RGB'), Image.open(io.BytesIO(second)).convert('RGB')
+        changed = sum(max(pixel) > 8 for pixel in ImageChops.difference(a, b).getdata())
+        assert changed > 50, ('SVG image has no visible animated pixels', changed)
+        expected = [] if transport == 'inline' else ['/' + descriptor['package']['path']]
+        assert hits[before:] == expected, ('SVG attempted external resources', hits[before:])
+        screenshots = []
+        if getattr(args, 'output', None):
+            args.output.mkdir(parents=True, exist_ok=True)
+            for name, data in [('before', first), ('after', second)]:
+                target = args.output / ('synthetic-svg-' + transport + '-' + name + '.png')
+                target.write_bytes(data)
+                assert target.read_bytes() == data, 'Synthetic screenshot readback mismatch'
+                screenshots.append(str(target))
+        results.append({'transport': transport, 'entrypoint': entrypoint, 'mime': 'image/svg+xml',
+                        'entry_sha256': sha(raw), 'exact_image_bytes': True, 'changed_pixels': changed,
+                        'sandbox': ['allow-scripts', 'allow-scripts'], 'origin': 'null',
+                        'host_svg_nodes': 0, 'denied': denial, 'screenshots': screenshots})
+        page.evaluate('svgPreview.stop()')
+        removed_frames()
+        assert inner.is_detached(), 'SVG Stop retained context'
+        page.evaluate('svgPreview.start()')
+        page.wait_for_function("svgPreview.getState().status==='loaded'")
+        _, restarted = nested_frames()
+        restarted.locator('img').wait_for(state='visible')
+        assert restarted != inner, 'SVG restart reused the old context'
+        assert restarted.locator('img').get_attribute('src') == data_url, 'SVG restart changed source bytes'
+        page.evaluate('svgPreview.destroy()')
+        removed_frames()
+    opening = '<svg xmlns="http://www.w3.org/2000/svg">'
+    invalid = {
+        'malformed_XML': opening + '<g></svg>', 'missing_namespace': '<svg/>',
+        'wrong_namespace': '<svg xmlns="https://example.invalid/svg"/>',
+        'script': opening + '<script>alert(1)</script></svg>',
+        'event_handler': opening + '<g onload="alert(1)"/></svg>',
+        'event_case': opening + '<g ONCLICK="alert(1)"/></svg>',
+        'foreignObject': opening + '<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject></svg>',
+        'external_href': opening + '<use href="https://example.invalid/a.svg#x"/></svg>',
+        'relative_href': opening + '<use href="other.svg#x"/></svg>',
+        'data_href': opening + '<use href="data:image/svg+xml;base64,PHN2Zy8+"/></svg>',
+        'external_paint': opening + '<path fill="url(https://example.invalid/a.svg#x)"/></svg>',
+        'URL_comment_path': opening + '<path fill="url(/*not-a-comment*/#paint)"/></svg>',
+        'CSS_URL_comment_path': opening + '<style>g{fill:url(/**/#paint)}</style></svg>',
+        'CSS_import': opening + '<style>@import "https://example.invalid/a.css";</style></svg>',
+        'CSS_escape': opening + r'<style>g{fill:u\72l(https://example.invalid/a.svg#x)}</style></svg>',
+        'CSS_image_set': opening + '<style>g{background:image-set("https://example.invalid/a.png" 1x)}</style></svg>',
+        'animated_handler': opening + '<set attributeName="onload" to="alert(1)"/></svg>',
+        'animated_href': opening + '<set attributeName="href" to="https://example.invalid/x"/></svg>',
+        'xml_base': opening + '<g xml:base="https://example.invalid/"/></svg>',
+        'style_child': opening + '<style><g/></style></svg>',
+        'DTD': '<!DOCTYPE svg>' + opening + '</svg>',
+        'entity': '<!DOCTYPE svg [<!ENTITY x "expanded">]>' + opening + '<text>&x;</text></svg>',
+        'PI': '<?xml-stylesheet href="https://example.invalid/a.css"?>' + opening + '</svg>',
+        'encoding': '<?xml version="1.0" encoding="iso-8859-1"?>' + opening + '</svg>',
+        'XML_version': '<?xml version="1.1"?>' + opening + '</svg>',
+    }
+    variants = [(name, describe(svg_fixture(value.encode()))) for name, value in invalid.items()]
+    pack = svg_fixture(raw)
+    mutations = {
+        'protocol': lambda p: p['adaptation'].update(protocol='html'),
+        'adapter_fields': lambda p: p['adaptation'].update(head_offset=1),
+        'extra_SVG': lambda p: p['files'].update({'second.svg': p['files']['index.svg']}),
+        'MIME': lambda p: p['files']['index.svg'].update(mime='text/html'),
+        'missing_dependencies': lambda p: p.update(missing=['one.css']),
+        'file_digest': lambda p: p['files']['index.svg'].update(sha256='0' * 64),
+    }
+    for name, mutation in mutations.items():
+        bad = copy.deepcopy(pack)
+        mutation(bad)
+        variants.append((name, describe(bad)))
+    descriptor = describe(pack)
+    for name in ('nested/index.svg', '../index.svg'):
+        bad = copy.deepcopy(descriptor)
+        bad['entrypoint'] = name
+        variants.append(('entrypoint_' + name, bad))
+    legacy = fixture('<!doctype html><html><head></head><body></body></html>')
+    legacy['files']['index.html']['mime'] = 'image/svg+xml'
+    variants.append(('HTML_MIME_not_widened', describe(legacy)))
+    before = len(hits)
+    rejected = []
+    for name, descriptor in variants:
+        error = page.evaluate("async d=>{try{await BenchPreview.prepare({runId:'synthetic-fixture',descriptor:d});return null}catch(e){return e.message}}", descriptor)
+        assert error, 'SVG negative accepted: ' + name
+        assert len(page.frames) == 1 and page.locator('svg').count() == 0
+        rejected.append(name)
+    assert len(hits) == before, 'SVG validation caused HTTP requests'
+    return {'synthetic_only': True, 'profiles': results, 'rejected': rejected,
+            'HTTP_requests': hits[checkpoint:], 'lifecycle': 'stop destroys; restart creates new context'}
 
 
 def wait_for_movement(page, element, initial):
@@ -272,7 +438,8 @@ def runtime_checks(page, args, resources, hits, base):
         page.evaluate('probe.destroy()')
         navigation_results.append(name)
     fidelity_results = fidelity_checks(page, resources, base)
-    return {'encoded_transport': transport_results, 'native_fidelity': fidelity_results, 'runtime_passive_canary_navigation_cases': navigation_results, 'movement_controls': 'pass', 'classic_defer_utf8_patches': 'pass', 'lazy_fetch_cancel_destroy': 'pass',
+    svg_results = svg_runtime_checks(page, args, resources, hits)
+    return {'standalone_svg': svg_results, 'encoded_transport': transport_results, 'native_fidelity': fidelity_results, 'runtime_passive_canary_navigation_cases': navigation_results, 'movement_controls': 'pass', 'classic_defer_utf8_patches': 'pass', 'lazy_fetch_cancel_destroy': 'pass',
             'viewport_fit_and_fixed': 'pass', 'message_spoof_rejected': 'pass', 'diagnostic_messages': diagnostic_messages,
             'rejected': failures}
 

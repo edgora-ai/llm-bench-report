@@ -11,6 +11,22 @@
   const INNER_POLICY = COMMON + "frame-src 'none'";
   const TYPES = new Set(['text/html', 'text/css', 'text/javascript']);
   const STATUSES = new Set(['ready', 'missing_dependencies', 'no_entrypoint', 'not_reviewed', 'withheld', 'unsupported']);
+  const SVG_PROTOCOL = 'standalone-svg-v1';
+  const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+  const XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink';
+  const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+  const SVG_ELEMENTS = new Set(`svg g defs symbol use title desc metadata style path rect circle ellipse line polyline polygon
+text tspan textPath linearGradient radialGradient stop pattern clipPath mask marker filter
+feBlend feColorMatrix feComponentTransfer feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap
+feDistantLight feDropShadow feFlood feFuncA feFuncB feFuncG feFuncR feGaussianBlur feImage feMerge feMergeNode
+feMorphology feOffset fePointLight feSpecularLighting feSpotLight feTile feTurbulence
+animate animateMotion animateTransform mpath set`.split(/\s+/));
+  const SVG_ANIMATED_ATTRIBUTES = new Set(`x y x1 y1 x2 y2 cx cy r rx ry width height d points dx dy rotate transform
+opacity fill fill-opacity stroke stroke-width stroke-opacity stroke-dasharray stroke-dashoffset
+stroke-linecap stroke-linejoin stroke-miterlimit color stop-color stop-opacity flood-color flood-opacity
+lighting-color font-size font-weight letter-spacing word-spacing visibility display offset
+viewBox preserveAspectRatio pathLength startOffset gradientTransform patternTransform`.split(/\s+/));
+  const SVG_FRAGMENT = /^#[A-Za-z0-9_.:-]+$/;
   function fail(message) { throw new Error(message); }
   function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
   function keys(value, expected, name) {
@@ -19,6 +35,55 @@
   function path(value) {
     if (typeof value !== 'string' || value.length > 240 || !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) || value.split('/').some(p => p === '.' || p === '..')) fail('Noncanonical file path');
     return value;
+  }
+  function svgEntrypoint(value) {
+    return typeof value === 'string' && !value.includes('/') && /.+\.svg$/i.test(value);
+  }
+  function checkSVGCSS(text) {
+    const clean = text.replace(/\/\*[\s\S]*?\*\//g, '');
+    if (/\\|@(?!keyframes\b|-webkit-keyframes\b|media\b)|\b(?:image-set|image|src|cross-fade|paint)\s*\(/i.test(clean)) fail('Unsupported standalone SVG CSS resource/escape');
+    // /*...*/ inside an unquoted url() can be literal URL path characters.
+    // Never turn such a relative resource into an apparently safe fragment.
+    for (const candidate of [text, clean]) {
+      const withoutFragments = candidate.replace(/url\s*\(\s*(?:"#[A-Za-z0-9_.:-]+"|'#[A-Za-z0-9_.:-]+'|#[A-Za-z0-9_.:-]+)\s*\)/ig, '');
+      if (/url\s*\(/i.test(withoutFragments)) fail('External or invalid standalone SVG CSS reference');
+    }
+  }
+  function checkSVG(text) {
+    // XML parsing is detached and validation-only. No source node is ever added
+    // to the report DOM, serialized as HTML, or used as an executable document.
+    const declaration = /^(?:﻿)?<\?xml\s+version\s*=\s*(['"])1\.0\1(?:\s+encoding\s*=\s*(['"])(?:utf-8|utf8)\2)?(?:\s+standalone\s*=\s*(['"])(?:yes|no)\3)?\s*\?>/i;
+    if (/^(?:﻿)?<\?xml\s/i.test(text) && !declaration.test(text)) fail('Unsupported standalone SVG XML encoding/version');
+    const markup = text.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+    if (/<!DOCTYPE|<!ENTITY/i.test(markup)) fail('Standalone SVG DTD/entity');
+    const xml = new DOMParser().parseFromString(text, 'image/svg+xml');
+    const root = xml.documentElement;
+    if (!root || root.namespaceURI !== SVG_NAMESPACE || root.localName !== 'svg' || xml.getElementsByTagName('parsererror').length) fail('Malformed standalone SVG XML');
+    const pending = Array.from(xml.childNodes, node => ({node, depth: 0}));
+    let count = 0;
+    while (pending.length) {
+      const {node, depth} = pending.pop();
+      if (node.nodeType === 7 || node.nodeType === 10) fail('Standalone SVG DTD/processing instruction');
+      if (node.nodeType === 1) {
+        if (++count > 20000 || depth >= 128) fail('Standalone SVG XML complexity');
+        if (node.namespaceURI !== SVG_NAMESPACE || !SVG_ELEMENTS.has(node.localName)) fail('Unsupported standalone SVG element');
+        for (const attribute of node.attributes) {
+          if (attribute.namespaceURI === 'http://www.w3.org/2000/xmlns/') continue;
+          const name = attribute.localName, ns = attribute.namespaceURI, value = attribute.value;
+          if (name.toLowerCase().startsWith('on')) fail('Standalone SVG event handler');
+          if (ns && !(ns === XLINK_NAMESPACE && name === 'href' || ns === XML_NAMESPACE && ['lang', 'space'].includes(name))) fail('Unsupported standalone SVG attribute namespace');
+          if (['src', 'base', 'data'].includes(name.toLowerCase())) fail('Standalone SVG resource attribute');
+          if (name.toLowerCase() === 'href' && !SVG_FRAGMENT.test(value.trim())) fail('External standalone SVG reference');
+          checkSVGCSS(value);
+        }
+        if (['animate', 'animateTransform', 'set'].includes(node.localName) && !SVG_ANIMATED_ATTRIBUTES.has(node.getAttribute('attributeName'))) fail('Unsupported standalone SVG animation target');
+        if (node.localName === 'style') {
+          if (node.children.length || (node.getAttribute('type') || 'text/css').toLowerCase() !== 'text/css') fail('Unsupported standalone SVG style');
+          checkSVGCSS(node.textContent);
+        }
+      }
+      pending.push(...Array.from(node.childNodes, child => ({node: child, depth: depth + 1})));
+    }
   }
   function resourcePath(value) {
     // Decode once, without parsing DOM or loading resources. These are all HTML5
@@ -108,10 +173,15 @@
     keys(d, ['status', 'entrypoint', 'entry_sha256', 'missing', 'policy', 'package'], 'descriptor');
     if (!STATUSES.has(d.status) || d.policy !== 'opaque-srcdoc-v1') fail('Unsupported preview descriptor');
     missing(d.missing);
-    if (d.entrypoint !== null && d.entrypoint !== 'index.html') fail('Unsupported entrypoint');
+    const isSVG = svgEntrypoint(d.entrypoint);
+    if (d.entrypoint !== null && d.entrypoint !== 'index.html' && !isSVG) fail('Unsupported entrypoint');
+    if (isSVG) {
+      path(d.entrypoint);
+      if (d.missing.length || d.status === 'missing_dependencies') fail('Standalone SVG dependencies');
+    }
     if (d.entry_sha256 !== null && (typeof d.entry_sha256 !== 'string' || !HASH.test(d.entry_sha256))) fail('Invalid entry digest');
     const runnable = d.status === 'ready' || d.status === 'missing_dependencies';
-    if (runnable && (d.entrypoint !== 'index.html' || d.entry_sha256 === null || d.package === null)) fail('Incomplete runnable descriptor');
+    if (runnable && (d.entrypoint === null || d.entry_sha256 === null || d.package === null)) fail('Incomplete runnable descriptor');
     if (d.status === 'ready' && d.missing.length || d.status === 'missing_dependencies' && !d.missing.length) fail('Dependency status mismatch');
     if (!runnable && d.package !== null) fail('Unavailable original cannot carry executable package');
     if (d.package !== null) {
@@ -199,20 +269,36 @@
     missing(pack.missing);
     if (JSON.stringify(pack.missing) !== JSON.stringify(descriptor.missing)) fail('Missing dependency mismatch');
     if (!object(pack.files) || !Object.keys(pack.files).length || Object.keys(pack.files).length > LIMIT.files) fail('Invalid file count');
+    const isSVG = svgEntrypoint(pack.entrypoint);
+    if (isSVG && (Object.keys(pack.files).length !== 1 || pack.missing.length)) fail('Standalone SVG files/dependencies');
     const files = Object.create(null);
     for (const [name, file] of Object.entries(pack.files)) {
       path(name); keys(file, ['mime', 'size', 'sha256', 'base64'], 'original file');
-      if (!TYPES.has(file.mime)) fail('Unsupported MIME');
-      if ((name.endsWith('.html') && file.mime !== 'text/html') || (name.endsWith('.css') && file.mime !== 'text/css') || (name.endsWith('.js') && !['text/javascript'].includes(file.mime)) || !/\.(html|css|js)$/.test(name)) fail('File MIME/path mismatch');
+      if (isSVG) {
+        if (name !== pack.entrypoint || file.mime !== 'image/svg+xml') fail('Standalone SVG MIME/path mismatch');
+      } else {
+        if (!TYPES.has(file.mime)) fail('Unsupported MIME');
+        if ((name.endsWith('.html') && file.mime !== 'text/html') || (name.endsWith('.css') && file.mime !== 'text/css') || (name.endsWith('.js') && !['text/javascript'].includes(file.mime)) || !/\.(html|css|js)$/.test(name)) fail('File MIME/path mismatch');
+      }
       integer(file.size, 0, LIMIT.file, 'file size');
       if (typeof file.sha256 !== 'string' || !HASH.test(file.sha256)) fail('Invalid file digest');
       const raw = unbase64(file.base64, LIMIT.file);
       if (raw.length !== file.size || await digest(raw) !== file.sha256) fail('File integrity mismatch');
       decoder.decode(raw); files[name] = {raw, mime: file.mime, base64: file.base64};
     }
-    if (!Object.hasOwn(files, pack.entrypoint) || files[pack.entrypoint].mime !== 'text/html' || pack.files[pack.entrypoint].sha256 !== descriptor.entry_sha256) fail('Entry integrity mismatch');
+    if (!Object.hasOwn(files, pack.entrypoint) || files[pack.entrypoint].mime !== (isSVG ? 'image/svg+xml' : 'text/html') || pack.files[pack.entrypoint].sha256 !== descriptor.entry_sha256) fail('Entry integrity mismatch');
     if (pack.missing.some(name => Object.hasOwn(files, name))) fail('Missing dependency exists in package');
-    const original = files[pack.entrypoint].raw, html = decoder.decode(original), tags = scanHTML(html);
+    const original = files[pack.entrypoint].raw;
+    if (isSVG) {
+      keys(pack.adaptation, ['version', 'protocol'], 'standalone SVG adaptation');
+      if (pack.adaptation.version !== 1 || pack.adaptation.protocol !== SVG_PROTOCOL) fail('Unsupported standalone SVG adaptation');
+      checkSVG(decoder.decode(original));
+      // The model delivered SVG, not HTML. This wrapper is trusted runtime UI;
+      // its image source is the exact hash-verified bytes, with no SVG rewriting.
+      const html = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + INNER_POLICY + '"><title>Standalone SVG</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden}img{display:block;width:100%;height:100%;object-fit:contain}</style></head><body><img alt="Standalone SVG original" src="data:image/svg+xml;base64,' + files[pack.entrypoint].base64 + '"></body></html>';
+      return Object.freeze({html, entry_sha256: descriptor.entry_sha256, missing: Object.freeze([])});
+    }
+    const html = decoder.decode(original), tags = scanHTML(html);
     const adaptation = pack.adaptation;
     keys(adaptation, ['version', 'head_offset', 'patches'], 'adaptation');
     if (adaptation.version !== 1 || !Array.isArray(adaptation.patches) || adaptation.patches.length > 128) fail('Unsupported adaptation');
@@ -257,35 +343,67 @@
     const rendered = (decoder.decode(output.slice(0, offset)) + policy + decoder.decode(output.slice(offset))).replace(/^﻿/, '');
     return Object.freeze({html: rendered, entry_sha256: descriptor.entry_sha256, missing: Object.freeze(pack.missing.slice())});
   }
-  async function fetchBytes(descriptor, signal) {
+  async function fetchBytes(descriptor, signal, response) {
     const p = descriptor.package;
     if (Object.hasOwn(p, 'base64')) return unbase64(p.base64, LIMIT.package);
     const url = new URL(p.path, document.baseURI);
     const base = new URL(document.baseURI);
     if (!['http:', 'https:'].includes(url.protocol) || url.origin !== base.origin || url.username || url.password) fail('External package requires same-origin HTTP transport');
-    const response = await fetch(url.href, {credentials: 'omit', redirect: 'error', signal, cache: 'no-store', referrerPolicy: 'no-referrer'});
-    if (!response.ok) fail('Package HTTP ' + response.status);
-    const length = response.headers.get('Content-Length');
-    const encoding = (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase();
-    // Fetch decodes compressed bodies, but Content-Length describes encoded wire bytes.
-    // Only identity responses permit an early comparison to the decoded package size.
-    if (length !== null && (!/^\d+$/.test(length) || ((!encoding || encoding === 'identity') && Number(length) !== p.size))) fail('Package response size mismatch');
-    if (!response.body) fail('Browser lacks bounded streaming fetch');
-    const reader = response.body.getReader(), chunks = [];
-    let size = 0;
+    if (response === undefined) response = await fetch(url.href, {credentials: 'omit', redirect: 'error', signal, cache: 'no-store', referrerPolicy: 'no-referrer'});
+    let reader = null;
     try {
+      if (!response.ok) fail('Package HTTP ' + response.status);
+      const length = response.headers.get('Content-Length');
+      const encoding = (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase();
+      // Fetch decodes compressed bodies, but Content-Length describes encoded wire bytes.
+      // Only identity responses permit an early comparison to the decoded package size.
+      if (length !== null && (!/^\d+$/.test(length) || ((!encoding || encoding === 'identity') && Number(length) !== p.size))) fail('Package response size mismatch');
+      if (!response.body) fail('Browser lacks bounded streaming fetch');
+      reader = response.body.getReader();
+      const chunks = []; let size = 0;
       while (true) {
         const {done, value} = await reader.read();
         if (done) break;
         size += value.length;
-        if (size > p.size || size > LIMIT.package) { await reader.cancel(); fail('Package response too large'); }
+        if (size > p.size || size > LIMIT.package) fail('Package response too large');
         chunks.push(value);
       }
-    } finally { reader.releaseLock(); }
-    if (size !== p.size) fail('Package response truncated');
-    const bytes = new Uint8Array(size); let at = 0;
-    for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length; }
-    return bytes;
+      if (size !== p.size) fail('Package response truncated');
+      const bytes = new Uint8Array(size); let at = 0;
+      for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length; }
+      return bytes;
+    } finally {
+      if (reader) {
+        await reader.cancel().catch(error => console.info('Package stream cleanup:', error.name));
+        reader.releaseLock();
+      } else if (response.body && !response.body.locked) {
+        await response.body.cancel().catch(error => console.info('Package stream cleanup:', error.name));
+      }
+    }
+  }
+  // Network may start before SRI loads this SDK. Reading starts only after SRI.
+  async function readPackage(descriptor, response) {
+    if (!(response instanceof Response)) fail('Native package Response required');
+    // Native getters enforce the internal Response brand and ignore shadowed fields.
+    response = Object.fromEntries(['url', 'ok', 'redirected', 'status', 'headers', 'body'].map(key => [key, Reflect.get(Response.prototype, key, response)]));
+    const headers = response.headers;
+    response.headers = {get: name => Headers.prototype.get.call(headers, name)};
+    let delegated = false;
+    try {
+      const copy = parseJSON(JSON.stringify(descriptor)); validateDescriptor(copy);
+      if (!copy.package || !Object.hasOwn(copy.package, 'path')) fail('External package required');
+      const url = new URL(copy.package.path, document.baseURI), base = new URL(document.baseURI);
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin !== base.origin || url.username || url.password || response.url !== url.href) fail('Package response URL mismatch');
+      if (!response.ok || response.redirected || !/^application\/json(?:;|$)/i.test(response.headers.get('Content-Type') || '')) fail('Package response mismatch');
+      delegated = true;
+      const bytes = await fetchBytes(copy, undefined, response);
+      if (await digest(bytes) !== copy.package.sha256) fail('Package digest mismatch');
+      return bytes;
+    } finally {
+      if (!delegated && response.body && !response.body.locked) {
+        await response.body.cancel().catch(error => console.info('Package stream cleanup:', error.name));
+      }
+    }
   }
   // Diagnostics are untrusted bounded text, never an instruction or acceptance signal.
   function originalDiagnostics() {
@@ -366,19 +484,40 @@
     size(viewport);
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => { if (!destroyed) layout(); }) : null;
     if (observer) observer.observe(container);
-    async function start() {
+    function ownBytes(bytes) {
+      if (!(bytes instanceof Uint8Array) || !descriptor.package || Reflect.get(Uint8Array.prototype, 'byteLength', bytes) !== descriptor.package.size) fail('Package size mismatch');
+      return new Uint8Array(bytes);
+    }
+    async function start(bytes) {
+      // Observe both outcomes immediately, even if this instance was just destroyed.
+      let current;
+      const pending = bytes instanceof Promise && Object.getPrototypeOf(bytes) === Promise.prototype ? Promise.prototype.then.call(bytes, value => {
+        if (destroyed || current !== generation) return {};
+        try { return {value: ownBytes(value)}; } catch (error) { return {error}; }
+      }, error => ({error})) : null;
       if (destroyed) fail('Preview destroyed');
-      clean(); const current = generation;
+      // Raw input is copied before any await/callback. Promised input is copied
+      // upon resolution, before verification callbacks/awaits. Never accept HTML.
+      if (!pending && bytes !== undefined) bytes = ownBytes(bytes);
+      clean(); current = generation;
       if (!descriptor.package) { state('unavailable', 'Original unavailable: ' + descriptor.status); return; }
       abort = new AbortController();
       try {
         state('fetching', '获取原作包');
-        const bytes = await fetchBytes(descriptor, abort.signal);
+        if (current !== generation || abort.signal.aborted) return;
+        if (pending) {
+          const result = await pending;
+          if (current !== generation) return;
+          if (Object.hasOwn(result, 'error')) throw result.error;
+          bytes = result.value;
+        } else if (bytes === undefined) bytes = await fetchBytes(descriptor, abort.signal);
         if (current !== generation) return;
         state('verifying', '完整性校验中');
+        if (current !== generation || abort.signal.aborted) return;
         const prepared = await prepare({runId, descriptor, bytes});
         if (current !== generation) return;
         state('loading', '隔离与资源装载适配中');
+        if (current !== generation || abort.signal.aborted) return;
         frame = document.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts');
         frame.setAttribute('referrerpolicy', 'no-referrer'); frame.title = '原作隔离预览 ' + runId;
         frame.style.cssText = 'display:block;border:0;flex:none';
@@ -417,5 +556,5 @@
       clean(); destroyed = true; if (observer) observer.disconnect(); removeEventListener('pagehide', stop); document.removeEventListener('visibilitychange', hidden); state('stopped', '已销毁');
     }});
   }
-  window.BenchPreview = Object.freeze({create, prepare, validateDescriptor});
+  window.BenchPreview = Object.freeze({create, prepare, validateDescriptor, readPackage});
 })();

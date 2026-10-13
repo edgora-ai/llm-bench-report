@@ -1158,7 +1158,7 @@
     for (const key of filterKeys) state.filters[key] = $(`[name="${key}"]`, $('#filters')).value;
     clearTimeout(filterTimer);
     if (state.filters.date_from && state.filters.date_to && state.filters.date_from > state.filters.date_to) { notify('开始日期不能晚于结束日期。', true); return; }
-    state.defaultTaskPending = false; syncURL();
+    state.defaultTaskPending = false; syncURL(); renderActiveFilters();
     filterTimer = window.setTimeout(() => loadData(), event.target.name === 'q' ? 250 : 0);
   }
   $('#filters').addEventListener('input', handleFilter);
@@ -1244,6 +1244,53 @@
   const offline = source?.offline;
   if (snapshot && staticMedia && offline?.path === 'offline.html' && /^[a-f0-9]{64}$/.test(offline.sha256) && Number.isSafeInteger(offline.size) && offline.size > 0) { $('#offline-download').href = 'offline.html'; $('#offline-download').hidden = false; $('#offline-download').title = `离线完整版 · ${number(offline.size)} bytes · SHA256 ${offline.sha256}`; }
   try { const theme = localStorage.getItem('bench-theme'); if (['light', 'dark'].includes(theme)) document.documentElement.dataset.theme = theme; } catch (error) { console.warn('主题偏好不可读取；使用系统主题。', error.name); }
+  const topbar = $('.topbar');
+  if (topbar) {
+    const markScrolled = () => topbar.classList.toggle('scrolled', window.scrollY > 6);
+    window.addEventListener('scroll', markScrolled, { passive: true });
+    markScrolled();
+  }
+  // Active-filter chips: one glance at what narrows the slice, one click to widen it.
+  const filterChipLabels = { q: '搜索', tool: '工具', model: '模型', task_id: '任务', purpose: '用途', prompt_version: 'Prompt', status: '状态', date_from: '开始', date_to: '结束' };
+  function renderActiveFilters() {
+    let bar = $('#active-filters');
+    if (!bar) {
+      bar = el('div', { id: 'active-filters', role: 'group', 'aria-label': '当前生效的筛选条件' });
+      $('.task-filter-layout').after(bar);
+    }
+    const blind = state.view === 'blind';
+    const defaults = { purpose: 'benchmark', task_id: taskOptions()[0]?.id || '' };
+    const chips = [];
+    if (!blind) for (const key of filterKeys) {
+      const value = state.filters[key];
+      if (!value || value === defaults[key]) continue;
+      const display = key === 'task_id' ? (taskOptions().find(task => task.id === value)?.name || value) : value;
+      chips.push(el('button', {
+        type: 'button', class: 'filter-chip', 'aria-label': `移除筛选 ${filterChipLabels[key]} ${display}`,
+        onclick: () => { state.filters[key] = ''; state.defaultTaskPending = false; fillOptions(); syncURL(); renderActiveFilters(); loadData(); }
+      }, [el('span', { class: 'chip-key', text: filterChipLabels[key] }), document.createTextNode(display), el('span', { class: 'chip-x', text: '×', 'aria-hidden': 'true' })]));
+    }
+    bar.replaceChildren(...chips);
+    bar.hidden = blind || chips.length === 0;
+  }
+  const activeFiltersOriginalRender = render;
+  render = function () { activeFiltersOriginalRender(); renderActiveFilters(); };
+  // Back to top on long evidence pages; hidden while the comparison tray owns the bottom edge.
+  const toTop = el('button', { id: 'to-top', type: 'button', text: '↑ 回顶部', 'aria-label': '回到页面顶部', onclick: () => window.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }) });
+  document.body.append(toTop);
+  const markToTop = () => toTop.classList.toggle('show', window.scrollY > 640);
+  window.addEventListener('scroll', markToTop, { passive: true });
+  markToTop();
+  // "/" jumps to search from anywhere outside form fields, like most data tools.
+  document.addEventListener('keydown', event => {
+    if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.target?.closest('input,select,textarea,dialog') || event.target?.isContentEditable) return;
+    const search = $('[name="q"]', $('#filters'));
+    if (!search || $('#filters').hidden) return;
+    event.preventDefault();
+    const more = $('.more-filters'); if (more && !more.open) more.open = true;
+    search.focus(); search.select();
+  });
   $('#mode-label').textContent = snapshot ? '脱敏快照 · 只读' : '真实运行 · 可追溯';
   updateAuth(); setView(location.hash.slice(1)); loadData(true);
 })();

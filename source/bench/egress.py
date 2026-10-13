@@ -12,6 +12,55 @@ import urllib.parse
 import urllib.request
 
 
+MIMO_GENERATION_MODEL = "opencode/mimo-v2.6-flash-free"
+GENERATION_CAP_KEYS = ("max_tokens", "max_completion_tokens")
+OTHER_REASONING_CONTROLS = {
+    "reasoning", "reasoning_effort", "reasoningEffort", "enable_thinking", "enableThinking",
+    "thinking_budget", "thinkingBudget", "budget_tokens", "reasoning_budget",
+    "reasoning_budget_tokens", "max_thinking_tokens", "thinking_mode", "chat_template_kwargs",
+    "chat_template_args", "extra_body", "extraBody", "generation_config", "generationConfig",
+    "max_output_tokens",
+}
+
+
+def validate_generation_request_policy(policy, tool, model):
+    """Validate one frozen MiMo-only request policy, not an upstream guarantee."""
+    if tool != "opencode" or model != MIMO_GENERATION_MODEL:
+        raise ValueError("Generation request policy is restricted to the MiMo free route")
+    if (not isinstance(policy, dict) or set(policy) != {"version", "thinking", "max_output_tokens"}
+            or type(policy.get("version")) is not int or policy["version"] != 1
+            or policy.get("thinking") != {"type": "disabled"}
+            or type(policy.get("max_output_tokens")) is not int
+            or not 1 <= policy["max_output_tokens"] <= 32000):
+        raise ValueError("Invalid frozen generation request policy")
+    return {"version": 1, "thinking": {"type": "disabled"},
+            "max_output_tokens": policy["max_output_tokens"]}
+
+
+def prepare_generation_request(data, policy):
+    """Normalize known controls while preserving every lower outgoing token cap."""
+    if not isinstance(data, dict) or OTHER_REASONING_CONTROLS.intersection(data):
+        raise ValueError("Conflicting generation request controls")
+    thinking = data.get("thinking", {"type": "disabled"})
+    if (not isinstance(thinking, dict) or not set(thinking) <= {"type", "budget_tokens"}
+            or thinking.get("type") not in ("enabled", "disabled")
+            or ("budget_tokens" in thinking and
+                (type(thinking["budget_tokens"]) is not int or thinking["budget_tokens"] < 0))):
+        raise ValueError("Invalid incoming thinking control")
+    if "tools" in data:
+        tools = data["tools"]
+        if (not isinstance(tools, list) or any(not isinstance(tool, dict)
+                or ("function" in tool and not isinstance(tool["function"], dict)) for tool in tools)):
+            raise ValueError("Invalid incoming tool definitions")
+    caps = {key: data[key] for key in GENERATION_CAP_KEYS if key in data}
+    if any(type(value) is not int or value <= 0 for value in caps.values()):
+        raise ValueError("Invalid incoming output token cap")
+    limit = min(policy["max_output_tokens"], *caps.values()) if caps else policy["max_output_tokens"]
+    # Do not invent a second cap parameter a free proxy may not accept.
+    controls = {"thinking": {"type": "disabled"}, **{key: limit for key in caps or {"max_tokens": limit}}}
+    return {**data, **controls}, controls
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -66,12 +115,16 @@ class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 class Gateway:
-    def __init__(self, socket_path, provider, tool, model, log_path, api_model=None):
+    def __init__(self, socket_path, provider, tool, model, log_path, api_model=None, *, generation_request_policy=None):
+        self.generation_request_policy = (validate_generation_request_policy(generation_request_policy, tool, model)
+                                          if generation_request_policy is not None else None)
         self.socket_path = Path(socket_path)
         self.provider = provider
         self.tool = tool
         self.model = model.rsplit("/", 1)[-1]
         self.api_model = api_model or self.model
+        if self.generation_request_policy is not None and self.api_model != self.model:
+            raise ValueError("Generation request policy cannot use an alternate API model")
         self.log_path = Path(log_path)
         self.lock = threading.Lock()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": provider["proxy"]} if provider.get("proxy") else {}), NoRedirect())
@@ -82,7 +135,9 @@ class Gateway:
 
             def do_POST(self):
                 start = time.monotonic()
-                record = {"timestamp": datetime.now(timezone.utc).isoformat(), "method": "POST", "path": self.path, "model": None,
+                policy = gateway.generation_request_policy
+                record = {"timestamp": datetime.now(timezone.utc).isoformat(), "method": "POST",
+                          "path": self.path if policy is None else None, "model": None,
                           "status_origin": "local_gateway", "policy_rejected": False}
                 response = None
                 try:
@@ -92,23 +147,50 @@ class Gateway:
                         record.update(status=400, reason_code="invalid_payload_length")
                         return
                     body = self.rfile.read(length)
-                    data = json.loads(body)
-                    record["model"] = data.get("model")
+                    try:
+                        data = json.loads(body)
+                    except ValueError:
+                        if policy is None:
+                            raise
+                        record.update(status=403, status_origin="local_policy", policy_rejected=True,
+                                      reason_code="request_controls_not_allowed")
+                        self.fail(403, "Generation request outside frozen policy")
+                        return
+                    if policy is not None and not isinstance(data, dict):
+                        record.update(status=403, status_origin="local_policy", policy_rejected=True,
+                                      reason_code="request_controls_not_allowed")
+                        self.fail(403, "Generation request outside frozen policy")
+                        return
+                    record["model"] = data.get("model") if policy is None or data.get("model") == gateway.model else None
                     routes = {"/claude/v1/messages": "/v1/messages", "/claude/v1/messages/count_tokens": "/v1/messages/count_tokens"} if gateway.tool == "claude-code" else {"/opencode/v1/chat/completions": "/chat/completions", "/opencode/v1/responses": "/responses"}
                     parsed_path = urllib.parse.urlsplit(self.path)
                     query = urllib.parse.parse_qs(parsed_path.query)
                     allowed_query = not query or (gateway.tool == "claude-code" and query == {"beta": ["true"]})
                     reason = None
-                    if parsed_path.path not in routes:
+                    if policy is not None and self.path != "/opencode/v1/chat/completions":
+                        reason = "route_not_allowed" if parsed_path.path != "/opencode/v1/chat/completions" else "query_not_allowed"
+                    elif parsed_path.path not in routes:
                         reason = "route_not_allowed"
                     elif not allowed_query:
                         reason = "query_not_allowed"
-                    elif data.get("model") not in {gateway.model, gateway.api_model}:
+                    elif data.get("model") not in (gateway.model, gateway.api_model):
                         reason = "model_not_allowed"
+                    elif policy is not None:
+                        record["path"] = "/opencode/v1/chat/completions"
                     if reason:
                         record.update(status=403, status_origin="local_policy", policy_rejected=True, reason_code=reason)
                         self.fail(403, "Route or model outside frozen benchmark protocol")
                         return
+                    controls = None
+                    if policy is not None:
+                        try:
+                            data, controls = prepare_generation_request(data, policy)
+                            body = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                        except ValueError:
+                            record.update(status=403, status_origin="local_policy", policy_rejected=True,
+                                          reason_code="request_controls_not_allowed")
+                            self.fail(403, "Generation request outside frozen policy")
+                            return
                     for tool_def in data.get("tools", []):
                         kind = str(tool_def.get("type", ""))
                         name = str(tool_def.get("name", tool_def.get("function", {}).get("name", ""))).lower()
@@ -116,6 +198,10 @@ class Gateway:
                             record.update(status=403, status_origin="local_policy", policy_rejected=True, reason_code="tool_not_allowed")
                             self.fail(403, "Disallowed provider tool")
                             return
+                    if policy is not None:
+                        # These are outgoing serialized controls, not evidence of upstream compliance.
+                        record["generation_request"] = {"path": "/chat/completions", "model": gateway.model,
+                                                        "controls": controls}
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in {"authorization", "x-api-key", "host", "connection", "accept-encoding", "content-length"}}
                     headers.update(gateway.provider["headers"])
                     headers["Accept-Encoding"] = "identity"
@@ -131,7 +217,8 @@ class Gateway:
                     except (AttributeError, OSError):
                         record["read_timeout_override"] = "unsupported"
                     record["status"] = response.status
-                    record["request_id"] = response.headers.get("request-id") or response.headers.get("x-request-id")
+                    if policy is None:
+                        record["request_id"] = response.headers.get("request-id") or response.headers.get("x-request-id")
                     self.send_response(response.status)
                     self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
                     self.end_headers()

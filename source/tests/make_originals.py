@@ -11,9 +11,10 @@ import binascii
 import hashlib
 from html.parser import HTMLParser
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import unquote, urlsplit
+from xml.parsers import expat
 
 FORMAT_V2 = "static-media-v2"
 ORIGINAL_PATH = re.compile(r"originals/([a-f0-9]{64})\.json\Z")
@@ -21,8 +22,25 @@ SHA = re.compile(r"[a-f0-9]{64}\Z")
 MAX_PACKAGE_BYTES = 4 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 2 * 1024 * 1024
 MAX_FILES = 32
-MIMES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}
+MIMES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 STATUSES = {"ready", "missing_dependencies", "no_entrypoint", "not_reviewed", "withheld", "unsupported"}
+SVG_PROTOCOL = "standalone-svg-v1"
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
+XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+SVG_ELEMENTS = set("""svg g defs symbol use title desc metadata style path rect circle ellipse line polyline polygon
+text tspan textPath linearGradient radialGradient stop pattern clipPath mask marker filter
+feBlend feColorMatrix feComponentTransfer feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap
+feDistantLight feDropShadow feFlood feFuncA feFuncB feFuncG feFuncR feGaussianBlur feImage feMerge feMergeNode
+feMorphology feOffset fePointLight feSpecularLighting feSpotLight feTile feTurbulence
+animate animateMotion animateTransform mpath set""".split())
+SVG_ANIMATED_ATTRIBUTES = set("""x y x1 y1 x2 y2 cx cy r rx ry width height d points dx dy rotate transform
+opacity fill fill-opacity stroke stroke-width stroke-opacity stroke-dasharray stroke-dashoffset
+stroke-linecap stroke-linejoin stroke-miterlimit color stop-color stop-opacity flood-color flood-opacity
+lighting-color font-size font-weight letter-spacing word-spacing visibility display offset
+viewBox preserveAspectRatio pathLength startOffset gradientTransform patternTransform""".split())
+SVG_FRAGMENT = re.compile(r"#[A-Za-z0-9_.:-]+\Z")
+SVG_CSS_URL = re.compile(r'''url\s*\(\s*(?:"(#[A-Za-z0-9_.:-]+)"|'(#[A-Za-z0-9_.:-]+)'|(#[A-Za-z0-9_.:-]+))\s*\)''', re.I)
 
 
 def _site():
@@ -224,6 +242,92 @@ def check_css(text):
         supported(match.group(2).startswith(("data:", "#")), "unsupported CSS resource")
 
 
+def svg_entrypoint(names):
+    # Same deterministic rule as bench.entrypoints.svg_entrypoint, without making
+    # this public source-only helper import the benchmark runner or its settings.
+    candidates = sorted({name for name in names if isinstance(name, str)
+                         and name not in {".", ".."} and "/" not in name and "\\" not in name
+                         and PurePosixPath(name).suffix.lower() == ".svg"})
+    if "index.svg" in candidates:
+        return "index.svg"
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def check_svg_css(text):
+    # Only fragment paint/filter references and declarative CSS are permitted.
+    # Keep this separate from the legacy HTML CSS policy, which permits data URLs.
+    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    supported(not re.search(r"\\|@(?!keyframes\b|-webkit-keyframes\b|media\b)|\b(?:image-set|image|src|cross-fade|paint)\s*\(", clean, re.I),
+              "unsupported standalone SVG CSS resource/escape")
+    # In an unquoted CSS url() token, /*...*/ can be literal URL characters,
+    # not a comment. Validate both raw and comment-stripped text so an apparent
+    # fragment cannot actually resolve to a relative HTTP resource.
+    for candidate in (text, clean):
+        without_fragments = SVG_CSS_URL.sub("", candidate)
+        supported(not re.search(r"url\s*\(", without_fragments, re.I), "external or invalid standalone SVG CSS reference")
+
+
+def check_svg(entry):
+    """Validate inert standalone SVG XML; never rewrite or serialize source bytes."""
+    text = entry.decode("utf-8")
+    parser = expat.ParserCreate(namespace_separator="}")
+    stack, styles = [], []
+    nodes = 0
+
+    def declaration(version, encoding, standalone):
+        supported(version == "1.0" and (encoding is None or encoding.lower() in {"utf-8", "utf8"}),
+                  "unsupported standalone SVG XML encoding/version")
+
+    def forbidden(*args):
+        raise Unsupported("standalone SVG DTD/entity/processing instruction")
+
+    def start(name, attributes):
+        nonlocal nodes
+        nodes += 1
+        supported(nodes <= 20000 and len(stack) < 128, "standalone SVG XML complexity")
+        supported(not stack or stack[-1] != "style", "unsupported standalone SVG style child")
+        namespace, _, local = name.rpartition("}")
+        supported(namespace == SVG_NAMESPACE and local in SVG_ELEMENTS, "unsupported standalone SVG element")
+        supported(bool(stack) or local == "svg", "standalone SVG root")
+        for key, value in attributes.items():
+            ns, _, attribute = key.rpartition("}")
+            supported(not attribute.lower().startswith("on"), "standalone SVG event handler")
+            supported(not ns or (ns == XLINK_NAMESPACE and attribute == "href")
+                      or (ns == XML_NAMESPACE and attribute in {"lang", "space"}), "unsupported standalone SVG attribute namespace")
+            supported(attribute.lower() not in {"src", "base", "data"}, "standalone SVG resource attribute")
+            if attribute.lower() == "href":
+                supported(SVG_FRAGMENT.fullmatch(value.strip()) is not None, "external standalone SVG reference")
+            check_svg_css(value)
+        if local in {"animate", "animateTransform", "set"}:
+            supported(attributes.get("attributeName") in SVG_ANIMATED_ATTRIBUTES, "unsupported standalone SVG animation target")
+        if local == "style":
+            supported(attributes.get("type", "text/css").lower() == "text/css", "standalone SVG style type")
+            styles.append([])
+        stack.append(local)
+
+    def characters(value):
+        if stack and stack[-1] == "style":
+            styles[-1].append(value)
+
+    def end(name):
+        if stack.pop() == "style":
+            check_svg_css("".join(styles.pop()))
+
+    parser.XmlDeclHandler = declaration
+    parser.StartDoctypeDeclHandler = forbidden
+    parser.EntityDeclHandler = forbidden
+    parser.ExternalEntityRefHandler = forbidden
+    parser.ProcessingInstructionHandler = forbidden
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(text, True)
+    except expat.ExpatError as error:
+        raise Unsupported("malformed standalone SVG XML") from error
+    supported(nodes > 0, "missing standalone SVG root")
+
+
 def adaptation(entry, available):
     text = entry.decode("utf-8")
     parser = EntryParser(text)
@@ -246,15 +350,19 @@ def validate_original_package(raw, run_id=None, descriptor=None):
     require(type(package["version"]) is int and package["version"] == 1, "package version")
     relative(package["run_id"])
     require("/" not in package["run_id"] and (run_id is None or package["run_id"] == run_id), "package run binding")
-    require(package["entrypoint"] == "index.html", "package entrypoint")
+    entrypoint = package["entrypoint"]
+    is_svg = isinstance(entrypoint, str) and svg_entrypoint([entrypoint]) is not None
+    require(entrypoint == "index.html" or is_svg, "package entrypoint")
     files = package["files"]
-    require(isinstance(files, dict) and 1 <= len(files) <= MAX_FILES and "index.html" in files, "package files")
+    require(isinstance(files, dict) and 1 <= len(files) <= MAX_FILES and entrypoint in files, "package files")
+    if is_svg:
+        require(set(files) == {entrypoint} and package["missing"] == [], "standalone SVG files/dependencies")
     decoded = {}
     for path, info in files.items():
         relative(path)
-        require(path == "index.html" or Path(path).suffix in {".js", ".css"}, "unexpected packaged path")
+        require(path == entrypoint if is_svg else path == "index.html" or Path(path).suffix in {".js", ".css"}, "unexpected packaged path")
         require(isinstance(info, dict) and set(info) == {"mime", "size", "sha256", "base64"}, "file schema")
-        require(info["mime"] == MIMES.get(Path(path).suffix), "file MIME")
+        require(info["mime"] == MIMES.get(Path(path).suffix.lower() if is_svg else Path(path).suffix), "file MIME")
         require(type(info["size"]) is int and 0 <= info["size"] <= MAX_ORIGINAL_BYTES, "raw file size")
         data = decode_base64(info["base64"])
         require(len(data) == info["size"] and digest(data) == info["sha256"], "raw file integrity")
@@ -265,19 +373,27 @@ def validate_original_package(raw, run_id=None, descriptor=None):
             check_js(text)
         decoded[path] = data
     adapter = package["adaptation"]
-    require(isinstance(adapter, dict) and set(adapter) == {"version", "head_offset", "patches"}
-            and type(adapter["version"]) is int and adapter["version"] == 1
-            and type(adapter["head_offset"]) is int and isinstance(adapter["patches"], list), "adaptation schema")
-    for patch in adapter["patches"]:
-        require(isinstance(patch, dict) and set(patch) == {"start", "end", "path", "attribute", "original"}
-                and type(patch["start"]) is int and type(patch["end"]) is int
-                and isinstance(patch["path"], str) and isinstance(patch["attribute"], str)
-                and isinstance(patch["original"], str), "patch schema")
-    expected, missing = adaptation(decoded["index.html"], files)
-    require(adapter == expected and package["missing"] == missing, "adaptation/missing mismatch")
-    require(set(files) == {"index.html"} | {patch["path"] for patch in expected["patches"]}, "unreferenced packaged file")
+    if is_svg:
+        require(isinstance(adapter, dict) and set(adapter) == {"version", "protocol"}
+                and type(adapter["version"]) is int and adapter["version"] == 1
+                and adapter["protocol"] == SVG_PROTOCOL, "standalone SVG adaptation schema")
+        check_svg(decoded[entrypoint])
+        missing = []
+    else:
+        require(isinstance(adapter, dict) and set(adapter) == {"version", "head_offset", "patches"}
+                and type(adapter["version"]) is int and adapter["version"] == 1
+                and type(adapter["head_offset"]) is int and isinstance(adapter["patches"], list), "adaptation schema")
+        for patch in adapter["patches"]:
+            require(isinstance(patch, dict) and set(patch) == {"start", "end", "path", "attribute", "original"}
+                    and type(patch["start"]) is int and type(patch["end"]) is int
+                    and isinstance(patch["path"], str) and isinstance(patch["attribute"], str)
+                    and isinstance(patch["original"], str), "patch schema")
+        expected, missing = adaptation(decoded[entrypoint], files)
+        require(adapter == expected and package["missing"] == missing, "adaptation/missing mismatch")
+        require(set(files) == {"index.html"} | {patch["path"] for patch in expected["patches"]}, "unreferenced packaged file")
     if descriptor is not None:
-        require(descriptor["entry_sha256"] == digest(decoded["index.html"]) and descriptor["missing"] == missing, "descriptor entry/missing binding")
+        require(descriptor["entrypoint"] == entrypoint and descriptor["entry_sha256"] == digest(decoded[entrypoint])
+                and descriptor["missing"] == missing, "descriptor entry/missing binding")
         info = descriptor["package"]
         require(info is not None and info["sha256"] == digest(raw) and info["size"] == len(raw), "descriptor package integrity")
     return package
@@ -294,7 +410,13 @@ def validate_original_descriptor(descriptor, transport):
     if descriptor["status"] == "no_entrypoint":
         require(descriptor["entrypoint"] is None and descriptor["entry_sha256"] is None and not missing, "absent entrypoint metadata")
     else:
-        require(descriptor["entrypoint"] == "index.html" and isinstance(descriptor["entry_sha256"], str) and SHA.fullmatch(descriptor["entry_sha256"]), "entry descriptor")
+        entrypoint = descriptor["entrypoint"]
+        is_svg = isinstance(entrypoint, str) and svg_entrypoint([entrypoint]) is not None
+        require(entrypoint == "index.html" or is_svg, "entry descriptor path")
+        relative(entrypoint)
+        require(isinstance(descriptor["entry_sha256"], str) and SHA.fullmatch(descriptor["entry_sha256"]), "entry descriptor")
+        if is_svg:
+            require(not missing and descriptor["status"] != "missing_dependencies", "standalone SVG dependencies")
     ready = descriptor["status"] in {"ready", "missing_dependencies"}
     require((descriptor["package"] is not None) == ready, "status/package mismatch")
     if ready:
@@ -377,7 +499,9 @@ def build_originals(runs, archive_root, audit):
         descriptor = {"status": "no_entrypoint", "entrypoint": None, "entry_sha256": None,
                       "missing": [], "policy": "opaque-srcdoc-v1", "package": None}
         originals[run_id] = descriptor
-        if "output/index.html" not in registered:
+        available = {path.removeprefix("output/") for path, item in registered.items() if path.startswith("output/") and item.get("kind") == "output"}
+        entrypoint = "index.html" if "output/index.html" in registered else svg_entrypoint(available)
+        if entrypoint is None:
             continue
 
         def read_output(path):
@@ -393,15 +517,19 @@ def build_originals(runs, archive_root, audit):
                 require(len(matching) == 1 and matching[0].get("size") == len(raw) and matching[0].get("sha256") == digest(raw), "generation artifact mismatch")
             return raw
 
-        entry = read_output("index.html")
-        descriptor.update(status="unsupported", entrypoint="index.html", entry_sha256=digest(entry))
-        available = {path.removeprefix("output/") for path, item in registered.items() if path.startswith("output/") and item.get("kind") == "output"}
+        entry = read_output(entrypoint)
+        descriptor.update(status="unsupported", entrypoint=entrypoint, entry_sha256=digest(entry))
+        is_svg = entrypoint != "index.html"
         try:
-            adapter, missing = adaptation(entry, available)
+            if is_svg:
+                check_svg(entry)
+                adapter, missing, selected = {"version": 1, "protocol": SVG_PROTOCOL}, [], {entrypoint}
+            else:
+                adapter, missing = adaptation(entry, available)
+                selected = {"index.html"} | {patch["path"] for patch in adapter["patches"]}
             descriptor["missing"] = missing
-            selected = {"index.html"} | {patch["path"] for patch in adapter["patches"]}
             supported(len(selected) <= MAX_FILES, "too many original files")
-            raw_files = {path: entry if path == "index.html" else read_output(path) for path in sorted(selected)}
+            raw_files = {path: entry if path == entrypoint else read_output(path) for path in sorted(selected)}
             decisions = []
             for path, raw in raw_files.items():
                 review = audit["files"].get(run_id + "/" + path)
@@ -419,9 +547,9 @@ def build_originals(runs, archive_root, audit):
                     check_css(text)
                 if path.endswith(".js"):
                     check_js(text)
-                files[path] = {"mime": MIMES[Path(path).suffix], "size": len(raw), "sha256": digest(raw),
+                files[path] = {"mime": MIMES[Path(path).suffix.lower() if is_svg else Path(path).suffix], "size": len(raw), "sha256": digest(raw),
                                "base64": base64.b64encode(raw).decode("ascii")}
-            package = {"version": 1, "run_id": run_id, "entrypoint": "index.html", "files": files,
+            package = {"version": 1, "run_id": run_id, "entrypoint": entrypoint, "files": files,
                        "adaptation": adapter, "missing": missing}
             raw = encode_json(package)
             supported(len(raw) <= MAX_PACKAGE_BYTES, "original package too large")

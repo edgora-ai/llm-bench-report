@@ -121,6 +121,11 @@ def stage_static(bundle: Path, directory: Path, title: str, note: str, source_ro
                     "点击“运行原作”后在不透明源沙箱中执行原程序；不是视频回放。"
                     "原文件字节不变，执行文档经过隔离与资源装载适配。"
                     "沙箱限制下载、存储及常规外联，不提供容器级断网或资源配额。")
+    if manifest["version"] == 3:
+        preview_note = preview_note.replace(
+            "点击“运行原作”后在不透明源沙箱中执行原程序；不是视频回放。",
+            "可见卡片自动在不透明源沙箱中运行已审核原作；不是视频回放。"
+            "“运行原作”暂停/继续内联预览，“放大原作”打开隔离预览弹窗。")
     readme.write_text(readme.read_text(encoding="utf-8").replace(
         "[项目源码与复现说明]", preview_note + "\n\n"
         "[下载离线完整版](offline.html)（自包含，首次下载较大）\n\n[项目源码与复现说明]").replace(

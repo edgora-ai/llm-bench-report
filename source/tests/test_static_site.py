@@ -528,6 +528,29 @@ class StaticSiteV2Tests(unittest.TestCase):
         self.assertNotIn("<iframe", html)
         self.assertIn(self.runtime.read_text() + "\n" + self.legacy.viewer.read_text(), html)
 
+    def test_v2_standalone_svg_uses_existing_original_json_role(self):
+        from test_originals import SVG_SOURCE
+        self.original.files = {"index.svg": SVG_SOURCE}
+        self.original.register(generation=True)
+        self.original.audit["files"] = {key.replace("failed-run/", "r1/"): value for key, value in self.original.audit["files"].items()}
+        stats = self.upgrade()
+        online, inline = self.audit(), self.audit("offline.html")
+        descriptor = online["originals"]["r1"]
+        self.assertEqual(descriptor["entrypoint"], "index.svg")
+        self.assertEqual(descriptor["status"], "ready")
+        raw = (self.destination / descriptor["package"]["path"]).read_bytes()
+        package = make_site.validate_original_package(raw, "r1", descriptor)
+        self.assertEqual(base64.b64decode(package["files"]["index.svg"]["base64"]), SVG_SOURCE)
+        self.assertEqual(base64.b64decode(inline["originals"]["r1"]["package"]["base64"]), raw)
+        manifest = make_site.verify_site(self.destination, self.legacy.viewer)
+        info = manifest["files"][descriptor["package"]["path"]]
+        self.assertEqual(info["mime"], "application/json")
+        self.assertEqual(info["role"], "original")
+        self.assertEqual(stats["original_packages"], 1)
+        self.assertEqual(stats["original_files"], 1)
+        self.assertFalse(any(path.endswith(".svg") for path in manifest["files"]))
+        self.assertNotIn("<svg", (self.destination / "index.html").read_text())
+
     def test_v2_repeat_deterministic_and_v2_input_upgrade(self):
         stats = self.upgrade()
         self.assertEqual(self.upgrade(), stats)

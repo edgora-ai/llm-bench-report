@@ -34,7 +34,7 @@ require = v2.require
 PROFILES = v2.PERFORMANCE_PROFILES
 VIEWPORTS = v2.PERFORMANCE_VIEWPORTS
 FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'trend', 'blind', 'scores')
-CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/index.html', 'web/styles.css',
+CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/preview-runtime.js', 'web/index.html', 'web/styles.css',
     'web/public-gallery.html', 'web/public-gallery.css', 'web/public-gallery.js',
     'tests/make_gallery.py', 'tests/test_gallery_site.py', 'tests/test_public_gallery_performance.py',
     'tests/verify_public_gallery.py', 'tests/verify_public_snapshot.py'))
@@ -69,7 +69,7 @@ def arguments(argv=None):
     p.add_argument('--trust-root', required=True, type=Path, help='Frozen independent baseline checkout, not candidate site')
     p.add_argument('--baseline-lock', type=Path, default=Path('/tmp/bench-gallery-baseline.json'))
     p.add_argument('--new-v2-baseline-lock', type=Path, help='Explicit independently supplied JSON {index_sha256, manifest_sha256}; overrides only v2 data pins, never frozen programs or budgets')
-    p.add_argument('--candidate-source-lock', type=Path, help='Independent final operator JSON {sha256:{11 planned relative paths:digest}}; mandatory for candidate verification, outside source/input bundles')
+    p.add_argument('--candidate-source-lock', type=Path, help='Independent final operator JSON {sha256:{12 planned relative paths:digest}}; mandatory for candidate verification including runtime, outside source/input bundles')
     p.add_argument('--candidate-viewer-script', type=Path, help='Current app.js named in the independent candidate-source-lock, not the frozen viewer')
     p.add_argument('--source-root', type=Path, default=ROOT, help='Reviewed current project source; never the generated candidate')
     p.add_argument('--gallery-bootstrap', type=Path, default=ROOT / 'web/public-gallery.js')
@@ -434,7 +434,8 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
             buttons = [b for b in parsed.buttons if b.get(attr) == row['id']]
             require(len(buttons) == 1, 'Missing/duplicate server card action: ' + attr)
             if attr in ('data-run-original', 'data-zoom-run'):
-                disabled = not row['image'] if attr == 'data-zoom-run' else row['original']['status'] not in ('ready', 'missing_dependencies')
+                runnable = row['original']['status'] in ('ready', 'missing_dependencies')
+                disabled = not (row['image'] or runnable) if attr == 'data-zoom-run' else not runnable
                 require(('disabled' in buttons[0]) == disabled, 'Server disabled state differs')
     return seed
 
@@ -476,7 +477,7 @@ def candidate_sources(args, report):
     raw = path.read_bytes()
     lock = json.loads(raw, object_pairs_hook=unique)
     require(isinstance(lock, dict) and set(lock) == {'sha256'} and isinstance(lock['sha256'], dict)
-            and set(lock['sha256']) == CANDIDATE_SOURCES, 'Candidate source lock must name exactly the eleven planned sources')
+            and set(lock['sha256']) == CANDIDATE_SOURCES, 'Candidate source lock must name exactly the twelve planned sources')
     sources = {}
     for relative, expected in lock['sha256'].items():
         require(isinstance(expected, str) and SHA.fullmatch(expected), 'Invalid candidate source digest')
@@ -519,20 +520,22 @@ def load_sources(args, report):
     spec.loader.exec_module(frozen)
     approved = candidate_sources(args, report)
     viewer = safe_read(args.trust_root, 'web/app.js')
-    runtime = safe_read(args.trust_root, 'web/preview-runtime.js')
-    require(safe_read(args.source_root, 'web/preview-runtime.js') == runtime, 'Runtime changed outside approved scope')
+    frozen_runtime = safe_read(args.trust_root, 'web/preview-runtime.js')
+    runtime = approved['web/preview-runtime.js']
     old_manifest, manifest = checked_manifest(args.baseline_site, 2), checked_manifest(args.site, 3)
     old_html = safe_read(args.baseline_site, 'index.html')
-    old_data = frozen.audit_html(old_html.decode(), viewer.decode(), runtime.decode(), descriptors_only=True)
-    old_inline = v2.audit_html(safe_read(args.baseline_site, 'offline.html').decode(), viewer.decode(), runtime.decode())
+    old_data = frozen.audit_html(old_html.decode(), viewer.decode(), frozen_runtime.decode(), descriptors_only=True)
+    old_inline = frozen.audit_html(safe_read(args.baseline_site, 'offline.html').decode(), viewer.decode(), frozen_runtime.decode())
     full_paths = [name for name, info in manifest['files'].items() if info.get('role') == 'viewer']
     require(len(full_paths) == 1, 'Exactly one trusted full viewer required')
     full_path, runtime_path = full_paths[0], 'viewer/' + digest(runtime) + '.js'
-    require(set(manifest['files']) == set(old_manifest['files']) | {full_path, runtime_path}, 'Only two viewer namespace assets may be appended')
+    inherited = set(old_manifest['files']) - {'index.html', 'offline.html'}
+    require(set(manifest['files']) == inherited | {'index.html', 'offline.html', full_path, runtime_path},
+            'Candidate must contain exactly inherited assets, current documents, viewer and runtime')
     for name, meta in old_manifest['files'].items():
         if name not in ('index.html', 'offline.html'):
             require(same(manifest['files'][name], meta) and safe_read(args.site, name) == safe_read(args.baseline_site, name), 'Inherited asset changed: ' + name)
-    require(safe_read(args.site, runtime_path) == runtime, 'Frozen preview runtime bytes changed')
+    require(safe_read(args.site, runtime_path) == runtime, 'Candidate preview runtime differs from locked current source')
     full_html = safe_read(args.site, full_path)
     current_data = v2.audit_html(full_html.decode(), approved['web/app.js'].decode(), runtime.decode(), descriptors_only=True)
     require(same({k: value for k, value in current_data.items() if k != 'offline'},
@@ -554,24 +557,43 @@ def load_sources(args, report):
                          full_info, runtime_info, runtime + b'\n' + approved['web/app.js'], score_source=args.score_source)
     require(len(html) <= 102400 and len(gzip.compress(html, compresslevel=6, mtime=0)) <= 25600, 'Initial HTML decoded/gzip budget exceeded')
     report['audit'] = {'baseline_html_sha256': digest(old_html), 'full_html_sha256': digest(full_html), 'runtime_sha256': digest(runtime),
+                       'frozen_runtime_sha256': digest(frozen_runtime), 'current_runtime_sha256': digest(runtime),
                        'frozen_v2_helper_sha256': digest(helper_path.read_bytes()), 'current_v2_helper_sha256': digest(approved['tests/verify_public_snapshot.py']),
                        'current_html_sha256': digest(html), 'decoded_html_bytes': len(html), 'gzip_html_bytes': len(gzip.compress(html, compresslevel=6, mtime=0)),
                        'exact_data_equality_including_offline': True, 'run_ids': [r['id'] for r in seed['runs']], 'counts': seed['counts'],
                        'candidate_files': len(manifest['files']), 'baseline_files': len(old_manifest['files'])}
-    return {'seed': seed, 'data': current_data, 'baseline_data': old_data, 'manifest': manifest, 'baseline_manifest': old_manifest}
+    return {'seed': seed, 'data': current_data, 'baseline_data': old_data, 'manifest': manifest,
+            'baseline_manifest': old_manifest, 'frozen_runtime': frozen_runtime}
+
+
+def accepts_gzip(header):
+    preferences = {}
+    for entry in header.lower().split(','):
+        coding, *parameters = entry.split(';')
+        coding = coding.strip()
+        if coding not in ('gzip', '*'):
+            continue
+        quality = 1.0
+        for parameter in parameters:
+            key, separator, value = parameter.strip().partition('=')
+            if key == 'q':
+                quality = float(value) if separator and re.fullmatch(r'(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)', value) else 0.0
+        preferences[coding] = min(preferences.get(coding, quality), quality)
+    return preferences.get('gzip', preferences.get('*', 0.0)) > 0
 
 
 @contextmanager
 def serve_gallery(root, manifest, *, delays=None, fail_once=None):
     """Real bounded static HTTP. Delays/one-shot 503s are server-side lifecycle probes.
 
-    Entry and full viewer gzip bytes are prepared outside the timed request.
+    HTML, SDK JavaScript and original JSON gzip bytes are prepared outside the timed request.
     Every request is rehashed; no route, abort, or browser API substitution.
     """
     delays, failures = dict(delays or {}), set(fail_once or ())
     payloads = {name: safe_read(root, name) for name in manifest['files']}
     encoded = {name: gzip.compress(raw, compresslevel=6, mtime=0) for name, raw in payloads.items()
-               if manifest['files'][name]['mime'] == 'text/html' and name != 'offline.html'}
+               if manifest['files'][name]['mime'].split(';', 1)[0] in
+               ('text/html', 'text/javascript', 'application/javascript', 'application/json') and name != 'offline.html'}
     requests, lock = [], threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -597,7 +619,7 @@ def serve_gallery(root, manifest, *, delays=None, fail_once=None):
             if raw != payloads[name] or len(raw) != item['size'] or digest(raw) != item['sha256']:
                 self.send_error(409, 'Audited bytes changed')
                 return
-            body = encoded.get(name) if 'gzip' in self.headers.get('Accept-Encoding', '').lower() else None
+            body = encoded.get(name) if accepts_gzip(self.headers.get('Accept-Encoding', '')) else None
             zipped = body is not None
             body = body if zipped else raw
             self.send_response(200)
@@ -631,7 +653,7 @@ def serve_gallery(root, manifest, *, delays=None, fail_once=None):
         worker.join(timeout=5)
 
 
-def validate_requests(requests, url, manifest, seed=None, *, cold=False, viewport=None, allow_preview=False):
+def validate_requests(requests, url, manifest, seed=None, *, cold=False, viewport=None, allow_preview=True, preview_ids=()):
     names = []
     base = urlsplit(url)
     prefix = unquote(base.path)
@@ -650,16 +672,29 @@ def validate_requests(requests, url, manifest, seed=None, *, cold=False, viewpor
         names.append(name)
     if cold:
         thumbs = {r['image']['thumb'] for r in seed['runs'] if r['image']}
-        require(all(name == 'index.html' or name in thumbs for name in names), 'Cold viewer/runtime/original/video/full-image request')
+        limit = PAGE_SIZE if viewport == 'desktop' else PHONE_PAGE_SIZE
+        require(len(set(preview_ids)) <= limit, 'Too many initial inline preview intents')
+        rows = {r.get('id'): r for r in seed['runs']}
+        packages = set()
+        for run_id in preview_ids:
+            row = rows.get(run_id)
+            require(row is not None and row.get('original', {}).get('status') in ('ready', 'missing_dependencies'),
+                    'Initial preview is not an eligible concrete card')
+            packages.add(row['original']['package']['path'])
+        runtime = seed.get('runtime', {}).get('path') if packages else None
+        allowed = {'index.html'} | thumbs | packages | ({runtime} if runtime else set())
+        require(all(name in allowed for name in names), 'Cold full-viewer/video/full-image/nonvisible-original request')
+        require(runtime is None or names.count(runtime) <= 1, 'Initial runtime fetched more than once')
+        require(all(names.count(path) <= 1 for path in packages), 'Initial original fetched more than once')
         fetched = [name for name in names if name in thumbs]
-        require(1 <= len(fetched) <= (2 if viewport == 'desktop' else 1), 'Actual initial thumbnail request budget differs')
+        require(1 <= len(fetched) <= limit, 'Actual initial thumbnail request budget differs')
     return names
 
 
 # Reuse the old longtask observer, but replace its image timestamp with an explicit
 # decoded, visible, content-addressed thumbnail. Never count SVG/data placeholders.
 GALLERY_OBSERVER = v2.PERFORMANCE_OBSERVER + """
-(() => { window.__galleryMetrics={readable:null,image:null,taskResponse:null};
+(() => { window.__galleryMetrics={readable:null,image:null,inline:null,taskResponse:null};
  const visible=e=>{if(!e||!e.getClientRects().length)return false;let r=e.getBoundingClientRect();
    for(let n=e;n;n=n.parentElement){let s=getComputedStyle(n);if(s.visibility==='hidden'||s.display==='none'||Number(s.opacity)===0)return false;}
    return r.width>0&&r.height>0&&r.top<innerHeight&&r.bottom>0&&r.left<innerWidth&&r.right>0;};
@@ -676,7 +711,11 @@ GALLERY_OBSERVER = v2.PERFORMANCE_OBSERVER + """
      i.__decodePending=true;i.decode().then(()=>requestAnimationFrame(()=>{
        if(m.image===null&&visible(i)&&i.complete&&i.naturalWidth>0)m.image={ms:performance.now(),src:i.currentSrc,run_id:row.id};
      })).catch(e=>{i.__decodeError=String(e);});
-   }requestAnimationFrame(tick);};requestAnimationFrame(tick);
+   }
+   if(m.inline===null)for(const cover of document.querySelectorAll('#public-grid .work-cover[data-preview-state="loaded"]')){
+     if(visible(cover)&&cover.querySelector('iframe')){m.inline={ms:performance.now(),run_id:cover.closest('[data-run-id]').dataset.runId};break;}
+   }
+   requestAnimationFrame(tick);};requestAnimationFrame(tick);
 })();
 """
 
@@ -687,14 +726,14 @@ def two_frames(page):
 
 def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
     profile = PROFILES[profile_name]
-    context = browser.new_context(viewport=VIEWPORTS[viewport], color_scheme='light', service_workers='block')
+    context = browser.new_context(viewport=VIEWPORTS[viewport], color_scheme='light', service_workers='allow')
     context.set_default_timeout(args.timeout_ms)
     requests, errors = [], []
     try:
         context.add_init_script(GALLERY_OBSERVER)
         page = context.new_page()
         page.on('request', lambda r: requests.append({'url': r.url, 'method': r.method, 'type': r.resource_type}))
-        page.on('pageerror', lambda error: errors.append(str(error)))
+        errors = observe_browser_errors(context, page, args)
         page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
         session = context.new_cdp_session(page)
         session.send('Network.enable')
@@ -707,12 +746,22 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
         page.wait_for_function('window.__galleryMetrics.readable!==null&&window.__galleryMetrics.image!==null')
         page.wait_for_load_state('networkidle', timeout=60000)
         cold = list(requests)
-        names = validate_requests(cold, url, sources['manifest'], sources['seed'], cold=True, viewport=viewport)
+        preview_ids = page.locator('#public-grid .work-cover').evaluate_all('''covers=>covers.filter(e=>{
+          const r=e.getBoundingClientRect();return r.bottom> -80&&r.top<innerHeight+80&&r.width>0;
+        }).map(e=>e.closest('[data-run-id]').dataset.runId)''')
+        preview_ids = [run_id for run_id in preview_ids if next(r for r in sources['seed']['runs'] if r['id'] == run_id)['original']['status'] in ('ready', 'missing_dependencies')]
+        if preview_ids:
+            page.wait_for_function('window.__galleryMetrics.inline!==null')
+        names = validate_requests(cold, url, sources['manifest'], sources['seed'], cold=True,
+                                  viewport=viewport, preview_ids=preview_ids)
         metrics = page.evaluate('''()=>{let n=performance.getEntriesByType('navigation')[0],m=window.__galleryMetrics;
           return {ttfb_ms:n.responseStart,server_ttfb_ms:n.responseStart-n.requestStart,readable_ms:m.readable,
-            first_actually_visible_image_ms:m.image.ms,first_visible_image:m.image,dom_nodes:document.querySelectorAll('*').length,
+            first_actually_visible_image_ms:m.image.ms,first_visible_image:m.image,
+            first_inline_original_ms:m.inline?.ms??null,first_inline_original:m.inline,
+            dom_nodes:document.querySelectorAll('*').length,
             longtasks:window.__loadMetrics.longtasks,document_encoded_bytes:n.encodedBodySize,document_decoded_bytes:n.decodedBodySize,
             transfer_bytes:n.transferSize+performance.getEntriesByType('resource').reduce((s,r)=>s+r.transferSize,0),
+            automatic_preview_transfer_bytes:performance.getEntriesByType('resource').filter(r=>/\\/(originals|viewer)\\//.test(new URL(r.name).pathname)).reduce((s,r)=>s+r.transferSize,0),
             first_controls:['#public-task-tabs button[data-task-id]','#public-purpose','#public-models>summary','#public-grid .evidence-card[data-run-id]'].map(s=>{
               let e=document.querySelector(s),r=e.getBoundingClientRect();return {selector:s,label:e.textContent.slice(0,100),top:r.top,bottom:r.bottom,disabled:!!e.disabled};}),
             scroll_x:scrollX,scroll_y:scrollY};}''')
@@ -733,7 +782,9 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
         control = page.locator(f'#public-task-tabs button[data-task-id="{target}"]')
         require(control.get_attribute('aria-selected') == 'true' or control.get_attribute('aria-pressed') == 'true', 'Task control state did not change')
         validate_requests(requests, url, sources['manifest'])
-        require(not any('/viewer/' in r['url'] or '/originals/' in r['url'] for r in requests), 'Basic task control loaded full viewer/original')
+        no_full(requests, sources['seed'])
+        require(page.locator('#public-grid .work-preview-host iframe').count() <= len(expected),
+                'Task change left extra inline contexts')
         require(not errors, 'Gallery errors: ' + '; '.join(errors))
         metrics.update(version='current', profile=profile_name, viewport=viewport, repeat=repeat, interactive_ms=interactive,
                        task_control_response_ms=task_ms, cold_requests=cold, cold_request_paths=names,
@@ -757,7 +808,7 @@ BASELINE_OBSERVER = v2.PERFORMANCE_OBSERVER + """
 
 
 def baseline_sample(browser, url, sources, args, profile, viewport, repeat):
-    context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport)
+    context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport, baseline=True)
     try:
         context.add_init_script(BASELINE_OBSERVER)
         response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
@@ -798,7 +849,7 @@ def baseline_sample(browser, url, sources, args, profile, viewport, repeat):
 
 def summary(samples):
     result = v2.performance_summary(samples)
-    for key in ('task_control_response_ms', 'document_encoded_bytes', 'document_decoded_bytes', 'full_viewer_latency_ms', 'primary_original_latency_ms'):
+    for key in ('task_control_response_ms', 'document_encoded_bytes', 'document_decoded_bytes', 'full_viewer_latency_ms', 'primary_original_latency_ms', 'first_inline_original_ms'):
         values = [s[key] for s in samples if s.get(key) is not None]
         result[key] = {'median': round(median(values), 2) if values else None, 'observed': len(values)}
     return result
@@ -841,7 +892,366 @@ def paired_performance(browser, urls, sources, args, report):
     require(all(c['pass'] for c in comparisons), 'Measured performance target/regression limit not met')
 
 
-def observed_context(browser, url, args, *, profile=None, viewport='desktop', original=False):
+def catalog_audit_pins(sources, *, baseline=False):
+    """Freeze load_sources' verified data/manifest/runtime, before any browser or later disk read."""
+    data = sources['baseline_data'] if baseline else sources['data']
+    pins = {'mode': 'baseline-frozen-v2' if baseline else 'candidate-v3',
+            'manifest': sources['baseline_manifest'] if baseline else sources['manifest'],
+            'originals': data['originals'], 'run_ids': [run['id'] for run in data['runs']]}
+    if baseline:
+        import base64
+        frozen = sources['frozen_runtime']
+        require(digest(frozen) == FROZEN_PROGRAMS['web/preview-runtime.js'], 'Catalog frozen runtime pin differs')
+        pins['frozen_runtime_base64'] = base64.b64encode(frozen).decode()
+    else:
+        pins['runtime'] = sources['seed']['runtime']
+    return json.dumps(pins, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+class OriginalScriptCatalog:
+    """Model source catalog anchored to immutable load_sources audit pins, never a new manifest."""
+    def __init__(self, root, audit_pins):
+        import base64
+        require(isinstance(audit_pins, str), 'Native catalog requires immutable audited source pins')
+        pins = json.loads(audit_pins)
+        manifest, originals = pins['manifest'], pins['originals']
+        require(same(json.loads(safe_read(root, MANIFEST)), manifest), 'Manifest changed after independent audit')
+        inventory(root, manifest['files'])
+        require(len(set(pins['run_ids'])) == len(pins['run_ids']) and set(originals) == set(pins['run_ids']),
+                'Native catalog audited original/run census differs')
+        runtime_paths = [path for path, meta in manifest['files'].items() if meta.get('role') == 'runtime']
+        if pins['mode'] == 'candidate-v3':
+            runtime = pins['runtime']
+            require(manifest['version'] == 3 and runtime_paths == [runtime['path']],
+                    'Native catalog requires exactly the audited locked v3 runtime')
+            meta = manifest['files'][runtime['path']]
+            require(meta['sha256'] == runtime['sha256'] == Path(runtime['path']).stem and meta['size'] == runtime['size'],
+                    'Native catalog runtime descriptor differs from audited manifest')
+            raw = safe_read(root, runtime['path'])
+            require(len(raw) == runtime['size'] and digest(raw) == runtime['sha256'], 'Native catalog audited runtime bytes changed')
+        else:
+            require(pins['mode'] == 'baseline-frozen-v2' and manifest['version'] == 2 and not runtime_paths,
+                    'Native catalog baseline must preserve audited v2 inventory')
+            raw = base64.b64decode(pins['frozen_runtime_base64'], validate=True)
+            require(digest(raw) == FROZEN_PROGRAMS['web/preview-runtime.js'], 'Native catalog frozen runtime bytes differ')
+        self.runs, self.script_hashes, self.trusted_script_hashes = {}, set(), {digest(raw)}
+        # The pinned SDK serializes this exact trusted function into the model
+        # iframe. Even byte-identical model delivery cannot whitelist it.
+        diagnostics = re.search(r'(function originalDiagnostics\(\) \{.*?\n  \})\n', raw.decode(), re.S)
+        require(diagnostics is not None, 'Native catalog cannot identify trusted SDK diagnostics')
+        self.trusted_script_hashes.add(digest(('(' + diagnostics[1] + ')();').encode()))
+        package_paths = [descriptor['package']['path'] for descriptor in originals.values() if descriptor.get('package')]
+        require(len(package_paths) == len(set(package_paths)) and set(package_paths) ==
+                {path for path, meta in manifest['files'].items() if meta.get('role') == 'original'},
+                'Native catalog package census differs from audited original descriptors')
+        class Scripts(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=False)
+                self.current, self.bodies = None, []
+            def handle_starttag(self, tag, attrs):
+                if tag == 'script' and not dict(attrs).get('src'):
+                    self.current = []
+            def handle_data(self, text):
+                if self.current is not None:
+                    self.current.append(text)
+            def handle_endtag(self, tag):
+                if tag == 'script' and self.current is not None:
+                    self.bodies.append(''.join(self.current))
+                    self.current = None
+        for run_id, descriptor in originals.items():
+            if descriptor.get('package') is None:
+                continue
+            expected = descriptor['package']
+            path, meta = expected['path'], manifest['files'][expected['path']]
+            require(meta['sha256'] == expected['sha256'] == Path(path).stem and meta['size'] == expected['size'],
+                    'Native catalog package differs from audited run descriptor: ' + run_id)
+            raw = safe_read(root, path)
+            require(len(raw) == expected['size'] and digest(raw) == expected['sha256'],
+                    'Native exception audited package bytes changed: ' + path)
+            package = json.loads(raw)
+            require(package['version'] == 1 and package['run_id'] == run_id and run_id not in self.runs and
+                    package['entrypoint'] == descriptor['entrypoint'] and same(package['missing'], descriptor['missing']) and
+                    package['files'][package['entrypoint']]['sha256'] == descriptor['entry_sha256'],
+                    'Native exception catalog audited run/entry binding differs: ' + run_id)
+            sources = {}
+            for filename, file in package['files'].items():
+                body = base64.b64decode(file['base64'], validate=True)
+                require(len(body) == file['size'] and digest(body) == file['sha256'],
+                        'Native exception catalog file integrity: ' + filename)
+                text = body.decode('utf-8')
+                scripts = [text] if file['mime'] == 'text/javascript' else []
+                if file['mime'] == 'text/html':
+                    parser = Scripts(); parser.feed(text); parser.close()
+                    scripts += parser.bodies
+                for script in scripts:
+                    if script:
+                        sources[digest(script.encode('utf-8'))] = {'file': filename, 'file_sha256': file['sha256'],
+                            'script_sha256': digest(script.encode('utf-8')), 'source': script}
+            self.runs[run_id] = {'package_path': path, 'package_sha256': digest(raw),
+                'entry_sha256': package['files'][package['entrypoint']]['sha256'], 'scripts': sources}
+            self.script_hashes.update(sources)
+
+
+def model_exception_proof(context, script, frame, shell, owner, source, catalog):
+    """No URL/message heuristics: native default context + two verified SDK owners + exact source."""
+    aux = (context or {}).get('auxData', {})
+    if not (aux.get('isDefault') is True and aux.get('type') == 'default' and context.get('uniqueId') and
+            context.get('origin') in ('://', 'null') and
+            script and script.get('executionContextId') == context.get('id') and
+            script.get('context_unique_id') == context.get('uniqueId') and frame and
+            aux.get('frameId') == frame.get('id') and shell and frame.get('parentId') == shell.get('id') and
+            frame.get('session_id') == shell.get('session_id') and owner and
+            owner.get('nodeName') == 'IFRAME' and owner.get('sandbox') == 'allow-scripts' and
+            owner.get('referrerpolicy') == 'no-referrer' and owner.get('has_srcdoc') is True):
+        return None
+    binding = shell.get('binding') or {}
+    run_id = binding.get('run_id')
+    if not (run_id in catalog.runs and binding.get('nodeName') == 'IFRAME' and
+            binding.get('sandbox') == 'allow-scripts' and binding.get('referrerpolicy') == 'no-referrer' and
+            binding.get('title') == '原作隔离预览 ' + run_id and binding.get('has_srcdoc') is True and
+            binding.get('host_direct') is True and binding.get('shell_count') == 1 and
+            binding.get('report_frame_id') and binding.get('report_frame_id') == shell.get('parentId') and
+            binding.get('host_class') in ('work-preview-host', 'preview-host')):
+        return None
+    package = catalog.runs[run_id]
+    source_hash = digest(source.encode('utf-8')) if isinstance(source, str) else None
+    match = package['scripts'].get(source_hash)
+    trusted = getattr(catalog, 'trusted_script_hashes', None)
+    if not trusted or not match or match['source'] != source or script.get('hash') != source_hash or source_hash in trusted:
+        return None
+    return {'run_id': run_id, 'package_path': package['package_path'], 'package_sha256': package['package_sha256'],
+            'entry_sha256': package['entry_sha256'], 'file': match['file'], 'file_sha256': match['file_sha256'],
+            'script_sha256': source_hash, 'context_unique_id': context['uniqueId'],
+            'frame_id': frame['id'], 'shell_frame_id': shell['id'], 'session_id': frame['session_id']}
+
+
+class BrowserErrorLedger(list):
+    """List-compatible zero-UI-error assertion; preserve every error in its receipt."""
+    def __init__(self):
+        super().__init__()
+        self.page_errors, self.native_errors, self.model_errors = [], [], []
+        self.other_errors, self.ui_errors, self.diagnostics = [], [], []
+        self.receipt = {'playwright_pageerrors': self.page_errors, 'native_exceptions': self.native_errors,
+                        'model_original_errors': self.model_errors, 'other_errors': self.other_errors,
+                        'ui_errors': self.ui_errors, 'observer_diagnostics': self.diagnostics}
+    def pageerror(self, error):
+        self.page_errors.append({'stack': error.stack or str(error), 'attribution': 'trusted-or-unknown'})
+    def append(self, message):
+        self.other_errors.append(str(message))
+    def refresh(self):
+        # Consume exact complete native descriptions one-for-one. A same-text
+        # trusted/unknown native exception still fails, and duplicates cannot
+        # inherit another event's original attribution.
+        available = {}
+        for event in self.native_errors:
+            available.setdefault(event['description'], []).append(event)
+        ui = list(self.other_errors)
+        for error in self.page_errors:
+            candidates = available.get(error['stack'], [])
+            native = candidates.pop(0) if candidates else None
+            error['attribution'] = native['attribution'] if native else 'trusted-or-unknown'
+            if native and native.get('proof'):
+                error['proof'] = native['proof']
+            if error['attribution'] != 'model-original':
+                ui.append(error['stack'])
+        ui += [event['description'] for remaining in available.values() for event in remaining
+               if event['attribution'] != 'model-original']
+        self.ui_errors[:] = ui
+        self.model_errors[:] = [event for event in self.native_errors if event['attribution'] == 'model-original']
+        list.clear(self); list.extend(self, ui)
+    def __bool__(self):
+        self.refresh()
+        return list.__len__(self) != 0
+    def __iter__(self):
+        self.refresh()
+        return list.__iter__(self)
+    def __len__(self):
+        self.refresh()
+        return list.__len__(self)
+
+
+class NativeExceptionObserver:
+    """Passive native CDP observation, including opaque OOPIF targets; never pause or intercept."""
+    HOST_BINDING = '''function(){const host=this.closest('.work-preview-host,.preview-host');
+      const card=host?.closest('.evidence-card[data-run-id],.original-preview[data-original-run]');
+      return {run_id:card?.dataset.originalRun||card?.dataset.runId,nodeName:this.nodeName,
+        sandbox:this.getAttribute('sandbox'),referrerpolicy:this.getAttribute('referrerpolicy'),
+        title:this.getAttribute('title'),has_srcdoc:this.hasAttribute('srcdoc'),
+        host_class:host?.classList.contains('work-preview-host')?'work-preview-host':host?.classList.contains('preview-host')?'preview-host':null,
+        host_direct:this.parentElement?.parentElement===host,shell_count:host?.querySelectorAll('iframe').length};}'''
+    def __init__(self, context, page, catalog, ledger):
+        self.catalog, self.ledger = catalog, ledger
+        self.session = context.new_cdp_session(page)
+        self.targets, self.contexts, self.scripts, self.frames, self.sources, self.pending = {}, {}, {}, {}, {}, {}
+        self.command_id, self.exception_evidence = 0, []
+        self.session.on('Target.attachedToTarget', self.attached)
+        self.session.on('Target.receivedMessageFromTarget', self.message)
+        self.session.on('Runtime.executionContextCreated', lambda e: self.event('', 'Runtime.executionContextCreated', e))
+        self.session.on('Runtime.exceptionThrown', lambda e: self.event('', 'Runtime.exceptionThrown', e))
+        self.session.on('Debugger.scriptParsed', lambda e: self.event('', 'Debugger.scriptParsed', e))
+        self.session.on('Page.frameAttached', lambda e: self.event('', 'Page.frameAttached', e))
+        self.session.on('Page.frameNavigated', lambda e: self.event('', 'Page.frameNavigated', e))
+        for domain in ('Page', 'Runtime', 'Debugger'):
+            self.session.send(domain + '.enable')
+        self.session.send('Debugger.setSkipAllPauses', {'skip': True})
+        self.main_frame_id = self.session.send('Page.getFrameTree')['frameTree']['frame']['id']
+        self.session.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': False})
+    def note(self, message):
+        self.ledger.diagnostics.append(str(message))
+    def send(self, sid, method, params=None, callback=None):
+        self.command_id += 1
+        identifier = self.command_id
+        if callback:
+            self.pending[(sid, identifier)] = callback
+        try:
+            self.session.send('Target.sendMessageToTarget', {'sessionId': sid,
+                'message': json.dumps({'id': identifier, 'method': method, 'params': params or {}})})
+        except Exception as error:
+            self.pending.pop((sid, identifier), None)
+            self.note(method + ': ' + str(error))
+    def attached(self, event):
+        sid, info = event['sessionId'], event['targetInfo']
+        self.targets[sid] = info
+        shell = info.get('type') == 'iframe' and info.get('parentFrameId') == self.main_frame_id
+        if shell:
+            self.frames.setdefault(info['targetId'], {}).update(
+                id=info['targetId'], parentId=self.main_frame_id, session_id=sid)
+        # Enable exception/context/script capture before any synchronous DOM owner
+        # reads: the product may destroy a failing original immediately.
+        self.send(sid, 'Runtime.enable')
+        self.send(sid, 'Page.enable')
+        self.send(sid, 'Page.getFrameTree', callback=lambda result, sid=sid: self.frame_tree(sid, result.get('frameTree')))
+        self.send(sid, 'Debugger.enable')
+        self.send(sid, 'Debugger.setSkipAllPauses', {'skip': True})
+        self.send(sid, 'Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': False})
+        if shell and not self.frames[info['targetId']].get('binding'):
+            self.bind_shell(sid)
+    def frame_tree(self, sid, tree):
+        if tree:
+            self.event(sid, 'Page.frameNavigated', {'frame': tree['frame']})
+            for child in tree.get('childFrames', []):
+                self.frame_tree(sid, child)
+    def bind_shell(self, sid):
+        self.bind_report_owner(self.targets[sid]['targetId'])
+    def bind_report_owner(self, fid):
+        try:
+            node = self.session.send('DOM.getFrameOwner', {'frameId': fid})
+            remote = self.session.send('DOM.resolveNode', {'backendNodeId': node['backendNodeId']})['object']['objectId']
+            try:
+                response = self.session.send('Runtime.callFunctionOn', {'objectId': remote,
+                    'functionDeclaration': self.HOST_BINDING, 'returnByValue': True})
+                binding = response.get('result', {}).get('value')
+                if isinstance(binding, dict):
+                    binding['report_frame_id'] = self.main_frame_id
+                    self.frames[fid]['binding'] = binding
+            finally:
+                self.session.send('Runtime.releaseObject', {'objectId': remote})
+        except Exception as error:
+            self.note('Shell owner proof unavailable: ' + str(error))
+    def message(self, event):
+        sid, message = event['sessionId'], json.loads(event['message'])
+        if 'method' in message:
+            self.event(sid, message['method'], message.get('params', {}))
+        elif (sid, message.get('id')) in self.pending:
+            callback = self.pending.pop((sid, message['id']))
+            if 'error' in message:
+                self.note('Native proof command failed: ' + str(message['error']))
+            else:
+                callback(message.get('result', {}))
+        self.reclassify()
+    def event(self, sid, method, event):
+        if method == 'Runtime.executionContextCreated':
+            item = event['context']
+            self.contexts[(sid, item['id'])] = item
+        elif method in ('Page.frameAttached', 'Page.frameNavigated'):
+            if method == 'Page.frameNavigated' and not sid:
+                # A cross-renderer report navigation resets Chromium's skip flag.
+                self.session.send('Debugger.setSkipAllPauses', {'skip': True})
+            item = event.get('frame', event)
+            fid = item.get('id') or item.get('frameId')
+            if fid:
+                previous = self.frames.setdefault(fid, {'id': fid, 'session_id': sid})
+                if sid:
+                    # Native child events supersede root discovery of the same
+                    # frame; later root events must not erase child ownership.
+                    previous['session_id'] = sid
+                previous.update({key: item[key] for key in ('parentId', 'url') if key in item})
+                if item.get('parentFrameId'):
+                    previous['parentId'] = item['parentFrameId']
+                if not sid and previous.get('parentId') == self.main_frame_id and not previous.get('binding'):
+                    self.bind_report_owner(fid)
+                shell = self.frames.get(previous.get('parentId'), {})
+                if sid and shell.get('session_id') == sid and not previous.get('owner_requested'):
+                    previous['owner_requested'] = True
+                    self.send(sid, 'DOM.getFrameOwner', {'frameId': fid},
+                        lambda result, fid=fid, sid=sid: self.owner_node(sid, fid, result))
+        elif method == 'Debugger.scriptParsed':
+            item = dict(event)
+            context = self.contexts.get((sid, item.get('executionContextId')), {})
+            item['context_unique_id'] = context.get('uniqueId')
+            self.scripts[(sid, item['scriptId'])] = item
+            # Capture a candidate script immediately, before a diagnostic may
+            # destroy its frame. Attribution still requires that run's exact
+            # source and both native frame-owner proofs below.
+            if item.get('hash') in self.catalog.script_hashes:
+                self.send(sid, 'Debugger.getScriptSource', {'scriptId': item['scriptId']},
+                    lambda result, key=(sid, item['scriptId']): self.sources.update({key: result.get('scriptSource')}))
+        elif method == 'Runtime.exceptionThrown':
+            details = event['exceptionDetails']
+            context = self.contexts.get((sid, details.get('executionContextId')))
+            description = details.get('exception', {}).get('description') or details.get('text', 'Unknown native exception')
+            record = {'description': description, 'attribution': 'trusted-or-unknown', 'native': event,
+                      'session_id': sid, 'context': context}
+            self.ledger.native_errors.append(record)
+            self.exception_evidence.append(record)
+        self.reclassify()
+    def owner_node(self, sid, fid, result):
+        if result.get('backendNodeId'):
+            self.send(sid, 'DOM.describeNode', {'backendNodeId': result['backendNodeId'], 'depth': 0},
+                lambda response, fid=fid: self.cache_owner(fid, response))
+    def cache_owner(self, fid, response):
+        node = response.get('node', {})
+        attrs = node.get('attributes', [])
+        attrs = dict(zip(attrs[::2], attrs[1::2]))
+        self.frames[fid]['owner'] = {'nodeName': node.get('nodeName'), 'sandbox': attrs.get('sandbox'),
+            'referrerpolicy': attrs.get('referrerpolicy'), 'has_srcdoc': 'srcdoc' in attrs}
+    def reclassify(self):
+        for record in self.exception_evidence:
+            if record.get('proof'):
+                continue  # Retain immutable evidence after context/frame teardown.
+            details, sid, context = record['native']['exceptionDetails'], record['session_id'], record['context']
+            calls = details.get('stackTrace', {}).get('callFrames', [])
+            script_id = details.get('scriptId') or (calls[0].get('scriptId') if calls else None)
+            script = self.scripts.get((sid, script_id))
+            frame = self.frames.get((context or {}).get('auxData', {}).get('frameId'))
+            shell = self.frames.get((frame or {}).get('parentId'))
+            source = self.sources.get((sid, script_id))
+            record['evidence'] = {'script_id': script_id, 'script': script, 'frame': frame, 'shell': shell,
+                                  'source_sha256': digest(source.encode('utf-8')) if isinstance(source, str) else None}
+            proof = model_exception_proof(context, script, frame, shell, (frame or {}).get('owner'), source, self.catalog)
+            if proof:
+                record['evidence'] = json.loads(json.dumps(record['evidence']))
+                record.update(attribution='model-original', proof=proof)
+        self.ledger.refresh()
+
+
+def observe_browser_errors(context, page, args, *, baseline=False):
+    cache_name = '_baseline_script_catalog' if baseline else '_original_script_catalog'
+    pin_name = 'baseline_catalog_pins' if baseline else 'browser_catalog_pins'
+    require(hasattr(args, pin_name), 'Native observer requires load_sources audit pins before browsing')
+    if not hasattr(args, cache_name):
+        root = args.baseline_site if baseline else args.site
+        setattr(args, cache_name, OriginalScriptCatalog(root, getattr(args, pin_name)))
+    ledger = BrowserErrorLedger()
+    page.on('pageerror', ledger.pageerror)
+    NativeExceptionObserver(context, page, getattr(args, cache_name), ledger)
+    receipts = getattr(args, 'browser_error_receipts', None)
+    if receipts is not None:
+        receipts.append(ledger.receipt)
+    return ledger
+
+
+def observed_context(browser, url, args, *, profile=None, viewport='desktop', original=True, baseline=False):
     # Playwright's service_workers='block' injects an access to Navigator.serviceWorker
     # into opaque sandbox documents, producing a verifier-induced SecurityError.
     # Original lifecycle probes use the browser default; isolation remains the
@@ -850,9 +1260,8 @@ def observed_context(browser, url, args, *, profile=None, viewport='desktop', or
                                   service_workers='allow' if original else 'block', reduced_motion='no-preference')
     context.set_default_timeout(args.timeout_ms)
     page = context.new_page()
-    requests, errors = [], []
+    requests, errors = [], observe_browser_errors(context, page, args, baseline=baseline)
     page.on('request', lambda r: requests.append({'url': r.url, 'method': r.method, 'type': r.resource_type}))
-    page.on('pageerror', lambda error: errors.append(str(error)))
     if profile:
         session = context.new_cdp_session(page)
         session.send('Network.enable')
@@ -922,7 +1331,8 @@ def click_clock(locator, page):
 
 def action_sample(browser, url, sources, args, name, profile, viewport):
     """Extra waiting is measured separately; never called fake TTI or cold shell time."""
-    context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport, original=True)
+    context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport,
+                                                      original=True, baseline=name == 'baseline')
     try:
         row = next(r for r in sources['seed']['runs'] if r['task_id'] == sources['seed']['defaults']['task_id'] and
                    r['purpose'] == 'benchmark' and r['registered_media'] and r['original']['status'] in ('ready', 'missing_dependencies'))
@@ -931,14 +1341,16 @@ def action_sample(browser, url, sources, args, name, profile, viewport):
             public_ready(page)
         else:
             page.wait_for_function('document.querySelector("#workspace")?.getAttribute("aria-busy")==="false"')
-        button = page.locator(f'.evidence-card [data-run-original="{row["id"]}"]')
+        button = page.locator(f'.evidence-card [data-zoom-run="{row["id"]}"]' if name == 'current' else
+                              f'.evidence-card [data-run-original="{row["id"]}"]')
+        requests_before_action = len(requests)
         click_clock(button, page)
         page.wait_for_function('id=>document.querySelector(`#original-content .original-preview[data-original-run="${id}"]`)?.dataset.previewState==="loaded"', arg=row['id'])
         original_ms = page.evaluate('performance.now()-window.__explicitClick')
         require(page.locator('#original-content iframe').count() == 1, 'Single original context count')
         before_full = list(requests)
-        packages = [urlsplit(r['url']).path.lstrip('/') for r in before_full if '/originals/' in r['url']]
-        require(packages == [row['original']['package']['path']], 'Single original fetched other/duplicate package')
+        packages = [urlsplit(r['url']).path.lstrip('/') for r in before_full[requests_before_action:] if '/originals/' in r['url']]
+        require(packages == [row['original']['package']['path']], 'Single original action fetched other/duplicate package')
         if name == 'current':
             no_full(before_full, sources['seed'])
             validate_requests(before_full, url, sources['manifest'], allow_preview=True)
@@ -946,7 +1358,7 @@ def action_sample(browser, url, sources, args, name, profile, viewport):
             import base64
             require(script.count() == 1 and script.get_attribute('integrity') == 'sha256-' + base64.b64encode(bytes.fromhex(sources['seed']['runtime']['sha256'])).decode(), 'Single-original SDK SRI differs')
             page.locator('[data-public-close="original-dialog"]').click()
-            require(page.locator('iframe').count() == 0, 'Closing lightweight single original retained sandbox')
+            require(page.locator('#original-content iframe').count() == 0, 'Closing lightweight single original retained modal sandbox')
             click_clock(page.locator('[data-full-view="evidence"]').first, page)
             full_ready(page)
             full_ms = page.evaluate('performance.now()-window.__explicitClick')
@@ -1087,7 +1499,7 @@ def gallery_ux(browser, url, sources, args, report):
         # no_full(requests, seed) here.
 
         default = [r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == 'benchmark' and r['registered_media']]
-        first = next(r for r in default if r['image'])
+        first = next(r for r in default if r['original']['status'] in ('ready', 'missing_dependencies'))
         # Detail handoff replaced the light gallery DOM with the full viewer
         # and fetched the full document. Reuse the same page request ledger,
         # hard-navigate back to the light shell, and require that later
@@ -1097,23 +1509,94 @@ def gallery_ux(browser, url, sources, args, report):
         public_ready(page)
         model_menu(page)
         page.locator('#public-model').fill(first['model'])
-        expected = [r['id'] for r in default if first['model'].lower() in r['model'].lower()][:PAGE_SIZE]
+        # A model query deliberately promotes even no-media rows into cards.
+        expected = [r['id'] for r in seed['runs'] if r['task_id'] == first['task_id'] and
+                    r['purpose'] == 'benchmark' and first['model'].lower() in r['model'].lower()][:PAGE_SIZE]
         page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card[data-run-id]")].map(e=>e.dataset.runId))===JSON.stringify(ids)', arg=expected)
+        reach_public_run(page, first)
         page.locator(f'[data-zoom-run="{first["id"]}"]').click()
-        page.wait_for_function('document.querySelector("#public-zoom-image").complete&&document.querySelector("#public-zoom-image").naturalWidth>0')
-        require(page.locator('#public-zoom-image').get_attribute('src') == first['image']['full'], 'Basic zoom image mapping differs')
-        page.locator('[data-public-close="public-zoom"]').click()
+        modal = wait_public_loaded(page, first['id'])
+        toggle = page.locator(f'#original-content [data-preview-start="{first["id"]}"]')
+        require(toggle.count() == 1 and page.locator('#original-content .preview-controls button').count() == 1,
+                'Lightweight modal must have one start/stop toggle')
+        require(not page.locator('#public-zoom').is_visible(), 'Runnable zoom opened historical screenshot instead of original')
+        toggle.click()
+        wait_public_stopped(page, first['id'], modal)
+        toggle.click()
+        modal = wait_public_loaded(page, first['id'])
+        page.locator('[data-public-close="original-dialog"]').click()
+        page.wait_for_function('!document.querySelector("#original-dialog").open')
+        require(modal.is_detached() and page.locator('#original-content iframe').count() == 0,
+                'Closing lightweight modal retained its sandbox')
         full_after_zoom = sum(1 for r in requests if urlsplit(r['url']).path.endswith('/' + seed['full']['path']))
         require(full_after_zoom == full_before_zoom, 'Basic gallery interaction fetched full viewer')
-        checks['checks'].append('basic model filtering and real full-image zoom without full viewer')
+        checks['checks'].append('model-filter exact IDs, runnable zoom, modal single-toggle stop/restart and detached close')
+        zoom_states = Counter()
         for r in seed['runs']:
-            if r['registered_media'] and (not r['image'] or r['original']['status'] not in ('ready', 'missing_dependencies')):
-                open_public_run(page, url, r)
-                if not r['image']:
-                    require(page.locator(f'[data-zoom-run="{r["id"]}"]').is_disabled(), 'Missing desktop stage fell back to another image')
-                if r['original']['status'] not in ('ready', 'missing_dependencies'):
-                    require(page.locator(f'[data-run-original="{r["id"]}"]').is_disabled(), 'Unavailable original enabled')
-        checks['checks'].append('missing desktop stage/original disabled; no mobile/later fallback')
+            runnable = r['original']['status'] in ('ready', 'missing_dependencies')
+            open_public_run(page, url, r)
+            zoom = page.locator(f'[data-zoom-run="{r["id"]}"]')
+            require(zoom.is_disabled() == (not runnable and not r['image']), 'Original/screenshot zoom enabled state differs')
+            require(page.locator(f'[data-run-original="{r["id"]}"]').is_disabled() == (not runnable),
+                    'Original availability enabled state differs')
+            if runnable:
+                zoom_states['original'] += 1
+            elif r['image']:
+                zoom.click()
+                page.wait_for_function('document.querySelector("#public-zoom-image").complete&&document.querySelector("#public-zoom-image").naturalWidth>0')
+                require(page.locator('#public-zoom-image').get_attribute('src') == r['image']['full'], 'Screenshot fallback mapping differs')
+                require(not page.locator('#original-dialog').is_visible(), 'Unavailable original opened executable modal')
+                page.locator('[data-public-close="public-zoom"]').click()
+                zoom_states['screenshot'] += 1
+            else:
+                zoom_states['disabled'] += 1
+        checks['zoom_states'] = dict(zoom_states)
+        checks['checks'].append('all latest rows: runnable original zoom, unavailable screenshot fallback, neither disabled')
+
+        # Exercise automatic inline execution, explicit pause/restart, offscreen
+        # cleanup and both render-replacement paths against actual SDK frames.
+        open_public_run(page, url, first)
+        inline = wait_public_loaded(page, first['id'], inline=True)
+        run_toggle = page.locator(f'#public-grid [data-run-original="{first["id"]}"]')
+        require(not page.locator('#original-dialog').is_visible(), 'Automatic inline preview opened a modal')
+        run_toggle.click()
+        wait_public_stopped(page, first['id'], inline, inline=True)
+        # Prove rendered-frame stability of this stopped card. Other visible
+        # originals have independent lifecycles; whole-page network quiescence
+        # is not the explicit-stop condition.
+        two_frames(page)
+        require(public_preview_panel(page, first['id'], inline=True).get_attribute('data-preview-state') == 'stopped',
+                'Explicit inline stop automatically resumed')
+        run_toggle.click()
+        inline = wait_public_loaded(page, first['id'], inline=True)
+        # A short real viewport places the cover below the observer's 80px
+        # margin without inventing DOM content or changing intersection APIs.
+        page.set_viewport_size({'width': VIEWPORTS['desktop']['width'], 'height': 100})
+        page.evaluate('window.scrollTo(0,0)')
+        cover = public_preview_panel(page, first['id'], inline=True)
+        require(cover.evaluate('e=>{let r=e.getBoundingClientRect();return r.bottom < -80||r.top > innerHeight+80;}'),
+                'Offscreen lifecycle probe did not leave preview observer margin')
+        wait_public_stopped(page, first['id'], inline, inline=True)
+        page.set_viewport_size(VIEWPORTS['desktop'])
+        cover.scroll_into_view_if_needed()
+        inline = wait_public_loaded(page, first['id'], inline=True)
+        model_menu(page)
+        page.locator('#public-model').fill('does-not-match-any-real-model')
+        page.wait_for_function('document.querySelectorAll("#public-grid .evidence-card").length===0')
+        require(inline.is_detached() and page.locator('#public-grid iframe').count() == 0, 'Model filter retained removed inline sandbox')
+        page.locator('#public-model').fill('')
+        page.locator(f'#public-task-tabs [data-task-id="{first["task_id"]}"]').click()
+        reach_public_run(page, first)
+        inline = wait_public_loaded(page, first['id'], inline=True)
+        next_page = page.locator('#public-pages [data-gallery-page]').filter(has_text='下一页')
+        previous = page.locator('#public-pages [data-gallery-page]').filter(has_text='上一页')
+        replacement = next_page if next_page.count() and next_page.is_enabled() else previous
+        require(replacement.count() == 1 and replacement.is_enabled(), 'Need another actual page for inline teardown proof')
+        old_ids = public_ids(page)
+        replacement.click()
+        page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card")].map(e=>e.dataset.runId))!==JSON.stringify(ids)', arg=old_ids)
+        require(inline.is_detached(), 'Pagination retained previous page inline sandbox')
+        checks['checks'].append('inline automatic start, explicit stop/restart, offscreen teardown/resume, filter and pagination cleanup')
 
         # Only actual rendered output earns screenshots; system color scheme
         # and the product toggle are tested without rewriting the root theme.
@@ -1214,25 +1697,91 @@ def gallery_ux(browser, url, sources, args, report):
         context.close()
 
 
+def observe_original_transfers(page):
+    """Read-only native request outcomes; completed prefetches are not called aborted."""
+    transfers, active = [], {}
+    def started(request):
+        path = unquote(urlsplit(request.url).path).lstrip('/')
+        if path.startswith('originals/'):
+            row = {'request_id': len(transfers), 'path': path, 'outcome': 'pending', 'failure': None}
+            transfers.append(row)
+            active[request] = row
+    def finished(request):
+        if request in active:
+            active[request]['outcome'] = 'finished'
+    def failed(request):
+        if request in active:
+            active[request].update(outcome='failed', failure=request.failure)
+    page.on('request', started)
+    page.on('requestfinished', finished)
+    page.on('requestfailed', failed)
+    return transfers
+
+
+def original_intent_counts(seed, run_ids):
+    counts = {}
+    for run_id in run_ids:
+        run = next(row for row in seed['runs'] if row['id'] == run_id)
+        descriptor = run['original']
+        require(descriptor['status'] in ('ready', 'missing_dependencies') and descriptor.get('package'),
+                'Package prefetch intent is not eligible')
+        path = descriptor['package']['path']
+        counts[path] = counts.get(path, 0) + 1
+    return counts
+
+
+def check_cancelled_prefetch(transfers, cancelled_count, allowed_counts, *, must_abort=()):
+    require(len(transfers) == cancelled_count, 'Cancelled intent started a late/extra package request')
+    paths = [row['path'] for row in transfers]
+    require(all(path in allowed_counts and paths.count(path) <= allowed_counts[path] for path in paths),
+            'Package request is not bound one-per-eligible intent')
+    require(all(row['outcome'] == 'finished' or
+                (row['outcome'] == 'failed' and row['failure'] == 'net::ERR_ABORTED') for row in transfers),
+            'Cancelled prefetch lacks a completed or native-aborted outcome')
+    require(all(0 <= index < len(transfers) and transfers[index]['outcome'] == 'failed' and
+                transfers[index]['failure'] == 'net::ERR_ABORTED' for index in must_abort),
+            'Real delayed in-flight package was not natively aborted')
+    return json.loads(json.dumps(transfers))
+
+
 def delayed_lifecycle(browser, sources, args, report):
     """Real delayed SDK/full-document and real HTTP503 retry; no interception."""
     seed = sources['seed']
     row = next(r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == 'benchmark'
                and r['registered_media'] and r['original']['status'] == 'ready')
     results = report['lifecycle'] = []
-    with serve_gallery(args.site, sources['manifest'], delays={seed['runtime']['path']: 1, seed['full']['path']: 1}) as (url, _):
+    with serve_gallery(args.site, sources['manifest'], delays={seed['runtime']['path']: 2, seed['full']['path']: 1}) as (url, server_requests):
         context, page, requests, errors = observed_context(browser, url, args)
+        transfers = observe_original_transfers(page)
         try:
-            page.goto(url, wait_until='networkidle')
+            page.goto(url, wait_until='domcontentloaded')
             public_ready(page)
-            button = page.locator(f'[data-run-original="{row["id"]}"]')
-            button.click(no_wait_after=True)
+            page.wait_for_function('document.querySelector("#public-grid .work-cover[data-preview-state=loading]")!==null')
+            paused = stop_pending_inline(page)
+            require(paused, 'Delayed SDK probe had no automatic inline loading intent')
+            require(page.evaluate('typeof window.BenchPreview === "undefined"'), 'SDK delay elapsed before cancellation coverage')
+            phase_frames = []
+            capture_frame = lambda frame: phase_frames.append(frame)
+            page.on('frameattached', capture_frame)
+            with page.expect_request(lambda request: urlsplit(request.url).path.endswith('/' + row['original']['package']['path'])):
+                page.locator(f'[data-zoom-run="{row["id"]}"]').click(no_wait_after=True)
             page.wait_for_selector('#original-dialog[open]')
+            page.wait_for_function('s=>document.querySelector(s)?.dataset.previewState==="loading"', arg=public_preview_selector(row['id']))
+            cancelled_count = len(transfers)
             page.locator('[data-public-close="original-dialog"]').click()
             page.wait_for_load_state('networkidle')
-            require(page.locator('iframe').count() == 0 and not page.locator('#original-dialog').is_visible(), 'Cancelled delayed SDK intent started late')
-            require(not any('/originals/' in r['url'] for r in requests), 'Cancelled SDK load fetched original package')
-            results.append({'check': 'real delayed SDK close cancels late launch', 'pass': True})
+            require(any(r['path'] == seed['runtime']['path'] for r in server_requests), 'Delayed SDK probe never reached actual HTTP server')
+            require(page.locator('#original-content iframe').count() == 0 and not page.locator('#original-dialog').is_visible(), 'Cancelled delayed SDK intent started late')
+            cancelled = check_cancelled_prefetch(transfers, cancelled_count, original_intent_counts(seed, paused + [row['id']]))
+            require(not phase_frames, 'Cancelled SDK intent executed a transient/late iframe')
+            require(page.evaluate('typeof window.BenchPreview?.create === "function"'), 'Delayed SDK was not actually released')
+            for run_id in paused:
+                wait_public_stopped(page, run_id, inline=True)
+            validate_requests(requests, url, sources['manifest'], allow_preview=True)
+            no_full(requests, seed)
+            page.remove_listener('frameattached', capture_frame)
+            results.append({'check': 'real delayed SDK cancellation permits only intent-bound prefetch; no stale frames/packages',
+                            'pass': True, 'paused_ids': paused, 'cancelled_prefetch': cancelled, 'cancelled_phase_frames': len(phase_frames)})
             first = page.locator('[data-full-view="matrix"]').first
             second = page.locator('[data-full-view="evidence"]').first
             first.click(no_wait_after=True)
@@ -1250,65 +1799,193 @@ def delayed_lifecycle(browser, sources, args, report):
         try:
             page.goto(url, wait_until='networkidle')
             public_ready(page)
+            before = wait_inline_registered(page, seed['runs'])
             page.locator('[data-full-view="evidence"]').first.click()
             page.wait_for_load_state('networkidle')
             require(page.locator('#public-grid').is_visible() and public_ids(page), 'Failed full request erased current gallery')
+            require(all(frame.is_detached() for _, frame in before), 'Full handoff retained old inline sandbox')
             require(page.evaluate('document.documentElement.dataset.fullViewerReady') != 'true', 'HTTP503 incorrectly marked full ready')
+            restored = wait_inline_registered(page, seed['runs'])
+            require([run_id for run_id, _ in restored] == [run_id for run_id, _ in before],
+                    'HTTP503 recovery changed registered inline run IDs')
+            # Exercise the restored registration, not merely its existing host.
+            restored_id, restored_frame = restored[0]
+            restored_toggle = page.locator(f'#public-grid [data-run-original="{restored_id}"]')
+            restored_toggle.click()
+            wait_public_stopped(page, restored_id, restored_frame, inline=True)
+            restored_toggle.click()
+            wait_public_loaded(page, restored_id, inline=True)
             retry = page.get_by_role('button', name=re.compile('重试|Retry', re.I))
             require(retry.count() == 1, 'Full-view failure lacks one explicit retry control')
             retry.click()
             full_ready(page)
             require(len([r for r in requests if r['url'].endswith(seed['full']['path'])]) == 2, 'Real HTTP503 retry request count differs')
             require(not errors, 'Retry page errors: ' + '; '.join(errors))
-            results.append({'check': 'real full-document HTTP503 preserves gallery and explicit retry works', 'pass': True, 'requests': requests})
+            results.append({'check': 'real full-document HTTP503 restores inline registrations/toggles before explicit retry',
+                            'pass': True, 'restored_inline_ids': [run_id for run_id, _ in restored], 'requests': requests})
         finally:
             context.close()
 
     for retry_mode in (False, True):
-        with serve_gallery(args.site, sources['manifest'], delays={} if retry_mode else {seed['runtime']['path']: 1},
-                           fail_once=[seed['runtime']['path']] if retry_mode else []) as (url, _):
+        package_path = row['original']['package']['path']
+        delays = {seed['runtime']['path']: 2}
+        if not retry_mode:
+            delays[package_path] = 2  # Real in-flight cancellation; runs concurrently with the existing SDK delay.
+        with serve_gallery(args.site, sources['manifest'], delays=delays,
+                           fail_once=[seed['runtime']['path']] if retry_mode else []) as (url, server_requests):
             context, page, requests, errors = observed_context(browser, url, args, original=True)
+            transfers = observe_original_transfers(page)
             try:
-                page.goto(url, wait_until='networkidle')
+                page.goto(url, wait_until='domcontentloaded')
                 public_ready(page)
-                page.locator(f'[data-run-original="{row["id"]}"]').click(no_wait_after=True)
+                page.wait_for_function('document.querySelector("#public-grid .work-cover[data-preview-state=loading]")!==null')
+                paused = stop_pending_inline(page)
+                require(paused, 'SDK probe lacked inline intent to pause')
+                require(page.evaluate('typeof window.BenchPreview === "undefined"'), 'SDK delay elapsed before cancellation coverage')
+                phase_frames = []
+                capture_frame = lambda frame: phase_frames.append(frame)
+                page.on('frameattached', capture_frame)
+                modal_start = len(transfers)
+                with page.expect_request(lambda request: urlsplit(request.url).path.endswith('/' + package_path)):
+                    page.locator(f'[data-zoom-run="{row["id"]}"]').click(no_wait_after=True)
+                require(len(transfers) == modal_start + 1 and transfers[-1]['path'] == package_path,
+                        'Modal prefetch was not exactly one selected eligible package')
+                panel = public_preview_panel(page, row['id'])
+                toggle = panel.locator(f'[data-preview-start="{row["id"]}"]')
+                require(toggle.count() == 1 and panel.locator('.preview-controls button').count() == 1,
+                        'SDK probe requires the actual one-button modal')
+                cancelled_count = len(transfers)
+                allowed_counts = original_intent_counts(seed, paused + [row['id']])
                 if retry_mode:
-                    page.wait_for_function('id=>document.querySelector(`#original-content [data-original-run="${id}"]`)?.dataset.previewState==="error"', arg=row['id'])
-                    require(page.locator('iframe').count() == 0, 'Failed SDK fetch left executable frame')
-                    page.locator(f'[data-preview-start="{row["id"]}"]').click()
+                    page.wait_for_function('s=>document.querySelector(s)?.dataset.previewState==="error"', arg=public_preview_selector(row['id']))
+                    page.wait_for_load_state('networkidle')
+                    require(panel.locator('iframe').count() == 0, 'Failed SDK fetch left executable modal frame')
+                    cancelled = check_cancelled_prefetch(transfers, cancelled_count, allowed_counts)
                 else:
-                    # A second explicit start intent while the actual SDK response
-                    # is delayed shares its load but invalidates the first token.
-                    page.locator(f'[data-preview-restart="{row["id"]}"]').click()
+                    page.wait_for_function('s=>document.querySelector(s)?.dataset.previewState==="loading"', arg=public_preview_selector(row['id']))
+                    require(transfers[modal_start]['outcome'] == 'pending', 'Delayed package completed before actual stop coverage')
+                    require(sum(r['path'] == package_path for r in server_requests) >=
+                            sum(r['path'] == package_path for r in transfers), 'Delayed package did not reach the actual server')
+                    toggle.click()
+                    wait_public_stopped(page, row['id'])
+                    # SDK release must not restart a cancelled intent. Package
+                    # prefetch may have completed, but this deliberately delayed
+                    # modal request must show native cancellation.
+                    page.wait_for_load_state('networkidle')
+                    wait_public_stopped(page, row['id'])
+                    cancelled = check_cancelled_prefetch(transfers, cancelled_count, allowed_counts, must_abort=[modal_start])
+                    require(page.evaluate('typeof window.BenchPreview?.create === "function"'), 'Delayed SDK was not actually released')
+                    require(panel.locator('iframe').count() == 0, 'Stop during SDK loading created a late frame')
+                require(not phase_frames, 'Cancelled/failed SDK intent executed a transient/late iframe')
+                for run_id in paused:
+                    wait_public_stopped(page, run_id, inline=True)
+                require(toggle.inner_text() == '运行原作', 'Cancelled SDK toggle retained loading/running state')
+                page.remove_listener('frameattached', capture_frame)
+                restart_at = len(transfers)
+                toggle.click()
                 frame = wait_public_loaded(page, row['id'])
+                require([r['path'] for r in transfers[restart_at:]] == [package_path],
+                        'Explicit restart did not fetch exactly one new selected package')
                 paths = validate_requests(requests, url, sources['manifest'], allow_preview=True)
                 require(paths.count(seed['runtime']['path']) == (2 if retry_mode else 1), 'SDK duplicate/retry HTTP request count')
-                require(paths.count(row['original']['package']['path']) == 1 and page.locator('iframe').count() == 1, 'Latest original intent launched duplicate/wrong package')
+                require(sum(r['path'] == seed['runtime']['path'] for r in server_requests) == (2 if retry_mode else 1),
+                        'SDK request count not confirmed by actual server')
+                expected_packages = [transfer['path'] for transfer in transfers]
+                require(paths.count(package_path) == sum(transfer['path'] == package_path for transfer in cancelled) + 1
+                        and panel.locator('iframe').count() == 1, 'Latest original intent launched duplicate/wrong package')
+                require([p for p in paths if p.startswith('originals/')] == expected_packages,
+                        'Original prefetch traffic was omitted or changed between native observers')
+                require(sum(r['path'] == package_path for r in server_requests) == paths.count(package_path),
+                        'Selected package request count not confirmed by actual server')
                 no_full(requests, seed)
-                page.locator(f'[data-preview-stop="{row["id"]}"]').click()
-                require(frame.is_detached() and page.locator('iframe').count() == 0, 'SDK probe stop retained frame')
+                toggle.click()
+                wait_public_stopped(page, row['id'], frame)
                 page.locator('[data-public-close="original-dialog"]').click()
+                require(frame.is_detached() and page.locator('#original-content iframe').count() == 0, 'SDK probe close retained modal frame')
                 require(not errors, 'SDK lifecycle errors: ' + '; '.join(errors))
-                results.append({'check': 'real SDK HTTP503 explicit retry' if retry_mode else 'real delayed SDK repeated start shares load and launches once',
-                                'pass': True, 'requests': requests})
+                results.append({'check': 'real SDK HTTP503 one-toggle explicit retry with intent-bound prefetch' if retry_mode else
+                                'real delayed SDK stop aborts in-flight prefetch, prevents stale execution; explicit start reuses one SDK request',
+                                'pass': True, 'requests': requests, 'cancelled_prefetch': cancelled,
+                                'cancelled_phase_frames': len(phase_frames), 'restart_prefetch': json.loads(json.dumps(transfers[restart_at:]))})
             finally:
                 context.close()
 
 
-def wait_public_loaded(page, run_id):
-    selector = f'#original-content .original-preview[data-original-run="{run_id}"]'
+def public_preview_selector(run_id, *, inline=False):
+    return (f'#public-grid .evidence-card[data-run-id="{run_id}"] .work-cover' if inline else
+            f'#original-content .original-preview[data-original-run="{run_id}"]')
+
+
+def public_preview_panel(page, run_id, *, inline=False):
+    return page.locator(public_preview_selector(run_id, inline=inline))
+
+
+def wait_public_loaded(page, run_id, *, inline=False):
+    selector = public_preview_selector(run_id, inline=inline)
+    if inline:
+        page.locator(selector).scroll_into_view_if_needed()
     page.wait_for_function('s=>["loaded","error","unavailable"].includes(document.querySelector(s)?.dataset.previewState)', arg=selector)
     panel = page.locator(selector)
-    require(panel.get_attribute('data-preview-state') == 'loaded', 'Lightweight original failed: ' + panel.inner_text()[:600])
-    outer_element = panel.locator('.preview-host iframe').element_handle()
+    require(panel.get_attribute('data-preview-state') == 'loaded', 'Public original failed: ' + panel.inner_text()[:600])
+    host = '.work-preview-host' if inline else '.preview-host'
+    require(panel.locator(host + ' iframe').count() == 1, 'Expected one trusted SDK shell')
+    outer_element = panel.locator(host + ' iframe').element_handle()
     require(outer_element is not None, 'Missing trusted SDK shell')
     outer = outer_element.content_frame()
     require(outer is not None, 'Missing shell browsing context')
     outer.wait_for_selector('iframe', state='attached')
+    require(outer.locator('iframe').count() == 1, 'Expected one actual original context')
     inner = outer.locator('iframe').element_handle().content_frame()
     require(inner is not None, 'Missing actual original browsing context')
     inner.wait_for_load_state('domcontentloaded')
     return inner
+
+
+def wait_public_stopped(page, run_id, frame=None, *, inline=False):
+    selector = public_preview_selector(run_id, inline=inline)
+    page.wait_for_function('s=>document.querySelector(s)?.dataset.previewState==="stopped"&&!document.querySelector(s).querySelector("iframe")', arg=selector)
+    if frame is not None:
+        require(frame.is_detached(), 'Stopped original retained its actual browsing context')
+
+
+def stop_pending_inline(page):
+    """Pause each current automatic intent while the actual SDK is delayed."""
+    ids = page.locator('#public-grid .work-cover[data-preview-state]').evaluate_all('''es=>es.filter(e=>
+        !['error','stopped','unavailable'].includes(e.dataset.previewState)).map(e=>e.closest('[data-run-id]').dataset.runId)''')
+    for run_id in ids:
+        # Native dispatch avoids scrolling a card out of the observer margin,
+        # which would test offscreen teardown rather than the explicit toggle.
+        page.locator(f'#public-grid [data-run-original="{run_id}"]').dispatch_event('click')
+        wait_public_stopped(page, run_id, inline=True)
+    return ids
+
+
+def wait_inline_registered(page, rows):
+    """Prove restored registration by loaded real frames, not retained card DOM."""
+    eligible = [r for r in rows if r['original']['status'] in ('ready', 'missing_dependencies') and
+                page.locator(f'#public-grid [data-run-id="{r["id"]}"]').count()]
+    require(eligible, 'Need an eligible card to verify restored inline registrations')
+    return [(r['id'], wait_public_loaded(page, r['id'], inline=True)) for r in eligible]
+
+
+def public_fit_viewport(page, frame, run_id, report):
+    """Light modal is fit-only: resize the real host rather than invent controls."""
+    results = []
+    for viewport in ('desktop', 'phone'):
+        page.set_viewport_size(VIEWPORTS[viewport])
+        host = public_preview_panel(page, run_id).locator('.preview-host')
+        page.wait_for_function('s=>{let h=document.querySelector(s),f=h?.querySelector("iframe");return !!f&&parseFloat(f.style.width)===Math.max(200,Math.min(4096,h.clientWidth))&&parseFloat(f.style.height)===Math.max(200,Math.min(4096,h.clientHeight));}',
+                               arg=public_preview_selector(run_id) + ' .preview-host')
+        expected = host.evaluate('e=>({width:Math.max(200,Math.min(4096,e.clientWidth)),height:Math.max(200,Math.min(4096,e.clientHeight))})')
+        frame.wait_for_function('size=>innerWidth===size.width&&innerHeight===size.height', arg=expected)
+        actual = frame.evaluate('({width:innerWidth,height:innerHeight,dpr:devicePixelRatio})')
+        require(actual['width'] == expected['width'] and actual['height'] == expected['height'], 'Canvas fit viewport differs from actual modal host')
+        strict_overflow(page, 'public-original-fit-' + viewport, report)
+        results.append({'viewport': viewport, 'host': expected, 'actual': actual})
+    require(results[1]['actual']['width'] < results[0]['actual']['width'], 'Phone resize did not change original viewport')
+    page.set_viewport_size(VIEWPORTS['desktop'])
+    two_frames(page)
+    return results
 
 
 def _bound_screenshot(originals):
@@ -1353,28 +2030,41 @@ def original_smoke(browser, url, sources, args, report):
     _bound_screenshot(originals)
     report['original_smoke'] = {'scope': 'one Canvas lifecycle plus existing SVG/CSS pair, Chromium only'}
     try:
-        # Lightweight original smoke stays on the public gallery. Prefer the
-        # exact Canvas run when it is still a latest card; otherwise use any
-        # latest media card whose original is ready.
-        row = next((r for r in sources['seed']['runs'] if r['id'] == originals.CANVAS), None)
-        if row is None:
-            row = next(r for r in sources['seed']['runs'] if r['registered_media']
-                       and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
+        # Stay on the latest public projection but never substitute an arbitrary
+        # SVG/CSS original for the required real Canvas representative.
+        import base64
+        canvas_rows = []
+        for candidate in sources['seed']['runs']:
+            descriptor = candidate.get('original') or {}
+            if descriptor.get('status') not in ('ready', 'missing_dependencies') or descriptor.get('entrypoint') != 'index.html':
+                continue
+            package = json.loads(safe_read(args.site, descriptor['package']['path']))
+            entry = base64.b64decode(package['files'][descriptor['entrypoint']]['base64'], validate=True).decode()
+            if re.search(r'<canvas\b', entry, re.I):
+                canvas_rows.append(candidate)
+        require(canvas_rows, 'Latest public projection has no real Canvas original')
+        row = next((r for r in canvas_rows if r['id'] == originals.CANVAS), canvas_rows[0])
         open_public_run(page, url, row)
-        click_clock(page.locator(f'[data-run-original="{row["id"]}"]'), page)
+        click_clock(page.locator(f'[data-zoom-run="{row["id"]}"]'), page)
         frame = wait_public_loaded(page, row['id'])
         latency = page.evaluate('performance.now()-window.__explicitClick')
         require(frame.locator('canvas').count() > 0, 'Canvas smoke did not load a real canvas original')
         motion = originals.observe_motion(page, frame, 'public-canvas', args)
         require(motion['visible_change'], 'Canvas screenshot pixels did not change')
-        viewport = originals.check_viewport(page, frame, row['id'], report)
-        page.locator(f'[data-preview-stop="{row["id"]}"]').click()
-        require(frame.is_detached() and page.locator('iframe').count() == 0, 'Stop retained Canvas context')
-        page.locator(f'[data-preview-restart="{row["id"]}"]').click()
+        viewport = public_fit_viewport(page, frame, row['id'], report)
+        toggle = page.locator(f'#original-content [data-preview-start="{row["id"]}"]')
+        require(toggle.count() == 1 and page.locator('#original-content .preview-controls button').count() == 1,
+                'Canvas modal lacks its single start/stop toggle')
+        toggle.click()
+        wait_public_stopped(page, row['id'], frame)
+        toggle.click()
         restarted = wait_public_loaded(page, row['id'])
-        require(not restarted.is_detached(), 'Restart failed')
+        require(not restarted.is_detached() and restarted.locator('canvas').count() > 0, 'Restart did not recreate real Canvas')
         page.locator('[data-public-close="original-dialog"]').click()
-        require(restarted.is_detached() and page.locator('iframe').count() == 0, 'Close retained Canvas context')
+        page.wait_for_function('!document.querySelector("#original-dialog").open')
+        require(restarted.is_detached() and page.locator('#original-content iframe').count() == 0, 'Close retained Canvas modal context')
+        wait_public_loaded(page, row['id'], inline=True)
+        validate_requests(requests, url, sources['manifest'], allow_preview=True)
         no_full(requests, sources['seed'])
         require(not errors, 'Canvas smoke errors: ' + '; '.join(errors))
         report['original_smoke'].update(canvas_run_id=row['id'], primary_original_latency_ms=latency, motion=motion, viewport=viewport, requests=requests)
@@ -1389,11 +2079,12 @@ def original_smoke(browser, url, sources, args, report):
                                        reduced_motion='no-preference')
     pair_context.set_default_timeout(args.timeout_ms)
     pair_page = pair_context.new_page()
+    pair_errors = observe_browser_errors(pair_context, pair_page, args)
     try:
         row_a = next(r for r in sources['seed']['runs']
                      if r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
         row_b = next(r for r in sources['seed']['runs']
-                     if r['id'] != row_a['id'] and r['task_id'] == row_a['task_id']
+                     if r['id'] != row_a['id'] and r['task_id'] == row_a['task_id'] and r['purpose'] == row_a['purpose']
                      and r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
         pair_page.goto(url + '?' + urlencode({'task_id': row_a['task_id'], 'purpose': row_a['purpose']}), wait_until='networkidle')
         public_ready(pair_page)
@@ -1412,9 +2103,11 @@ def original_smoke(browser, url, sources, args, report):
         pair_page.wait_for_function("document.querySelector('#compare-dialog')?.open === true")
         pair_page.wait_for_function("document.querySelector('#workspace')?.getAttribute('aria-busy')==='false'")
         require(pair_page.locator('#compare-dialog').evaluate('d=>d.open'), 'Comparison dialog did not open')
-        require(pair_page.locator('#compare-content .compare-column').count() >= 2 or
-                pair_page.locator('#compare-content p.error').count() >= 1,
-                'Comparison dialog rendered neither columns nor an error message')
+        pair_page.wait_for_function('ids=>{let actual=[...document.querySelectorAll("#compare-content .compare-column[data-run-id]")].map(e=>e.dataset.runId);return actual.length===ids.length&&ids.every(id=>actual.includes(id));}',
+                                    arg=[row_a['id'], row_b['id']])
+        require(pair_page.locator('#compare-content p.error').count() == 0,
+                'Comparison dialog rendered an error instead of the exact selected pair')
+        require(not pair_errors, 'Pair UI JavaScript errors: ' + '; '.join(pair_errors))
         report['comparisons'].append({
             'engine': 'chromium',
             'transport': 'light-pair-full-controls',
@@ -1440,6 +2133,7 @@ def main(argv=None):
              'paired_real_gzip_http_performance_only' if args.performance_only else 'paired_performance_and_gallery_ux')
     report = {'status': 'running', 'scope': scope, 'no_interception': True,
               'screenshots': [], 'overflow_checks': [], 'untested': ['Public HTTPS routing/TTFB', 'Full 35-original x 3-engine census']}
+    args.browser_error_receipts = report['javascript_errors'] = []
     if not args.original_smoke:
         report['untested'].append('Canvas/pair lifecycle smoke (run separately with --original-smoke)')
     if args.audit_only or args.original_smoke or args.ux_only:
@@ -1448,6 +2142,8 @@ def main(argv=None):
         report['untested'].append('Complete gallery UX/routes/delayed-loader suite')
     try:
         sources = load_sources(args, report)
+        args.browser_catalog_pins = catalog_audit_pins(sources)
+        args.baseline_catalog_pins = catalog_audit_pins(sources, baseline=True)
         if not args.audit_only:
             from playwright.sync_api import sync_playwright
             with ExitStack() as stack:
@@ -1455,7 +2151,11 @@ def main(argv=None):
                 baseline = stack.enter_context(v2.serve_report(args.baseline_site / 'index.html', sources['baseline_data'], gzip_html=True))
                 baseline_actions, _ = stack.enter_context(serve_gallery(args.baseline_site, sources['baseline_manifest']))
                 playwright = stack.enter_context(sync_playwright())
-                browser = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'])
+                # Full Chromium's new headless mode keeps native utility-world
+                # actions responsive with animated originals; headless_shell stalls.
+                browser = playwright.chromium.launch(channel='chromium', headless=True, args=['--no-sandbox'])
+                report['browser_fixture'] = {'channel': 'chromium', 'version': browser.version,
+                                             'headless': True, 'forced_software_gl': False}
                 try:
                     if args.original_smoke:
                         original_smoke(browser, current, sources, args, report)
@@ -1471,7 +2171,8 @@ def main(argv=None):
                     browser.close()
         report['status'] = 'pass'
     except Exception as error:
-        report.update(status='fail', failure=f'{type(error).__name__}: {error}')
+        import traceback
+        report.update(status='fail', failure=f'{type(error).__name__}: {error}', failure_stack=traceback.format_exc())
     (args.output / 'gallery-verification.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
     print(json.dumps({'status': report['status'], 'receipt': str(args.output / 'gallery-verification.json'), 'failure': report.get('failure')}, ensure_ascii=False))
     return 0 if report['status'] == 'pass' else 1

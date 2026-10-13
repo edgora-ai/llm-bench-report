@@ -27,15 +27,18 @@ class SvgSupplementTests(unittest.TestCase):
                'checks': [{'name': 'entrypoint', 'status': 'fail'}]}
         descriptor = {'status': 'no_entrypoint', 'entrypoint': None, 'entry_sha256': None,
                       'missing': [], 'policy': 'opaque-srcdoc-v1', 'package': None}
-        row = project_row(run, {'evidence': {}, 'thumbnails': {}, 'assets': {},
-                                'originals': {run['id']: descriptor}})
-        self.assertEqual(row['termination'], 'length')
-        self.assertEqual(row['entry_status'], 'fail')
-        self.assertFalse(row['registered_media'])
-        self.assertIsNone(row['image'])
-        self.assertNotIn('scores', row)
-        self.assertIn('SVG 补测 · length 截断', media_text(row))
-        self.assertIn('未交付，没有可展示 SVG/HTML', media_text(row))
+        for version in ['standalone-svg-v1', 'standalone-svg-no-thinking-v2']:
+            with self.subTest(version=version):
+                row = project_row({**run, 'prompt_version': version},
+                                  {'evidence': {}, 'thumbnails': {}, 'assets': {},
+                                   'originals': {run['id']: descriptor}})
+                self.assertEqual(row['termination'], 'length')
+                self.assertEqual(row['entry_status'], 'fail')
+                self.assertFalse(row['registered_media'])
+                self.assertIsNone(row['image'])
+                self.assertNotIn('scores', row)
+                self.assertIn('SVG 补测 · length 截断', media_text(row))
+                self.assertIn('未交付，没有可展示 SVG/HTML', media_text(row))
 
 
 if __name__ == '__main__':

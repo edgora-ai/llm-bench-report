@@ -17,7 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from .adapters import claude_code, opencode
 from .discovery import CLAUDE_MODELS, claude_model_queue, discover_free
 from .effort import CEILING_ORDER, condition_fields as effort_condition, read_catalogue, resolve as resolve_effort
-from .egress import Gateway, connections
+from .egress import Gateway, connections, validate_generation_request_policy
 from .isolation import generation_command, evaluate_command, image_id, preflight
 from .storage import Store
 from urllib.parse import urlsplit
@@ -157,6 +157,8 @@ def evaluate_run(config, run_dir, task_id, name=None):
 
 
 def run_one(root, config, store, provider, catalogue_dir, facts, batch_id, purpose, tool, model, task, defer_evaluation=False, run_id=None, attempt=0, retry_of=None, retry_reason=None, cancel_event=None):
+    request_policy = (validate_generation_request_policy(task["generation_request_policy"], tool, model)
+                      if "generation_request_policy" in task else None)
     date = datetime.now(timezone.utc).date().isoformat()
     run_id = run_id or uuid.uuid4().hex
     run_dir = root / "runs" / date / run_id
@@ -169,9 +171,14 @@ def run_one(root, config, store, provider, catalogue_dir, facts, batch_id, purpo
     adapter = claude_code if tool == "claude-code" else opencode
     # Effort is resolved from the batch's own frozen catalogue snapshot, not
     # from a live lookup, so the level asked for cannot drift mid-batch.
-    effort = effort_record(catalogue_dir / "models.json", model, facts["effort_levels"])
+    effort = ({"requested": "none", "applied": None, "supported": None,
+               "control": "per_request_disabled_requested_unverified", "ceiling": None}
+              if request_policy is not None else
+              effort_record(catalogue_dir / "models.json", model, facts["effort_levels"]))
     cli = adapter.command(model, effort["applied"])
     condition = {"task_id": task["id"], "runner_sha256": facts["source_hashes"]["bench/runner.py"], "provider_connection_sha256": connection_fingerprint(provider), "prompt_hash": digest(task["prompt"]), "rubric_version": task["rubric_version"], "tool": tool, "cli_version": facts["versions"].get("claude" if tool == "claude-code" else "opencode"), "image_id": facts["image_id"], "profile": config["runtime"]["profile"], "isolation": facts["strategy"], "renderer": "chromium-software-v1234", "adapter_sha256": hashlib.sha256(Path(adapter.__file__).read_bytes()).hexdigest(), "runtime_policy_sha256": hashlib.sha256((root / "runtime/launch.py").read_bytes()).hexdigest(), "egress_policy_sha256": hashlib.sha256((root / "bench/egress.py").read_bytes()).hexdigest(), "command_sha256": digest(["<requested-model>" if arg == model else arg for arg in cli]), "task_definition_sha256": digest(task), "model_directory_sha256": hashlib.sha256((catalogue_dir / "models.json").read_bytes()).hexdigest(), **effort_condition(effort)}
+    if request_policy is not None:
+        condition["generation_request_policy"] = request_policy
     manifest = {"id": run_id, "batch_id": batch_id, "date": date, "purpose": purpose, "tool": tool, "model": model, "task_id": task["id"], "task_name": task["name"], "prompt_version": task["version"], "prompt_hash": condition["prompt_hash"], "condition_fingerprint": digest(condition), "conditions": condition, "started_at": utcnow(), "finished_at": None, "status": "running", "error": None, "metrics": {}, "checks": [], "evaluation": {"status": "pending", "evidence": []}, "artifacts": [], "archive_dir": run_dir.relative_to(root).as_posix(), "requested_model": model, "reported_models": [], "backend_weights_version": None, "cli_command": cli, "duration_ms": None}
     manifest.update({"attempt": attempt, "retry_of": retry_of, "retry_reason": retry_reason})
     (run_dir / "prompt.txt").write_text(task["prompt"], encoding="utf-8")
@@ -204,7 +211,8 @@ def run_one(root, config, store, provider, catalogue_dir, facts, batch_id, purpo
         catalogue = json.loads((catalogue_dir / "models.json").read_text())
         model_info = catalogue.get("opencode", {}).get("models", {}).get(model.rsplit("/", 1)[-1], {})
         api_model = model_info.get("api", {}).get("id") if isinstance(model_info.get("api"), dict) else None
-        with Gateway(bridge / "gateway.sock", provider, tool, model, run_dir / "gateway.jsonl", api_model):
+        gateway_options = {"generation_request_policy": request_policy} if request_policy is not None else {}
+        with Gateway(bridge / "gateway.sock", provider, tool, model, run_dir / "gateway.jsonl", api_model, **gateway_options):
             command = generation_command(config, output.resolve(), bridge.resolve(), catalogue_dir.resolve(), tool, model, cli, name)
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
             thread = threading.Thread(target=collect_stderr, args=(process.stderr,), daemon=True)
@@ -321,7 +329,7 @@ def provider_route_check(events, *, legacy_upstream_markers=False):
             if event.get("policy_rejected") is True and status == 403:
                 rejected += 1
                 reason = event.get("reason_code")
-                if not isinstance(reason, str) or reason not in {"route_not_allowed", "query_not_allowed", "model_not_allowed", "tool_not_allowed"}:
+                if not isinstance(reason, str) or reason not in {"route_not_allowed", "query_not_allowed", "model_not_allowed", "tool_not_allowed", "request_controls_not_allowed"}:
                     reason = "unspecified"
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:

@@ -13,6 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import make_originals as originals
 
 
+# Only a temporary synthetic package fixture, never a registered model work.
+SVG_SOURCE = ('﻿<?xml version="1.0" encoding="UTF-8"?>\r\n'
+              '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 160 80">\r\n'
+              '<title>合成 SVG</title><!-- inert &lt;script&gt; example -->\r\n'
+              '<defs><linearGradient id="paint"><stop stop-color="red"/><stop offset="1" stop-color="gold"/></linearGradient>'
+              '<circle id="shape" r="5"/></defs><style>@keyframes fade{from{opacity:.5}to{opacity:1}}</style>\r\n'
+              '<rect width="160" height="80" fill="#123456"/><use xlink:href="#shape" x="80" y="40" fill="url(#paint)"/>'
+              '<circle cx="20" cy="40" r="10" fill="url(\'\x23paint\')"><animate attributeName="cx" values="20;140;20" dur="1s" repeatCount="indefinite"/></circle>\r\n'
+              '</svg>\r\n').encode("utf-8")
+
+
 class OriginalsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -300,6 +311,138 @@ class OriginalsTests(unittest.TestCase):
             descriptors, payloads = self.build()
             self.assertEqual(descriptors["failed-run"]["status"], "unsupported")
             self.assertEqual(payloads, {})
+
+    def test_legacy_html_package_bytes_unchanged(self):
+        descriptor, _ = self.package()
+        self.assertEqual(descriptor["package"]["sha256"], "3a8a16b6a61491bbe4047d46b87c664ab53e1cd1e40e4a5abe83ab84adbd9c75")
+        self.assertEqual(descriptor["package"]["size"], 2141)
+
+    def test_standalone_svg_exact_bytes_audit_and_both_transports(self):
+        for entrypoint in ("index.svg", "scene.SVG"):
+            with self.subTest(entrypoint=entrypoint):
+                self.files = {entrypoint: SVG_SOURCE}
+                self.register(generation=True)
+                descriptor, package = self.package()
+                self.assertEqual(descriptor["status"], "ready")
+                self.assertEqual(descriptor["entrypoint"], entrypoint)
+                self.assertEqual(descriptor["policy"], "opaque-srcdoc-v1")
+                self.assertEqual(descriptor["missing"], [])
+                self.assertEqual(package["adaptation"], {"version": 1, "protocol": "standalone-svg-v1"})
+                self.assertEqual(set(package["files"]), {entrypoint})
+                file = package["files"][entrypoint]
+                self.assertEqual(file["mime"], "image/svg+xml")
+                self.assertEqual(file["size"], len(SVG_SOURCE))
+                self.assertEqual(file["sha256"], hashlib.sha256(SVG_SOURCE).hexdigest())
+                self.assertEqual(base64.b64decode(file["base64"]), SVG_SOURCE)
+                self.assertEqual(self.build(), self.build())
+                descriptors, payloads = self.build()
+                originals.validate_originals({"format": originals.FORMAT_V2, "transport": "external",
+                                              "runs": self.runs, "originals": descriptors}, payloads)
+                inline = copy.deepcopy(descriptor)
+                info = inline["package"]
+                raw = payloads[info.pop("path")]
+                info["base64"] = base64.b64encode(raw).decode()
+                self.assertEqual(originals.validate_originals({"format": originals.FORMAT_V2, "transport": "inline",
+                                                              "runs": self.runs, "originals": {"failed-run": inline}}),
+                                 {"failed-run": package})
+                self.audit["files"] = {}
+                self.assertEqual(self.build(), ({"failed-run": {**descriptor, "status": "not_reviewed", "package": None}}, {}))
+                self.register(generation=True)
+                self.audit["files"]["failed-run/" + entrypoint]["sha256"] = "0" * 64
+                self.assertEqual(self.build()[0]["failed-run"]["status"], "not_reviewed")
+                self.register(generation=True)
+                self.audit["files"]["failed-run/" + entrypoint]["decision"] = "withhold"
+                self.assertEqual(self.build()[0]["failed-run"]["status"], "withheld")
+
+    def test_svg_entry_selection_index_preferred_sole_top_level_or_none(self):
+        for paths, expected in ((["one.svg"], "one.svg"), (["one.SVG"], "one.SVG"),
+                                (["one.svg", "index.svg", "two.svg"], "index.svg"),
+                                (["one.svg", "two.svg"], None), (["nested/scene.svg"], None)):
+            with self.subTest(paths=paths):
+                self.files = {path: SVG_SOURCE for path in paths}
+                self.register()
+                descriptors, payloads = self.build()
+                self.assertEqual(descriptors["failed-run"]["entrypoint"], expected)
+                self.assertEqual(descriptors["failed-run"]["status"], "ready" if expected else "no_entrypoint")
+                self.assertEqual(bool(payloads), expected is not None)
+        self.files["index.html"] = '<!doctype html><html><head></head><body>legacy wins</body></html>'
+        self.register()
+        self.assertEqual(self.package()[0]["entrypoint"], "index.html")
+        self.manifest["artifacts"].append({"path": "output/../escape.svg", "kind": "output"})
+        self.write_manifest()
+        with self.assertRaises(RuntimeError):
+            self.build()
+
+    def test_standalone_svg_rejects_xml_active_and_external_payloads(self):
+        opening = '<svg xmlns="http://www.w3.org/2000/svg">'
+        cases = [opening + '<g></svg>', '<svg/>', '<html/>', '<svg xmlns="https://example.invalid/svg"/>',
+                 opening + '<script>alert(1)</script></svg>', opening + '<g onload="alert(1)"/></svg>',
+                 opening + '<g ONCLICK="alert(1)"/></svg>',
+                 opening + '<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject></svg>',
+                 opening + '<use href="https://example.invalid/a.svg#x"/></svg>',
+                 opening + '<use href="other.svg#x"/></svg>', opening + '<use href="javascript:alert(1)"/></svg>',
+                 opening + '<use href="data:image/svg+xml;base64,PHN2Zy8+"/></svg>',
+                 opening + '<feImage href="https://example.invalid/a.png"/></svg>',
+                 opening + '<path fill="url(https://example.invalid/a.svg#x)"/></svg>',
+                 opening + '<path fill="url(/*not-a-comment*/#paint)"/></svg>',
+                 opening + '<style>g{fill:url(/**/#paint)}</style></svg>',
+                 opening + '<style>@import "https://example.invalid/a.css";</style></svg>',
+                 opening + '<style>g{fill:url(https://example.invalid/a.svg#x)}</style></svg>',
+                 opening + '<style>g{fill:u\\72l(https://example.invalid/a.svg#x)}</style></svg>',
+                 opening + '<style>g{background:image-set("https://example.invalid/a.png" 1x)}</style></svg>',
+                 opening + '<g style="fill:url(https://example.invalid/a.svg#x)"/></svg>',
+                 opening + '<animate attributeName="onload" to="alert(1)"/></svg>',
+                 opening + '<set attributeName="href" to="https://example.invalid/x"/></svg>',
+                 opening + '<set attributeName="style" to="fill:red"/></svg>',
+                 opening + '<g xml:base="https://example.invalid/"/></svg>',
+                 opening + '<style><g/></style></svg>',
+                 '<!DOCTYPE svg>' + opening + '</svg>',
+                 '<!DOCTYPE svg SYSTEM "https://example.invalid/svg.dtd">' + opening + '</svg>',
+                 '<!DOCTYPE svg [<!ENTITY x "expanded">]>' + opening + '<text>&x;</text></svg>',
+                 '<?xml-stylesheet href="https://example.invalid/a.css"?>' + opening + '</svg>',
+                 '<?xml version="1.0" encoding="iso-8859-1"?>' + opening + '</svg>',
+                 '<?xml version="1.1"?>' + opening + '</svg>']
+        for entry in cases:
+            with self.subTest(entry=entry):
+                self.files = {"index.svg": entry}
+                self.register()
+                descriptors, payloads = self.build()
+                self.assertEqual(descriptors["failed-run"]["status"], "unsupported")
+                self.assertEqual(payloads, {})
+
+    def test_standalone_svg_package_schema_binding_and_tamper_rejections(self):
+        self.files = {"index.svg": SVG_SOURCE}
+        self.register(generation=True)
+        descriptor, package = self.package()
+        for mutation in (lambda p: p.update(entrypoint="nested/index.svg"),
+                         lambda p: p.update(entrypoint="../index.svg"),
+                         lambda p: p.update(entrypoint="index.html"),
+                         lambda p: p["adaptation"].update(protocol="html"),
+                         lambda p: p["adaptation"].update(version=True),
+                         lambda p: p["adaptation"].update(head_offset=1),
+                         lambda p: p.update(missing=["one.css"]),
+                         lambda p: p["files"].update({"second.svg": p["files"]["index.svg"]}),
+                         lambda p: p["files"]["index.svg"].update(mime="text/html"),
+                         lambda p: p["files"]["index.svg"].update(sha256="0" * 64)):
+            bad = copy.deepcopy(package)
+            mutation(bad)
+            with self.assertRaises(RuntimeError):
+                originals.validate_original_package(originals.encode_json(bad))
+        bad = copy.deepcopy(package)
+        raw = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'
+        bad["files"]["index.svg"].update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), base64=base64.b64encode(raw).decode())
+        with self.assertRaises(RuntimeError):
+            originals.validate_original_package(originals.encode_json(bad))
+        self.manifest["generation_artifacts"][0]["sha256"] = "0" * 64
+        self.write_manifest()
+        with self.assertRaisesRegex(RuntimeError, "generation artifact"):
+            self.build()
+        for mutation in (lambda d: d.update(entrypoint="nested/index.svg"), lambda d: d.update(entrypoint="../index.svg"),
+                         lambda d: d.update(status="missing_dependencies", missing=["one.css"])):
+            bad = copy.deepcopy(descriptor)
+            mutation(bad)
+            with self.assertRaises(RuntimeError):
+                originals.validate_original_descriptor(bad, "external")
 
     def test_limits_and_boolean_adaptation_are_not_accepted(self):
         with self.assertRaises(RuntimeError):
