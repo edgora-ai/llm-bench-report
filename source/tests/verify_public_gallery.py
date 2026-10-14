@@ -498,7 +498,7 @@ def current_document(data, sources, runtime):
     html = re.sub(r'^[ \t]*<script src="/app\.js" defer></script>[ \t]*$', '', html, flags=re.M)
     program = runtime.decode() + '\n' + sources['web/app.js'].decode()
     require(not re.search(r'</script[\t\n\f\r />]', program, re.I), 'Trusted current composition closes script')
-    payload = json.dumps(data, ensure_ascii=False, allow_nan=False).replace('<', '\\u003c')
+    payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':')).replace('<', '\\u003c')
     return html.replace('</body>', '<script>window.BENCH_SNAPSHOT=' + payload + ';</script><script>' + program + '</script></body>').encode()
 
 
@@ -1082,10 +1082,18 @@ class NativeExceptionObserver:
     def __init__(self, context, page, catalog, ledger):
         self.catalog, self.ledger = catalog, ledger
         self.session = context.new_cdp_session(page)
+        native = getattr(self.session, '_impl_obj', None)
+        self._target_sender = native.send if native is not None else None
+        self._target_loop = native._loop if native is not None else None
+        self._target_tasks = set()
+        self._retired_sessions = set()
         self.targets, self.contexts, self.scripts, self.frames, self.sources, self.pending = {}, {}, {}, {}, {}, {}
-        self.command_id, self.exception_evidence = 0, []
+        self.command_id, self.owner_generation, self.exception_evidence = 0, 0, []
         self.session.on('Target.attachedToTarget', self.attached)
         self.session.on('Target.receivedMessageFromTarget', self.message)
+        self.session.on('Target.detachedFromTarget', self.detached)
+        self.session.on('Page.frameDetached', lambda e: self.event('', 'Page.frameDetached', e))
+        self.session.on('close', lambda *args: self.closed())
         self.session.on('Runtime.executionContextCreated', lambda e: self.event('', 'Runtime.executionContextCreated', e))
         self.session.on('Runtime.exceptionThrown', lambda e: self.event('', 'Runtime.exceptionThrown', e))
         self.session.on('Debugger.scriptParsed', lambda e: self.event('', 'Debugger.scriptParsed', e))
@@ -1098,17 +1106,100 @@ class NativeExceptionObserver:
         self.session.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': False})
     def note(self, message):
         self.ledger.diagnostics.append(str(message))
+    def owner_stage(self, method, identifier, callback, stage):
+        identity = getattr(callback, 'owner_identity', None)
+        if identity is not None:
+            self.note(f'Native owner chain {method} [sid={identity[0]!r}, frame_id={identity[1]!r}, '
+                      f'command_id={identifier}, generation={identity[-1]}, stage={stage}]')
+        script = getattr(callback, 'script_identity', None)
+        if script is not None:
+            self.note(f'Native script capture {method} [sid={script[0]!r}, script_id={script[1]!r}, '
+                      f'frame_id={script[2]!r}, command_id={identifier}, stage={stage}]')
+    def command_failed(self, sid, identifier, method, callback, error):
+        self.pending.pop((sid, identifier), None)
+        self.note(f'{method} [sid={sid!r}, command_id={identifier}]: {error}')
+        self.owner_stage(method, identifier, callback, 'error: ' + str(error))
     def send(self, sid, method, params=None, callback=None):
         self.command_id += 1
         identifier = self.command_id
-        if callback:
-            self.pending[(sid, identifier)] = callback
+        if sid and callback:
+            self.pending[(sid, identifier)] = (method, callback)
+        self.owner_stage(method, identifier, callback, 'pending')
+        if sid in getattr(self, '_retired_sessions', set()):
+            self.command_failed(sid, identifier, method, callback, 'Native session already detached')
+            return
         try:
-            self.session.send('Target.sendMessageToTarget', {'sessionId': sid,
-                'message': json.dumps({'id': identifier, 'method': method, 'params': params or {}})})
+            if sid:
+                envelope = {'sessionId': sid,
+                    'message': json.dumps({'id': identifier, 'method': method, 'params': params or {}})}
+                if getattr(self, '_target_sender', None) is not None:
+                    # Use the same native Playwright channel without serially
+                    # awaiting each forwarding ACK inside a target event handler.
+                    async def forward():
+                        if sid in getattr(self, '_retired_sessions', set()):
+                            self.owner_stage(method, identifier, callback, 'forward-skipped-retired')
+                            return
+                        self.owner_stage(method, identifier, callback, 'forward-started')
+                        try:
+                            await self._target_sender('Target.sendMessageToTarget', envelope)
+                            self.owner_stage(method, identifier, callback, 'forward-ack')
+                        except Exception as error:
+                            self.command_failed(sid, identifier, method, callback, error)
+                    task = self._target_loop.create_task(forward())
+                    self._target_tasks.add(task)
+                    def completed(task):
+                        self._target_tasks.discard(task)
+                        if task.cancelled():
+                            self.command_failed(sid, identifier, method, callback, 'Native forwarding cancelled')
+                    task.add_done_callback(completed)
+                else:
+                    self.session.send('Target.sendMessageToTarget', envelope)
+            else:
+                result = self.session.send(method, params or {})
         except Exception as error:
+            self.command_failed(sid, identifier, method, callback, error)
+            return
+        if not sid and callback:
+            stage = callback(result)
+            self.owner_stage(method, identifier, callback, stage)
+    def retire_frames(self, identifiers, reason):
+        retired = set(identifiers)
+        while True:
+            children = {fid for fid, frame in self.frames.items() if frame.get('parentId') in retired}
+            if children <= retired:
+                break
+            retired.update(children)
+        for fid in retired:
+            frame = self.frames.get(fid)
+            if frame is not None:
+                frame['retired'] = True
+                for key in ('owner', 'owner_identity', 'owner_cache_identity', 'owner_attempt'):
+                    frame.pop(key, None)
+        for (sid, identifier), (method, callback) in list(self.pending.items()):
+            owner = getattr(callback, 'owner_identity', ())
+            script = getattr(callback, 'script_identity', ())
+            if (owner and owner[1] in retired) or (script and script[2] in retired):
+                self.pending.pop((sid, identifier), None)
+                self.owner_stage(method, identifier, callback, reason)
+    def detached(self, event):
+        sid = event['sessionId']
+        if not hasattr(self, '_retired_sessions'):
+            self._retired_sessions = set()
+        self._retired_sessions.add(sid)
+        self.note(f'Native session detached [sid={sid!r}, target_id={event.get("targetId")!r}]')
+        self.retire_frames([fid for fid, frame in self.frames.items() if frame.get('session_id') == sid], 'session-detached')
+        for key, (method, callback) in list(self.pending.items()):
+            if key[0] == sid:
+                self.pending.pop(key, None)
+                self.owner_stage(method, key[1], callback, 'session-detached')
+        self.reclassify()
+    def closed(self):
+        self.note('Native root CDP session closed')
+        self.retire_frames(list(self.frames), 'root-session-closed')
+        for (sid, identifier), (method, callback) in list(self.pending.items()):
             self.pending.pop((sid, identifier), None)
-            self.note(method + ': ' + str(error))
+            self.owner_stage(method, identifier, callback, 'root-session-closed')
+        self.reclassify()
     def attached(self, event):
         sid, info = event['sessionId'], event['targetInfo']
         self.targets[sid] = info
@@ -1116,16 +1207,22 @@ class NativeExceptionObserver:
         if shell:
             self.frames.setdefault(info['targetId'], {}).update(
                 id=info['targetId'], parentId=self.main_frame_id, session_id=sid)
-        # Enable exception/context/script capture before any synchronous DOM owner
-        # reads: the product may destroy a failing original immediately.
+        # Enable exception/context/script capture before Page discovery: its
+        # frame-tree callbacks issue synchronous DOM owner round trips, during
+        # which a failing original may disappear before getScriptSource is sent.
         self.send(sid, 'Runtime.enable')
-        self.send(sid, 'Page.enable')
-        self.send(sid, 'Page.getFrameTree', callback=lambda result, sid=sid: self.frame_tree(sid, result.get('frameTree')))
         self.send(sid, 'Debugger.enable')
         self.send(sid, 'Debugger.setSkipAllPauses', {'skip': True})
+        self.send(sid, 'Page.enable')
+        self.send(sid, 'Page.getFrameTree', callback=lambda result, sid=sid: self.frame_tree(sid, result.get('frameTree')))
         self.send(sid, 'Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': False})
-        if shell and not self.frames[info['targetId']].get('binding'):
-            self.bind_shell(sid)
+        if shell:
+            self.reconcile_owner(info['targetId'])
+            for fid, frame in list(self.frames.items()):
+                if frame.get('parentId') == info['targetId']:
+                    self.reconcile_owner(fid)
+            if not self.frames[info['targetId']].get('binding'):
+                self.bind_shell(sid)
     def frame_tree(self, sid, tree):
         if tree:
             self.event(sid, 'Page.frameNavigated', {'frame': tree['frame']})
@@ -1134,7 +1231,18 @@ class NativeExceptionObserver:
     def bind_shell(self, sid):
         self.bind_report_owner(self.targets[sid]['targetId'])
     def bind_report_owner(self, fid):
+        frame = self.frames[fid]
+        if frame.get('binding') or frame.get('binding_inflight'):
+            return
+        # Synchronous CDP reads can dispatch another frame event reentrantly.
+        # Do not start a second owner read or replace already captured evidence.
+        frame['binding_inflight'] = True
         try:
+            # Discovering/promoting the shell cannot lend its SID to an inner.
+            # Reconcile already-native children before any synchronous outer read.
+            for child_id, child in list(self.frames.items()):
+                if child.get('parentId') == fid:
+                    self.reconcile_owner(child_id)
             node = self.session.send('DOM.getFrameOwner', {'frameId': fid})
             remote = self.session.send('DOM.resolveNode', {'backendNodeId': node['backendNodeId']})['object']['objectId']
             try:
@@ -1143,26 +1251,54 @@ class NativeExceptionObserver:
                 binding = response.get('result', {}).get('value')
                 if isinstance(binding, dict):
                     binding['report_frame_id'] = self.main_frame_id
-                    self.frames[fid]['binding'] = binding
+                    if not frame.get('binding'):
+                        frame['binding'] = binding
             finally:
                 self.session.send('Runtime.releaseObject', {'objectId': remote})
         except Exception as error:
             self.note('Shell owner proof unavailable: ' + str(error))
+        finally:
+            frame.pop('binding_inflight', None)
     def message(self, event):
         sid, message = event['sessionId'], json.loads(event['message'])
         if 'method' in message:
             self.event(sid, message['method'], message.get('params', {}))
         elif (sid, message.get('id')) in self.pending:
-            callback = self.pending.pop((sid, message['id']))
+            method, callback = self.pending.pop((sid, message['id']))
+            self.note(f"Native response {method} [sid={sid!r}, command_id={message['id']}]")
             if 'error' in message:
-                self.note('Native proof command failed: ' + str(message['error']))
+                self.note(f"Native proof command failed: {method} [sid={sid!r}, command_id={message['id']}]: {message['error']}")
+                self.owner_stage(method, message['id'], callback, 'error: ' + str(message['error']))
             else:
-                callback(message.get('result', {}))
+                stage = callback(message.get('result', {}))
+                self.owner_stage(method, message['id'], callback, stage)
+        elif 'id' in message and sid in getattr(self, '_retired_sessions', set()):
+            self.note(f"Unmatched native response [sid={sid!r}, command_id={message['id']}, retired=True]")
         self.reclassify()
     def event(self, sid, method, event):
-        if method == 'Runtime.executionContextCreated':
+        if method == 'Target.detachedFromTarget':
+            self.detached(event)
+            return
+        if sid in getattr(self, '_retired_sessions', set()):
+            return
+        if method == 'Page.frameDetached':
+            fid, reason = event.get('frameId'), event.get('reason')
+            self.note(f'Native frame detached [sid={sid!r}, frame_id={fid!r}, reason={reason!r}]')
+            if reason == 'remove' and fid:
+                self.retire_frames([fid], 'frame-detached')
+        elif method == 'Runtime.executionContextCreated':
             item = event['context']
             self.contexts[(sid, item['id'])] = item
+            aux = item.get('auxData', {})
+            fid = aux.get('frameId')
+            if fid and aux.get('isDefault') is True and aux.get('type') == 'default':
+                frame = self.frames.setdefault(fid, {'id': fid, 'session_id': sid})
+                if sid:
+                    frame['session_id'] = sid
+                self.reconcile_owner(fid)
+                for child_id, child in list(self.frames.items()):
+                    if child.get('parentId') == fid:
+                        self.reconcile_owner(child_id)
         elif method in ('Page.frameAttached', 'Page.frameNavigated'):
             if method == 'Page.frameNavigated' and not sid:
                 # A cross-renderer report navigation resets Chromium's skip flag.
@@ -1171,20 +1307,25 @@ class NativeExceptionObserver:
             fid = item.get('id') or item.get('frameId')
             if fid:
                 previous = self.frames.setdefault(fid, {'id': fid, 'session_id': sid})
-                if sid:
-                    # Native child events supersede root discovery of the same
-                    # frame; later root events must not erase child ownership.
+                # Only native facts for this inner may promote its SID. Late
+                # root discovery must not overwrite child ancestry or lifecycle.
+                if sid or not previous.get('session_id'):
                     previous['session_id'] = sid
-                previous.update({key: item[key] for key in ('parentId', 'url') if key in item})
-                if item.get('parentFrameId'):
-                    previous['parentId'] = item['parentFrameId']
+                    previous.update({key: item[key] for key in ('parentId', 'url', 'loaderId') if key in item})
+                    if item.get('parentFrameId'):
+                        previous['parentId'] = item['parentFrameId']
+                elif not previous.get('parentId'):
+                    # A native root event may fill ancestry absent from an early
+                    # child context, but cannot replace its SID or known parent.
+                    parent = item.get('parentFrameId') or item.get('parentId')
+                    if parent:
+                        previous['parentId'] = parent
+                self.reconcile_owner(fid)
+                for child_id, child in list(self.frames.items()):
+                    if child.get('parentId') == fid:
+                        self.reconcile_owner(child_id)
                 if not sid and previous.get('parentId') == self.main_frame_id and not previous.get('binding'):
                     self.bind_report_owner(fid)
-                shell = self.frames.get(previous.get('parentId'), {})
-                if sid and shell.get('session_id') == sid and not previous.get('owner_requested'):
-                    previous['owner_requested'] = True
-                    self.send(sid, 'DOM.getFrameOwner', {'frameId': fid},
-                        lambda result, fid=fid, sid=sid: self.owner_node(sid, fid, result))
         elif method == 'Debugger.scriptParsed':
             item = dict(event)
             context = self.contexts.get((sid, item.get('executionContextId')), {})
@@ -1194,8 +1335,12 @@ class NativeExceptionObserver:
             # destroy its frame. Attribution still requires that run's exact
             # source and both native frame-owner proofs below.
             if item.get('hash') in self.catalog.script_hashes:
-                self.send(sid, 'Debugger.getScriptSource', {'scriptId': item['scriptId']},
-                    lambda result, key=(sid, item['scriptId']): self.sources.update({key: result.get('scriptSource')}))
+                def capture(result, key=(sid, item['scriptId'])):
+                    source = result.get('scriptSource')
+                    self.sources[key] = source
+                    return 'captured' if isinstance(source, str) else 'empty'
+                capture.script_identity = (sid, item['scriptId'], item.get('executionContextAuxData', {}).get('frameId'))
+                self.send(sid, 'Debugger.getScriptSource', {'scriptId': item['scriptId']}, capture)
         elif method == 'Runtime.exceptionThrown':
             details = event['exceptionDetails']
             context = self.contexts.get((sid, details.get('executionContextId')))
@@ -1205,16 +1350,80 @@ class NativeExceptionObserver:
             self.ledger.native_errors.append(record)
             self.exception_evidence.append(record)
         self.reclassify()
-    def owner_node(self, sid, fid, result):
-        if result.get('backendNodeId'):
-            self.send(sid, 'DOM.describeNode', {'backendNodeId': result['backendNodeId'], 'depth': 0},
-                lambda response, fid=fid: self.cache_owner(fid, response))
-    def cache_owner(self, fid, response):
+    def owner_signature(self, fid):
+        frame = self.frames.get(fid, {})
+        shell = self.frames.get(frame.get('parentId'), {})
+        return (frame.get('session_id'), fid, frame.get('parentId'), frame.get('loaderId'), frame.get('url'),
+                shell.get('session_id'), shell.get('parentId'), shell.get('loaderId'), shell.get('url'),
+                shell.get('owner_generation'))
+    def owner_is_current(self, identity):
+        frame = self.frames.get(identity[1], {})
+        return not frame.get('retired') and frame.get('owner_identity') == identity and self.owner_signature(identity[1]) == identity[:-1]
+    def reconcile_owner(self, fid):
+        frame = self.frames[fid]
+        if frame.get('retired'):
+            return
+        signature = self.owner_signature(fid)
+        if frame.get('owner_identity', ())[:-1] != signature:
+            # Observer-wide generations cannot be reused after frame teardown.
+            self.owner_generation = getattr(self, 'owner_generation', 0) + 1
+            frame['owner_generation'] = self.owner_generation
+            frame['owner_identity'] = (*signature, frame['owner_generation'])
+            frame.pop('owner', None)
+            frame.pop('owner_cache_identity', None)
+        identity = frame['owner_identity']
+        sid = frame.get('session_id')
+        shell = self.frames.get(frame.get('parentId'), {})
+        native_owner = sid is not None and shell.get('session_id') == sid and (bool(sid) or (
+            shell.get('parentId') == getattr(self, 'main_frame_id', None)))
+        if not native_owner or frame.get('owner_attempt') == identity:
+            return
+        # Reserve before dispatch: direct root sends and target responses can
+        # deliver native events synchronously, including a new generation.
+        frame['owner_attempt'] = identity
+        if sid and getattr(self, '_target_sender', None) is not None:
+            # The shell's native DOM tree contains the inner iframe's frameId
+            # and attributes in one reply, before a second owner round trip.
+            document = lambda result: self.document_owner(identity, result)
+            document.owner_identity = identity
+            self.send(sid, 'DOM.getDocument', {'depth': 4, 'pierce': False}, document)
+        callback = lambda result: self.owner_node(identity, result)
+        callback.owner_identity = identity
+        self.send(sid, 'DOM.getFrameOwner', {'frameId': fid}, callback)
+    def document_owner(self, identity, result):
+        if not self.owner_is_current(identity):
+            return 'stale'
+        nodes, matches = [result.get('root', {})], []
+        while nodes:
+            node = nodes.pop()
+            if node.get('frameId') == identity[1]:
+                matches.append(node)
+            nodes.extend(node.get('children', []))
+        if len(matches) != 1:
+            return 'empty-or-ambiguous'
+        return self.cache_owner(identity, {'node': matches[0]})
+    def owner_node(self, identity, result):
+        if not self.owner_is_current(identity):
+            return 'stale'
+        if not result.get('backendNodeId'):
+            return 'empty'
+        callback = lambda response: self.cache_owner(identity, response)
+        callback.owner_identity = identity
+        self.send(identity[0], 'DOM.describeNode', {'backendNodeId': result['backendNodeId'], 'depth': 0}, callback)
+        return 'describe-dispatched'
+    def cache_owner(self, identity, response):
+        if not self.owner_is_current(identity):
+            return 'stale'
         node = response.get('node', {})
+        if not node:
+            return 'empty'
         attrs = node.get('attributes', [])
         attrs = dict(zip(attrs[::2], attrs[1::2]))
-        self.frames[fid]['owner'] = {'nodeName': node.get('nodeName'), 'sandbox': attrs.get('sandbox'),
+        frame = self.frames[identity[1]]
+        frame['owner'] = {'nodeName': node.get('nodeName'), 'sandbox': attrs.get('sandbox'),
             'referrerpolicy': attrs.get('referrerpolicy'), 'has_srcdoc': 'srcdoc' in attrs}
+        frame['owner_cache_identity'] = identity
+        return 'cached'
     def reclassify(self):
         for record in self.exception_evidence:
             if record.get('proof'):
@@ -1228,7 +1437,13 @@ class NativeExceptionObserver:
             source = self.sources.get((sid, script_id))
             record['evidence'] = {'script_id': script_id, 'script': script, 'frame': frame, 'shell': shell,
                                   'source_sha256': digest(source.encode('utf-8')) if isinstance(source, str) else None}
-            proof = model_exception_proof(context, script, frame, shell, (frame or {}).get('owner'), source, self.catalog)
+            owner = (frame or {}).get('owner')
+            if frame and 'owner_identity' in frame and (
+                    not self.owner_is_current(frame['owner_identity']) or
+                    frame.get('owner_cache_identity') != frame['owner_identity']):
+                owner = None
+            proof = model_exception_proof(context, script, frame, shell, owner, source, self.catalog) if (
+                frame and frame.get('session_id') == sid) else None
             if proof:
                 record['evidence'] = json.loads(json.dumps(record['evidence']))
                 record.update(attribution='model-original', proof=proof)
@@ -1320,7 +1535,7 @@ def open_public_run(page, url, row):
     page.goto(url + '?' + urlencode({'task_id': row['task_id'], 'purpose': row['purpose'], 'model_query': row['model']}), wait_until='networkidle')
     public_ready(page)
     model_menu(page)
-    page.locator('#public-model').fill(row['model'])
+    require(page.locator('#public-model').input_value() == row['model'], 'URL model query did not populate the actual filter')
     reach_public_run(page, row)
 
 

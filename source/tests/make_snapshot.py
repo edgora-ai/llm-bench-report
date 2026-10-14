@@ -270,7 +270,7 @@ def _error_class(message):
 def render_snapshot(data, root=ROOT):
     """Render public data with the trusted web template, without I/O to archives/API."""
     root = Path(root)
-    blob = json.dumps(data, ensure_ascii=False, allow_nan=False)
+    blob = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     html = (root / "web/index.html").read_text(encoding="utf-8")
     # Inline assets and place the viewer after the DOM it queries. Keep exactly
     # the original two-script contract; model text is JSON, never executable HTML.

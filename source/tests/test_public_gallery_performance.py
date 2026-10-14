@@ -494,6 +494,29 @@ class GalleryUtilityTests(unittest.TestCase):
             with self.subTest(markup=markup[-64:]), self.assertRaises(AssertionError):
                 audit(markup)
 
+class PublicRouteHelperTests(unittest.TestCase):
+    def test_open_run_checks_url_filter_without_retyping_and_remounting(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        row = {'task_id': 'blackhole', 'purpose': 'benchmark', 'model': 'opencode/model-free'}
+        for actual in (row['model'], 'wrong-model'):
+            with self.subTest(actual=actual):
+                model = Mock()
+                model.input_value.return_value = actual
+                page = SimpleNamespace(goto=Mock(), locator=Mock(return_value=model))
+                with patch.object(verifier, 'public_ready'), patch.object(verifier, 'model_menu'), patch.object(verifier, 'reach_public_run') as reach:
+                    if actual == row['model']:
+                        verifier.open_public_run(page, 'https://report.example/', row)
+                        reach.assert_called_once_with(page, row)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'model query'):
+                            verifier.open_public_run(page, 'https://report.example/', row)
+                        reach.assert_not_called()
+                model.fill.assert_not_called()
+                self.assertIn('model_query=opencode%2Fmodel-free', page.goto.call_args.args[0])
+                self.assertEqual(page.goto.call_args.kwargs, {'wait_until': 'networkidle'})
+
+
 class NativeExceptionAttributionTests(unittest.TestCase):
     def test_native_observer_immediately_skips_pauses_in_root_and_child_sessions(self):
         from types import SimpleNamespace
@@ -558,14 +581,75 @@ class NativeExceptionAttributionTests(unittest.TestCase):
                     'type': 'iframe', 'targetId': 'shell', 'parentFrameId': 'report'}})
                 methods = [json.loads(params['message'])['method'] if method == 'Target.sendMessageToTarget'
                            else method for method, params in commands]
-                self.assertEqual(methods[:6], ['Runtime.enable', 'Page.enable', 'Page.getFrameTree',
-                    'Debugger.enable', 'Debugger.setSkipAllPauses', 'Target.setAutoAttach'])
+                self.assertEqual(methods[:6], ['Runtime.enable', 'Debugger.enable', 'Debugger.setSkipAllPauses',
+                    'Page.enable', 'Page.getFrameTree', 'Target.setAutoAttach'])
                 if early_owner:
                     self.assertNotIn('DOM.getFrameOwner', methods)
                 else:
                     self.assertLess(methods.index('Target.setAutoAttach'), methods.index('DOM.getFrameOwner'))
                 self.assertEqual(observer.frames['shell']['binding']['run_id'], '1' * 32)
                 self.assertEqual(observer.frames['shell']['session_id'], 'child')
+
+    def test_script_source_capture_precedes_frame_tree_owner_round_trips(self):
+        from types import SimpleNamespace
+        context, script, frame, shell, owner, source, catalog = self.fixture()
+        catalog.script_hashes = {script['hash']}
+        commands = []
+        observer = None
+        class Session:
+            def on(self, event, callback):
+                pass
+            def send(self, method, params=None):
+                if method == 'Page.getFrameTree':
+                    return {'frameTree': {'frame': {'id': 'report'}}}
+                if method == 'DOM.getFrameOwner':
+                    return {'backendNodeId': 1}
+                if method == 'DOM.resolveNode':
+                    return {'object': {'objectId': 'owner'}}
+                if method == 'Runtime.callFunctionOn':
+                    return {'result': {'value': copy.deepcopy(shell['binding'])}}
+                if method != 'Target.sendMessageToTarget':
+                    return {}
+                command = json.loads(params['message'])
+                commands.append(command['method'])
+                sid = params['sessionId']
+                def deliver(message):
+                    observer.message({'sessionId': sid, 'message': json.dumps(message)})
+                result = {}
+                if command['method'] == 'Debugger.enable':
+                    deliver({'method': 'Runtime.executionContextCreated', 'params': {'context': context}})
+                    deliver({'method': 'Debugger.scriptParsed', 'params': {'scriptId': 'script', **script}})
+                elif command['method'] == 'Debugger.getScriptSource':
+                    result = {'scriptSource': source}
+                elif command['method'] == 'Page.getFrameTree':
+                    result = {'frameTree': {'frame': {'id': 'shell', 'parentId': 'report'},
+                        'childFrames': [{'frame': {'id': 'inner', 'parentId': 'shell'}}]}}
+                elif command['method'] == 'DOM.getFrameOwner':
+                    result = {'backendNodeId': 2}
+                elif command['method'] == 'DOM.describeNode':
+                    result = {'node': {'nodeName': 'IFRAME', 'attributes': [
+                        'sandbox', 'allow-scripts', 'referrerpolicy', 'no-referrer', 'srcdoc', 'original']}}
+                deliver({'id': command['id'], 'result': result})
+                return {}
+        observer = verifier.NativeExceptionObserver(
+            SimpleNamespace(new_cdp_session=lambda page: Session()), object(), catalog,
+            verifier.BrowserErrorLedger())
+        observer.attached({'sessionId': 'native-session', 'targetInfo': {
+            'type': 'iframe', 'targetId': 'shell', 'parentFrameId': 'report'}})
+        self.assertLess(commands.index('Debugger.getScriptSource'), commands.index('Page.enable'))
+        self.assertLess(commands.index('Debugger.getScriptSource'), commands.index('DOM.getFrameOwner'))
+        observer.event('native-session', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'original failure'}})
+        record = observer.ledger.native_errors[0]
+        self.assertEqual(record['attribution'], 'model-original')
+        self.assertEqual(record['proof']['context_unique_id'], context['uniqueId'])
+        self.assertEqual(record['proof']['session_id'], 'native-session')
+        # Already captured source/dual-owner/context proof survives late teardown;
+        # it is not manufactured by a second matching exception.
+        observer.contexts.clear(); observer.frames.clear(); observer.scripts.clear(); observer.sources.clear()
+        observer.reclassify()
+        self.assertEqual(record['proof']['script_sha256'], script['hash'])
+        self.assertFalse(observer.ledger)
 
     def test_inner_native_owner_is_requested_before_report_binding_is_ready(self):
         observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
@@ -579,29 +663,681 @@ class NativeExceptionAttributionTests(unittest.TestCase):
         self.assertEqual(observer.frames['inner']['parentId'], 'shell')
         self.assertNotIn('binding', observer.frames['shell'])
 
-    def test_root_discovered_inner_frame_adopts_authoritative_child_session_without_losing_cache(self):
+    def owner_observer(self, root_owner='complete'):
+        """Deterministic native command transport; child replies are delivered explicitly."""
+        context, script, _, shell, _, source, catalog = self.fixture()
+        catalog.script_hashes = {script['hash']}
         observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+        observer.catalog, observer.ledger = catalog, verifier.BrowserErrorLedger()
         observer.main_frame_id = 'report'
-        observer.frames = {'shell': {'id': 'shell', 'session_id': 'child'}}
-        observer.exception_evidence = []
-        observer.ledger = verifier.BrowserErrorLedger()
-        commands = []
-        observer.send = lambda sid, method, params, callback: commands.append((sid, method, params))
-        observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'shell'})
+        observer.contexts, observer.scripts, observer.sources, observer.pending = {}, {}, {}, {}
+        shell['session_id'] = ''
+        observer.frames = {'shell': shell}
+        observer.command_id, observer.exception_evidence = 0, []
+        commands, hooks = [], {}
+        node = {'node': {'nodeName': 'IFRAME', 'attributes': [
+            'sandbox', 'allow-scripts', 'referrerpolicy', 'no-referrer', 'srcdoc', source]}}
+        class Session:
+            def send(self, method, params):
+                if method == 'Target.sendMessageToTarget':
+                    command = json.loads(params['message'])
+                    commands.append((params['sessionId'], command))
+                    return {}
+                commands.append(('', {'method': method, 'params': params}))
+                if method in hooks:
+                    hooks.pop(method)()
+                if method == 'DOM.getFrameOwner':
+                    if params['frameId'] == 'shell':
+                        return {'backendNodeId': 1}
+                    if root_owner == 'error':
+                        raise RuntimeError('Root frame detached')
+                    return {} if root_owner == 'empty' else {'backendNodeId': 7}
+                if method == 'DOM.describeNode':
+                    return copy.deepcopy(node)
+                if method == 'DOM.resolveNode':
+                    return {'object': {'objectId': 'outer'}}
+                if method == 'Runtime.callFunctionOn':
+                    return {'result': {'value': copy.deepcopy(shell['binding'])}}
+                if method == 'Debugger.getScriptSource':
+                    return {'scriptSource': source}
+                if method in ('Debugger.setSkipAllPauses', 'Runtime.releaseObject'):
+                    return {}
+                raise AssertionError('Unexpected command: ' + method)
+        observer.session = Session()
+        return observer, commands, hooks, node
+
+    @staticmethod
+    def owner_requests(commands, sid=None):
+        return [command for session, command in commands if (sid is None or session == sid) and
+                command['method'] == 'DOM.getFrameOwner' and command['params']['frameId'] == 'inner']
+
+    @staticmethod
+    def native_inner(observer, sid='child', parent='shell'):
+        observer.event(sid, 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': parent})
+
+    @staticmethod
+    def owner_reply(observer, sid, command, result=None, error=None):
+        message = {'id': command['id']}
+        message['error' if error is not None else 'result'] = error if error is not None else result
+        observer.message({'sessionId': sid, 'message': json.dumps(message)})
+
+    def test_root_discovered_inner_rejects_active_cache_but_retains_complete_event_proof(self):
+        observer, commands, _, node = self.owner_observer()
+        context, script, _, _, owner, source, _ = self.fixture()
+        observer.event('', 'Runtime.executionContextCreated', {'context': context})
+        self.native_inner(observer, '')
+        observer.event('', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+        observer.event('', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'historical complete event'}})
+        historical = observer.ledger.native_errors[0]
+        proof, evidence = copy.deepcopy(historical['proof']), copy.deepcopy(historical['evidence'])
         cached = observer.frames['inner']
-        self.assertEqual(cached['session_id'], '')
-        cached['owner'] = {'nodeName': 'IFRAME', 'sandbox': 'allow-scripts',
-            'referrerpolicy': 'no-referrer', 'has_srcdoc': True}
-        observer.event('child', 'Page.frameNavigated', {'frame': {
-            'id': 'inner', 'parentId': 'shell', 'url': 'about:srcdoc'}})
+        # An unscoped root cache cannot authorize a newly native child identity.
+        cached['owner'] = copy.deepcopy(owner)
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.native_inner(observer)
         self.assertIs(observer.frames['inner'], cached)
+        self.assertNotIn('owner', cached)
+        observer.event('child', 'Runtime.executionContextCreated', {'context': context})
+        observer.event('child', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+        source_command = next(c for sid, c in commands if sid == 'child' and c['method'] == 'Debugger.getScriptSource')
+        self.owner_reply(observer, 'child', source_command, {'scriptSource': source})
+        observer.event('child', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'child needs its own owner'}})
+        current = observer.ledger.native_errors[1]
+        self.assertNotIn('proof', current)
+        request = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', request, {'backendNodeId': 8})
+        describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        self.owner_reply(observer, 'child', describe, node)
+        self.assertEqual(cached['owner'], owner)
+        self.assertEqual(current['proof']['session_id'], 'child')
+        observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'wrong-shell'})
         self.assertEqual(cached['session_id'], 'child')
         self.assertEqual(cached['parentId'], 'shell')
-        self.assertEqual(cached['owner']['sandbox'], 'allow-scripts')
-        self.assertEqual(commands, [('child', 'DOM.getFrameOwner', {'frameId': 'inner'})])
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+        self.assertEqual(historical['proof'], proof)
+        self.assertEqual(historical['evidence'], evidence)
+
+    def test_failed_or_empty_root_attempt_allows_one_new_native_child_attempt(self):
+        for outcome in ('error', 'empty'):
+            for discovery in ('page', 'context', 'tree'):
+                with self.subTest(outcome=outcome, discovery=discovery):
+                    observer, commands, _, _ = self.owner_observer(outcome)
+                    self.native_inner(observer, '')
+                    observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+                    if discovery == 'page':
+                        self.native_inner(observer)
+                    elif discovery == 'tree':
+                        observer.frame_tree('child', {'frame': {'id': 'inner', 'parentId': 'shell'}})
+                    else:
+                        observer.event('child', 'Runtime.executionContextCreated', {'context': self.fixture()[0]})
+                    self.assertEqual(len(self.owner_requests(commands, '')), 1)
+                    self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+                    self.native_inner(observer)
+                    self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+
+    def test_owner_attempt_is_reserved_before_reentry_and_not_retried_for_same_identity(self):
+        observer, commands, hooks, _ = self.owner_observer('empty')
+        hooks['DOM.getFrameOwner'] = lambda: self.native_inner(observer, '')
+        self.native_inner(observer, '')
+        for _ in range(3):
+            self.native_inner(observer, '')
+        self.assertEqual(len(self.owner_requests(commands)), 1)
+        observer.frames['shell']['session_id'] = 'child'
+        self.native_inner(observer)
+        request = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', request, error={'message': 'Native child detached'})
+        self.native_inner(observer)
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+
+    def test_delayed_get_owner_and_describe_replies_cannot_cross_native_generation(self):
+        for stage in ('get', 'describe'):
+            with self.subTest(stage=stage):
+                observer, commands, _, node = self.owner_observer()
+                observer.frames['shell']['session_id'] = 'first'
+                self.native_inner(observer, 'first')
+                old = self.owner_requests(commands, 'first')[0]
+                if stage == 'describe':
+                    self.owner_reply(observer, 'first', old, {'backendNodeId': 7})
+                    old = next(c for sid, c in commands if sid == 'first' and c['method'] == 'DOM.describeNode')
+                observer.frames['shell']['session_id'] = 'second'
+                self.native_inner(observer, 'second')
+                self.owner_reply(observer, 'first', old, node if stage == 'describe' else {'backendNodeId': 7})
+                self.assertNotIn('owner', observer.frames['inner'])
+                describes = [c for sid, c in commands if sid == 'first' and c['method'] == 'DOM.describeNode']
+                self.assertEqual(len(describes), int(stage == 'describe'))
+                self.assertEqual(len(self.owner_requests(commands, 'second')), 1)
+                self.assertTrue(any('stale' in row for row in observer.ledger.diagnostics))
+
+    def test_synchronous_root_owner_reentry_rejects_stale_get_and_describe(self):
+        for stage in ('DOM.getFrameOwner', 'DOM.describeNode'):
+            with self.subTest(stage=stage):
+                observer, commands, hooks, _ = self.owner_observer()
+                def promote():
+                    observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+                    self.native_inner(observer)
+                hooks[stage] = promote
+                self.native_inner(observer, '')
+                self.assertNotIn('owner', observer.frames['inner'])
+                self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+                root_describes = [c for sid, c in commands if not sid and c['method'] == 'DOM.describeNode']
+                self.assertEqual(len(root_describes), int(stage == 'DOM.describeNode'))
+
+    def test_inner_before_shell_is_reconciled_before_synchronous_outer_reads(self):
+        for discovery in ('page', 'attach'):
+            with self.subTest(discovery=discovery):
+                observer, commands, hooks, _ = self.owner_observer()
+                observer.frames.clear()
+                self.native_inner(observer)
+                before_outer = []
+                hooks['DOM.getFrameOwner'] = lambda: before_outer.extend(self.owner_requests(commands, 'child'))
+                if discovery == 'page':
+                    observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+                    observer.bind_report_owner('shell')
+                else:
+                    observer.targets = {}
+                    observer.attached({'sessionId': 'child', 'targetInfo': {
+                        'type': 'iframe', 'targetId': 'shell', 'parentFrameId': 'report'}})
+                self.assertEqual(len(before_outer), 1)
+                self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+
+    def test_shell_promotion_alone_does_not_promote_inner_and_rejects_root_cache(self):
+        observer, commands, _, _ = self.owner_observer()
+        self.native_inner(observer, '')
+        self.assertIn('owner', observer.frames['inner'])
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.assertEqual(observer.frames['inner']['session_id'], '')
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(self.owner_requests(commands, 'child'), [])
+        # Isolated/non-default contexts are not native inner-session authority.
+        context = self.fixture()[0]; context['auxData']['isDefault'] = False
+        observer.event('child', 'Runtime.executionContextCreated', {'context': context})
+        self.assertEqual(observer.frames['inner']['session_id'], '')
+        self.assertEqual(self.owner_requests(commands, 'child'), [])
+
+    def test_native_ancestry_generation_changes_invalidate_pending_owner_chain(self):
+        observer, commands, _, node = self.owner_observer()
+        observer.frames['shell']['session_id'] = 'child'
+        self.native_inner(observer)
+        old = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', old, {'backendNodeId': 7})
+        describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        observer.frames['other'] = {'id': 'other', 'session_id': 'child', 'parentId': 'report'}
+        self.native_inner(observer, parent='other')
+        self.owner_reply(observer, 'child', describe, node)
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 2)
+        self.native_inner(observer, parent='shell')
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 3)
+
+    def test_unknown_root_event_cannot_borrow_promoted_child_owner(self):
+        observer, commands, _, node = self.owner_observer('empty')
+        context, script, _, _, _, _, _ = self.fixture()
+        self.native_inner(observer, '')
+        observer.event('', 'Runtime.executionContextCreated', {'context': context})
+        observer.event('', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+        observer.event('', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'unknown root event'}})
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.native_inner(observer)
+        requests = self.owner_requests(commands, 'child')
+        self.assertEqual(len(requests), 1)
+        self.owner_reply(observer, 'child', requests[0], {'backendNodeId': 8})
+        describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        self.owner_reply(observer, 'child', describe, node)
+        record = observer.ledger.native_errors[0]
+        self.assertNotIn('proof', record)
+        self.assertEqual(record['attribution'], 'trusted-or-unknown')
+        self.assertEqual(list(observer.ledger), ['unknown root event'])
+
+    def test_owner_chain_diagnostics_correlate_each_stage_without_source_bodies(self):
+        for outcome in ('empty-get', 'empty-describe', 'error', 'stale', 'pending', 'cached'):
+            with self.subTest(outcome=outcome):
+                observer, commands, _, node = self.owner_observer()
+                observer.frames['shell']['session_id'] = 'child'
+                self.native_inner(observer)
+                request = self.owner_requests(commands, 'child')[0]
+                if outcome == 'empty-get':
+                    self.owner_reply(observer, 'child', request, {})
+                elif outcome == 'error':
+                    self.owner_reply(observer, 'child', request, error={'message': 'Owner frame detached'})
+                elif outcome == 'stale':
+                    observer.frames['shell']['session_id'] = 'new-child'
+                    self.native_inner(observer, 'new-child')
+                    self.owner_reply(observer, 'child', request, {'backendNodeId': 7})
+                elif outcome in ('empty-describe', 'cached'):
+                    self.owner_reply(observer, 'child', request, {'backendNodeId': 7})
+                    describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+                    self.owner_reply(observer, 'child', describe, {} if outcome == 'empty-describe' else node)
+                notes = list(observer.ledger.diagnostics)
+                chain = [row for row in notes if row.startswith('Native owner chain ')]
+                self.assertTrue(chain)
+                for row in chain:
+                    self.assertIn("frame_id='inner'", row)
+                    self.assertRegex(row, r"sid='(?:child|new-child)', frame_id='inner', command_id=\d+, generation=\d+, stage=")
+                    self.assertNotIn(self.fixture()[5], row)
+                stage = 'empty' if outcome.startswith('empty') else outcome
+                self.assertTrue(any('stage=' + stage in row for row in chain))
+                self.assertTrue(any(f'command_id={request["id"]},' in row and "sid='child'" in row for row in chain))
+                self.assertLessEqual(len(chain), 4 * len(self.owner_requests(commands)))
+                if outcome == 'error':
+                    self.assertTrue(any('Owner frame detached' in row for row in notes))
+                if outcome == 'pending':
+                    self.assertIn(('child', request['id']), observer.pending)
+                    self.native_inner(observer)
+                    self.assertEqual(observer.ledger.diagnostics, notes)
+
+    def test_removed_and_recreated_frame_cannot_reuse_old_callback_generation(self):
+        observer, commands, _, node = self.owner_observer()
+        observer.frames['shell']['session_id'] = 'child'
+        self.native_inner(observer)
+        request = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', request, {'backendNodeId': 7})
+        old = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        del observer.frames['inner']
+        self.native_inner(observer)
+        self.owner_reply(observer, 'child', old, node)
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 2)
+
+    def test_recreated_native_shell_invalidates_active_inner_owner_without_sid_borrowing(self):
+        observer, commands, _, node = self.owner_observer()
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.native_inner(observer)
+        request = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', request, {'backendNodeId': 7})
+        describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        self.owner_reply(observer, 'child', describe, node)
+        self.assertIn('owner', observer.frames['inner'])
+        del observer.frames['shell']
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.assertEqual(observer.frames['inner']['session_id'], 'child')
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 2)
+
+    def test_native_navigation_loader_change_invalidates_owner_generation(self):
+        observer, commands, _, _ = self.owner_observer()
+        observer.frames['shell']['session_id'] = 'child'
+        self.native_inner(observer)
+        old = self.owner_requests(commands, 'child')[0]
+        observer.event('child', 'Page.frameNavigated', {'frame': {
+            'id': 'inner', 'parentId': 'shell', 'loaderId': 'new-native-loader'}})
+        self.owner_reply(observer, 'child', old, {'backendNodeId': 7})
+        self.assertFalse(any(c['method'] == 'DOM.describeNode' for sid, c in commands if sid == 'child'))
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 2)
+
+    def test_native_root_discovery_fills_missing_inner_ancestry_without_replacing_child_sid(self):
+        observer, commands, _, _ = self.owner_observer()
+        observer.event('child', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        observer.event('child', 'Runtime.executionContextCreated', {'context': self.fixture()[0]})
+        self.assertNotIn('parentId', observer.frames['inner'])
         observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'shell'})
-        self.assertEqual(cached['session_id'], 'child')
-        self.assertEqual(len(commands), 1)
+        self.assertEqual(observer.frames['inner']['session_id'], 'child')
+        self.assertEqual(observer.frames['inner']['parentId'], 'shell')
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+        observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'unrelated'})
+        self.assertEqual(observer.frames['inner']['parentId'], 'shell')
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+
+    def test_native_root_discovery_fills_missing_shell_ancestry_before_binding(self):
+        observer, commands, hooks, _ = self.owner_observer()
+        observer.frames.clear()
+        self.native_inner(observer)
+        context = copy.deepcopy(self.fixture()[0])
+        context['id'], context['uniqueId'], context['auxData']['frameId'] = 9, 'native-shell-context', 'shell'
+        observer.event('child', 'Runtime.executionContextCreated', {'context': context})
+        observed = []
+        hooks['DOM.getFrameOwner'] = lambda: observed.append(observer.frames['shell']['parentId'])
+        observer.event('', 'Page.frameAttached', {'frameId': 'shell', 'parentFrameId': 'report'})
+        self.assertEqual(observer.frames['shell']['session_id'], 'child')
+        self.assertEqual(observer.frames['shell']['parentId'], 'report')
+        self.assertEqual(observed, ['report'])
+        self.assertEqual(observer.frames['shell']['binding']['report_frame_id'], 'report')
+
+    def test_candidate_script_capture_diagnostics_correlate_without_source_bodies(self):
+        observer, _, _, _ = self.owner_observer()
+        context, script, _, _, _, source, _ = self.fixture()
+        observer.event('', 'Runtime.executionContextCreated', {'context': context})
+        parsed = {'scriptId': 'script', **script, 'executionContextAuxData': context['auxData']}
+        observer.event('', 'Debugger.scriptParsed', parsed)
+        self.assertEqual(observer.sources[('', 'script')], source)
+        notes = [row for row in observer.ledger.diagnostics if row.startswith('Native script capture ')]
+        self.assertEqual(len(notes), 2)
+        for row in notes:
+            self.assertIn("sid='', script_id='script', frame_id='inner'", row)
+            self.assertRegex(row, r'command_id=\d+, stage=')
+            self.assertNotIn(source, row)
+        self.assertIn('stage=pending', notes[0])
+        self.assertIn('stage=captured', notes[1])
+
+    def test_child_forwarding_enqueues_capture_commands_without_waiting_for_each_ack(self):
+        import asyncio
+        observer, _, _, _ = self.owner_observer()
+        loop = asyncio.new_event_loop()
+        queued, acknowledgements, replies = [], [], []
+        async def target_sender(method, params):
+            queued.append((method, params))
+            acknowledgement = loop.create_future()
+            acknowledgements.append(acknowledgement)
+            return await acknowledgement
+        observer._target_loop, observer._target_sender, observer._target_tasks = loop, target_sender, set()
+        def pump():
+            barrier = loop.create_future()
+            loop.call_soon(barrier.set_result, None)
+            loop.run_until_complete(barrier)
+        try:
+            observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, replies.append)
+            observer.send('child', 'DOM.getFrameOwner', {'frameId': 'inner'}, replies.append)
+            pump()
+            self.assertEqual(len(queued), 2)
+            self.assertTrue(all(not item.done() for item in acknowledgements))
+            self.assertEqual(len(observer.pending), 2)
+            messages = [json.loads(params['message']) for _, params in queued]
+            self.assertEqual([message['method'] for message in messages], ['Debugger.getScriptSource', 'DOM.getFrameOwner'])
+            # Native replies can arrive before the forwarding acknowledgements.
+            for message, result in zip(messages, [{'scriptSource': 'native source'}, {'backendNodeId': 7}]):
+                self.owner_reply(observer, 'child', message, result)
+            self.assertEqual(replies, [{'scriptSource': 'native source'}, {'backendNodeId': 7}])
+            self.assertEqual(observer.pending, {})
+            for acknowledgement in acknowledgements:
+                acknowledgement.set_result({})
+            pump(); pump()
+            self.assertEqual(observer._target_tasks, set())
+        finally:
+            for task in observer._target_tasks:
+                task.cancel()
+            pump(); pump()
+            loop.close()
+
+    def test_async_child_forwarding_failure_preserves_correlated_error_without_callback(self):
+        import asyncio
+        observer, _, _, _ = self.owner_observer()
+        loop = asyncio.new_event_loop()
+        replies = []
+        async def target_sender(method, params):
+            raise RuntimeError('No session with given id')
+        observer._target_loop, observer._target_sender, observer._target_tasks = loop, target_sender, set()
+        try:
+            observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, replies.append)
+            barrier = loop.create_future()
+            loop.call_soon(barrier.set_result, None)
+            loop.run_until_complete(barrier)
+            self.assertEqual(replies, [])
+            self.assertEqual(observer.pending, {})
+            self.assertTrue(any("Debugger.getScriptSource [sid='child', command_id=1]: No session with given id" in row for row in observer.ledger.diagnostics))
+        finally:
+            for task in observer._target_tasks:
+                task.cancel()
+            if observer._target_tasks:
+                loop.run_until_complete(asyncio.gather(*observer._target_tasks, return_exceptions=True))
+            loop.close()
+
+    def test_forwarding_stages_distinguish_ack_from_native_response(self):
+        import asyncio
+        observer, _, _, _ = self.owner_observer()
+        loop = asyncio.new_event_loop()
+        acknowledgement = loop.create_future()
+        replies = []
+        async def target_sender(method, params):
+            return await acknowledgement
+        def capture(result):
+            replies.append(result)
+            return 'captured'
+        capture.script_identity = ('child', 'script', 'inner')
+        observer._target_loop, observer._target_sender, observer._target_tasks = loop, target_sender, set()
+        def pump():
+            barrier = loop.create_future()
+            loop.call_soon(barrier.set_result, None)
+            loop.run_until_complete(barrier)
+        try:
+            observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, capture)
+            self.assertFalse(any('forward-started' in x for x in observer.ledger.diagnostics))
+            pump()
+            self.assertTrue(any('stage=forward-started' in x for x in observer.ledger.diagnostics))
+            self.assertFalse(any('stage=forward-ack' in x for x in observer.ledger.diagnostics))
+            self.owner_reply(observer, 'child', {'id': 1}, {'scriptSource': 'native source'})
+            self.assertEqual(replies, [{'scriptSource': 'native source'}])
+            self.assertTrue(any('Native response Debugger.getScriptSource' in x for x in observer.ledger.diagnostics))
+            acknowledgement.set_result({})
+            pump(); pump()
+            self.assertTrue(any('stage=forward-ack' in x for x in observer.ledger.diagnostics))
+            self.assertEqual(len(replies), 1)
+            self.assertEqual(observer.pending, {})
+            self.assertNotIn('native source', '\n'.join(observer.ledger.diagnostics))
+        finally:
+            for task in observer._target_tasks:
+                task.cancel()
+            pump(); pump()
+            loop.close()
+
+    def test_session_detach_retires_pending_owner_and_rejects_late_response(self):
+        observer, commands, _, node = self.owner_observer()
+        observer.frames['shell']['session_id'] = 'child'
+        self.native_inner(observer)
+        request = self.owner_requests(commands, 'child')[0]
+        self.owner_reply(observer, 'child', request, {'backendNodeId': 7})
+        describe = next(c for sid, c in commands if sid == 'child' and c['method'] == 'DOM.describeNode')
+        observer.detached({'sessionId': 'child', 'targetId': 'shell'})
+        self.assertEqual(observer.pending, {})
+        self.assertTrue(observer.frames['inner']['retired'])
+        self.assertNotIn('owner_identity', observer.frames['inner'])
+        self.assertTrue(any('session-detached' in x and f'command_id={describe["id"]}' in x for x in observer.ledger.diagnostics))
+        self.owner_reply(observer, 'child', describe, node)
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertTrue(any('Unmatched native response' in x for x in observer.ledger.diagnostics))
+        self.native_inner(observer)
+        self.assertEqual(len(self.owner_requests(commands, 'child')), 1)
+
+    def test_frame_detach_invalidates_owner_without_changing_completed_proof(self):
+        observer, _, _, _ = self.owner_observer()
+        context, script, _, _, _, _, _ = self.fixture()
+        observer.event('', 'Runtime.executionContextCreated', {'context': context})
+        self.native_inner(observer, '')
+        observer.event('', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+        observer.event('', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'completed original event'}})
+        record = observer.ledger.native_errors[0]
+        proof, evidence = copy.deepcopy(record['proof']), copy.deepcopy(record['evidence'])
+        observer.event('', 'Page.frameDetached', {'frameId': 'shell', 'reason': 'remove'})
+        self.assertTrue(observer.frames['inner']['retired'])
+        self.assertNotIn('owner', observer.frames['inner'])
+        self.assertEqual(record['proof'], proof)
+        self.assertEqual(record['evidence'], evidence)
+        self.assertEqual(record['attribution'], 'model-original')
+
+    def test_frame_swap_does_not_retire_native_child_owner(self):
+        observer, _, _, _ = self.owner_observer()
+        self.native_inner(observer, '')
+        identity = observer.frames['inner']['owner_identity']
+        observer.event('', 'Page.frameDetached', {'frameId': 'inner', 'reason': 'swap'})
+        self.assertEqual(observer.frames['inner']['owner_identity'], identity)
+        self.assertNotIn('retired', observer.frames['inner'])
+
+    def test_native_document_owner_requires_exact_frame_and_current_identity(self):
+        import asyncio
+        for matching, stale in ((True, False), (False, False), (True, True)):
+            with self.subTest(matching=matching, stale=stale):
+                observer, commands, _, node = self.owner_observer()
+                observer.frames['shell']['session_id'] = 'child'
+                loop = asyncio.new_event_loop()
+                async def target_sender(method, params):
+                    commands.append((params['sessionId'], json.loads(params['message'])))
+                    return {}
+                observer._target_loop, observer._target_sender, observer._target_tasks = loop, target_sender, set()
+                def pump():
+                    barrier = loop.create_future()
+                    loop.call_soon(barrier.set_result, None)
+                    loop.run_until_complete(barrier)
+                try:
+                    self.native_inner(observer)
+                    pump(); pump()
+                    document = next((c for sid, c in commands if c['method'] == 'DOM.getDocument'), None)
+                    self.assertIsNotNone(document)
+                    self.assertEqual(document['params'], {'depth': 4, 'pierce': False})
+                    identity = observer.frames['inner']['owner_identity']
+                    if stale:
+                        observer.frames['inner']['loaderId'] = 'another-loader'
+                        observer.reconcile_owner('inner')
+                    owner_node = {**node['node'], 'frameId': 'inner' if matching else 'another-frame'}
+                    self.owner_reply(observer, 'child', document, {'root': {
+                        'nodeName': '#document', 'children': [{'nodeName': 'HTML', 'children': [owner_node]}]}})
+                    if matching and not stale:
+                        self.assertEqual(observer.frames['inner']['owner_cache_identity'], identity)
+                        self.assertEqual(observer.frames['inner']['owner'], self.fixture()[4])
+                    else:
+                        self.assertNotIn('owner', observer.frames['inner'])
+                finally:
+                    for task in observer._target_tasks:
+                        task.cancel()
+                    pump(); pump()
+                    loop.close()
+
+    def test_root_commands_use_direct_session_and_correlate_failures(self):
+        observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+        observer.command_id, observer.pending = 0, {}
+        observer.ledger = verifier.BrowserErrorLedger()
+        commands, results = [], []
+        class Session:
+            def send(self, method, params):
+                commands.append((method, params))
+                if method == 'Debugger.getScriptSource':
+                    return {'scriptSource': 'native root source'}
+                if method == 'DOM.getFrameOwner':
+                    raise RuntimeError('Frame was detached')
+                return {}
+        observer.session = Session()
+        observer.send('', 'Debugger.getScriptSource', {'scriptId': 'root-script'}, results.append)
+        self.assertEqual(commands, [('Debugger.getScriptSource', {'scriptId': 'root-script'})])
+        self.assertEqual(results, [{'scriptSource': 'native root source'}])
+        self.assertEqual(observer.pending, {})
+        observer.send('', 'DOM.getFrameOwner', {'frameId': 'inner'}, results.append)
+        self.assertEqual(len(results), 1)
+        self.assertIn("DOM.getFrameOwner [sid='', command_id=2]", observer.ledger.diagnostics[-1])
+        observer.exception_evidence = []
+        observer.send('child', 'DOM.describeNode', {'backendNodeId': 1}, results.append)
+        observer.message({'sessionId': 'child', 'message': json.dumps({
+            'id': 3, 'error': {'message': 'Node was detached'}})})
+        self.assertEqual(observer.pending, {})
+        self.assertEqual(len(results), 1)
+        self.assertIn("DOM.describeNode [sid='child', command_id=3]", observer.ledger.diagnostics[-1])
+
+    def test_root_native_source_and_inner_owner_earn_exact_root_provenance(self):
+        context, script, frame, shell, owner, source, catalog = self.fixture()
+        frame['session_id'] = shell['session_id'] = ''
+        catalog.script_hashes = {script['hash']}
+        observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+        observer.catalog, observer.ledger = catalog, verifier.BrowserErrorLedger()
+        observer.main_frame_id = 'report'
+        observer.contexts, observer.scripts, observer.sources, observer.pending = {}, {}, {}, {}
+        observer.frames = {'shell': shell}
+        observer.command_id, observer.exception_evidence = 0, []
+        commands = []
+        class Session:
+            def send(self, method, params):
+                commands.append((method, params))
+                if method == 'DOM.getFrameOwner':
+                    return {'backendNodeId': 7}
+                if method == 'DOM.describeNode':
+                    return {'node': {'nodeName': 'IFRAME', 'attributes': [
+                        'sandbox', 'allow-scripts', 'referrerpolicy', 'no-referrer', 'srcdoc', source]}}
+                if method == 'Debugger.getScriptSource':
+                    return {'scriptSource': source}
+                raise AssertionError('Unexpected command: ' + method)
+        observer.session = Session()
+        observer.event('', 'Runtime.executionContextCreated', {'context': context})
+        observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'shell'})
+        observer.event('', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+        observer.event('', 'Runtime.exceptionThrown', {'exceptionDetails': {
+            'scriptId': 'script', 'executionContextId': 3, 'text': 'root original failure'}})
+        record = observer.ledger.native_errors[0]
+        self.assertEqual(observer.frames['inner']['owner'], owner)
+        self.assertEqual([method for method, _ in commands], [
+            'DOM.getFrameOwner', 'DOM.describeNode', 'Debugger.getScriptSource'])
+        self.assertEqual(record['attribution'], 'model-original')
+        self.assertEqual(record['proof']['session_id'], '')
+        self.assertEqual(record['proof']['context_unique_id'], context['uniqueId'])
+        self.assertEqual(record['proof']['script_sha256'], script['hash'])
+        from types import SimpleNamespace
+        observer.ledger.pageerror(SimpleNamespace(stack='root original failure'))
+        self.assertFalse(observer.ledger)
+        proof = copy.deepcopy(record['proof'])
+        observer.frames.clear(); observer.contexts.clear(); observer.scripts.clear(); observer.sources.clear()
+        observer.reclassify()
+        self.assertEqual(record['proof'], proof)
+        observer.ledger.pageerror(SimpleNamespace(stack='root original failure'))
+        self.assertEqual(list(observer.ledger), ['root original failure'])
+
+    def test_root_inner_owner_requires_native_root_shell_ancestry(self):
+        for shell_session, shell_parent in [('child', 'report'), ('', 'unrelated')]:
+            with self.subTest(shell_session=shell_session, shell_parent=shell_parent):
+                observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+                observer.main_frame_id = 'report'
+                observer.frames = {'shell': {'id': 'shell', 'session_id': shell_session,
+                                            'parentId': shell_parent}}
+                observer.exception_evidence = []
+                observer.ledger = verifier.BrowserErrorLedger()
+                commands = []
+                observer.send = lambda *args: commands.append(args)
+                observer.event('', 'Page.frameAttached', {'frameId': 'inner', 'parentFrameId': 'shell'})
+                self.assertEqual(commands, [])
+                self.assertNotIn('owner_requested', observer.frames['inner'])
+
+    def test_outer_binding_read_is_not_reentrant_and_survives_release_teardown(self):
+        observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+        observer.main_frame_id = 'report'
+        observer.frames = {'shell': {'id': 'shell'}}
+        observer.ledger = verifier.BrowserErrorLedger()
+        binding = copy.deepcopy(self.fixture()[3]['binding'])
+        commands = []
+        class Session:
+            def send(self, method, params):
+                commands.append(method)
+                if method == 'DOM.getFrameOwner':
+                    observer.bind_report_owner('shell')
+                    return {'backendNodeId': 1}
+                if method == 'DOM.resolveNode':
+                    return {'object': {'objectId': 'outer-owner'}}
+                if method == 'Runtime.callFunctionOn':
+                    return {'result': {'value': binding}}
+                if method == 'Runtime.releaseObject':
+                    raise RuntimeError('Cannot find context with specified id')
+                raise AssertionError('Unexpected command: ' + method)
+        observer.session = Session()
+        observer.bind_report_owner('shell')
+        self.assertEqual(commands, ['DOM.getFrameOwner', 'DOM.resolveNode',
+                                   'Runtime.callFunctionOn', 'Runtime.releaseObject'])
+        self.assertEqual(observer.frames['shell']['binding'], binding)
+        self.assertNotIn('binding_inflight', observer.frames['shell'])
+        self.assertIn('Cannot find context', observer.ledger.diagnostics[-1])
+        observer.bind_report_owner('shell')
+        self.assertEqual(len(commands), 4)
+        self.assertIs(observer.frames['shell']['binding'], binding)
+
+    def test_outer_binding_never_overwrites_complete_evidence_with_incomplete_result(self):
+        observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+        observer.main_frame_id = 'report'
+        observer.frames = {'shell': {'id': 'shell'}}
+        observer.ledger = verifier.BrowserErrorLedger()
+        complete = copy.deepcopy(self.fixture()[3]['binding'])
+        class Session:
+            def send(self, method, params):
+                if method == 'DOM.getFrameOwner':
+                    return {'backendNodeId': 1}
+                if method == 'DOM.resolveNode':
+                    return {'object': {'objectId': 'outer-owner'}}
+                if method == 'Runtime.callFunctionOn':
+                    observer.frames['shell']['binding'] = complete
+                    return {'result': {'value': {'host_class': None, 'host_direct': False}}}
+                if method == 'Runtime.releaseObject':
+                    return {}
+                raise AssertionError('Unexpected command: ' + method)
+        observer.session = Session()
+        observer.bind_report_owner('shell')
+        self.assertIs(observer.frames['shell']['binding'], complete)
+        self.assertNotIn('binding_inflight', observer.frames['shell'])
+        self.assertEqual(observer.ledger.diagnostics, [])
 
     def fixture(self):
         from types import SimpleNamespace
@@ -840,6 +1576,67 @@ class NativeExceptionAttributionTests(unittest.TestCase):
         self.assertEqual(record['evidence'], evidence)
         self.assertFalse(ledger)
         self.assertEqual(ledger.receipt['model_original_errors'], [record])
+
+    def test_detached_source_request_cannot_borrow_later_same_hash_or_error_proof(self):
+        from types import SimpleNamespace
+        for missing_owner in (False, True):
+            with self.subTest(missing_owner=missing_owner):
+                context, script, frame, shell, owner, source, catalog = self.fixture()
+                catalog.script_hashes = {script['hash']}
+                frame['owner'] = owner
+                if missing_owner:
+                    del frame['owner']
+                observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+                observer.catalog, observer.ledger = catalog, verifier.BrowserErrorLedger()
+                observer.contexts = {('native-session', 3): context}
+                observer.scripts, observer.sources, observer.pending = {}, {}, {}
+                observer.frames = {'inner': frame, 'shell': shell}
+                observer.command_id, observer.exception_evidence = 0, []
+                class Session:
+                    def send(self, method, params):
+                        if params['sessionId'] == 'native-session':
+                            raise RuntimeError('No session with given id')
+                        return {}
+                observer.session = Session()
+                observer.event('native-session', 'Debugger.scriptParsed', {'scriptId': 'script', **script})
+                event = {'exceptionDetails': {'scriptId': 'script', 'executionContextId': 3,
+                                             'text': 'same complete native error'}}
+                observer.event('native-session', 'Runtime.exceptionThrown', event)
+                unknown = observer.ledger.native_errors[0]
+                self.assertEqual(observer.pending, {})
+                self.assertIn("sid='native-session', script_id='script'", observer.ledger.diagnostics[0])
+                self.assertIn('stage=pending', observer.ledger.diagnostics[0])
+                self.assertIn('No session with given id', observer.ledger.diagnostics[1])
+                self.assertIn("sid='native-session', command_id=1", observer.ledger.diagnostics[1])
+                self.assertIn('stage=error: No session with given id', observer.ledger.diagnostics[2])
+                # A later occurrence has its own context/session and two owners,
+                # the same local script ID/hash, and a successful source response.
+                later_context, later_script, later_frame, later_shell, later_owner, _, _ = self.fixture()
+                later_context['uniqueId'] = 'later-native-unique'
+                later_context['auxData']['frameId'] = later_frame['id'] = 'later-inner'
+                later_frame['parentId'] = later_shell['id'] = 'later-shell'
+                later_frame['session_id'] = later_shell['session_id'] = 'later-session'
+                later_frame['owner'] = later_owner
+                later_script['context_unique_id'] = later_context['uniqueId']
+                observer.frames.update({'later-inner': later_frame, 'later-shell': later_shell})
+                observer.contexts[('later-session', 3)] = later_context
+                observer.event('later-session', 'Debugger.scriptParsed', {'scriptId': 'script', **later_script})
+                observer.message({'sessionId': 'later-session', 'message': json.dumps({
+                    'id': observer.command_id, 'result': {'scriptSource': source}})})
+                observer.event('later-session', 'Runtime.exceptionThrown', copy.deepcopy(event))
+                later = observer.ledger.native_errors[1]
+                observer.ledger.pageerror(SimpleNamespace(stack='same complete native error'))
+                observer.ledger.pageerror(SimpleNamespace(stack='same complete native error'))
+                self.assertTrue(observer.ledger)
+                self.assertEqual(unknown['attribution'], 'trusted-or-unknown')
+                self.assertNotIn('proof', unknown)
+                self.assertIsNone(unknown['evidence']['source_sha256'])
+                self.assertEqual(later['attribution'], 'model-original')
+                self.assertEqual(later['proof']['session_id'], 'later-session')
+                self.assertEqual(len(observer.ledger.receipt['native_exceptions']), 2)
+                self.assertEqual([row['attribution'] for row in observer.ledger.page_errors],
+                                 ['trusted-or-unknown', 'model-original'])
+                self.assertEqual(list(observer.ledger), ['same complete native error'])
 
     def test_trusted_native_same_text_console_and_unmatched_native_errors_still_fail(self):
         from types import SimpleNamespace

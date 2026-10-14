@@ -421,7 +421,10 @@ def render_gallery(seed, root=ROOT):
                    + '" title="' + escape(task["name"], quote=True) + '">'
                    + escape({"crocodile": "鳄鱼", "blackhole": "黑洞"}.get(task["id"], task["name"]), quote=True) + '</button>' for task in seed["tasks"])
     tabs += '<button type="button" role="tab" data-task-id="" aria-selected="false">全部任务</button>'
-    encoded = json.dumps(seed, ensure_ascii=False, allow_nan=False, separators=(",", ":")).replace("<", "\\u003c")
+    # Group each row's context before its unique identity in the wire document.
+    wire = {**seed, "runs": [{**{key: value for key, value in row.items() if key not in ("model", "id")},
+                             "model": row["model"], "id": row["id"]} for row in seed["runs"]]}
+    encoded = json.dumps(wire, ensure_ascii=False, allow_nan=False, separators=(",", ":")).replace("<", "\\u003c")
     defaults = seed["defaults"]
     filtered = [run for run in seed["runs"] if run["task_id"] == defaults["task_id"] and run["purpose"] == defaults["purpose"]]
     values = {"PUBLIC_CSS": css, "PUBLIC_JS": bootstrap, "GALLERY_SEED": encoded,
