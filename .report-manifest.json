@@ -3,8 +3,8 @@
     "index.html": {
       "mime": "text/html",
       "role": "index",
-      "sha256": "574a55d9aa261a536fdfd290454a7f012d9976f3cf22198e836990bc0fc6f0a2",
-      "size": 89789
+      "sha256": "fef85cd6182a3a1cca5a72858f2390ea927e40e2099a6fe33c2eac1cd0e7b92a",
+      "size": 89948
     },
     "media/02196899887443358ce7558361863709ae042da2d99edf9c73aba99b2950d397.webm": {
       "height": 640,
@@ -3153,8 +3153,8 @@
     "offline.html": {
       "mime": "text/html",
       "role": "offline",
-      "sha256": "bef6a53adc0bb6a742fa450d5ce106f7ba11f6da133ba7afc7d7823616e43977",
-      "size": 48135098
+      "sha256": "d1e6dfa46b92892216f68a79ec472a7cfcb928cd67b2c13f3515b68845685497",
+      "size": 48183050
     },
     "originals/02951516812e7e7d82236b3289548375df5e13e3a2a2848eaf9cce34fd93e713.json": {
       "mime": "application/json",
@@ -3324,6 +3324,12 @@
       "sha256": "9bee31dcc0ef43aa73f34aede3e56072c7ab0a78647d5a4d7fe4e4f13290f809",
       "size": 30279
     },
+    "originals/9ee936d4640f47ae6ea66451e410c40f72d00c907e19f8681e8330f85e3eedd3.json": {
+      "mime": "application/json",
+      "role": "original",
+      "sha256": "9ee936d4640f47ae6ea66451e410c40f72d00c907e19f8681e8330f85e3eedd3",
+      "size": 35891
+    },
     "originals/a006e56c5dd41e6883eaa221300173cb5b8faeb61d7507dbf3e105cccafd4ce1.json": {
       "mime": "application/json",
       "role": "original",
@@ -3420,17 +3426,17 @@
       "sha256": "fe9ae42dd3d0477c4ed1ce7fa8eb1c24403575763f340d721ff6506e06cd8c10",
       "size": 49499
     },
+    "viewer/7ad1a0e69ea22b009901f7b225147d504f7361a317984f27d7126bdf9185ce9a.html": {
+      "mime": "text/html",
+      "role": "viewer",
+      "sha256": "7ad1a0e69ea22b009901f7b225147d504f7361a317984f27d7126bdf9185ce9a",
+      "size": 995500
+    },
     "viewer/db79729481f07d6bddb721080b70c5aa8dfa69057d36a72770930479e247b5fd.js": {
       "mime": "text/javascript",
       "role": "runtime",
       "sha256": "db79729481f07d6bddb721080b70c5aa8dfa69057d36a72770930479e247b5fd",
       "size": 37525
-    },
-    "viewer/fae42af1850ef46e8fc6b2b814616ec4b496cec762684e0caf72d660e46d1bc4.html": {
-      "mime": "text/html",
-      "role": "viewer",
-      "sha256": "fae42af1850ef46e8fc6b2b814616ec4b496cec762684e0caf72d660e46d1bc4",
-      "size": 995327
     }
   },
   "format": "progressive-static-v3",
@@ -3438,13 +3444,13 @@
     "benchmark_runs": 70,
     "evidence": 225,
     "images": 180,
-    "index_bytes": 89789,
+    "index_bytes": 89948,
     "media_bytes": 36369411,
     "media_files": 393,
-    "offline_bytes": 48135098,
-    "original_bytes": 2003664,
-    "original_files": 65,
-    "original_packages": 44,
+    "offline_bytes": 48183050,
+    "original_bytes": 2039555,
+    "original_files": 66,
+    "original_packages": 45,
     "reviews": 41,
     "runs": 93,
     "thumbnails": 180,
