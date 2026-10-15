@@ -38,6 +38,36 @@ def fetch(opener, path):
         return json.loads(response.read().decode())
 
 
+def published_records(runs):
+    """Drop runs where the local harness failed before any model call.
+
+    A local runner/transport fault can archive a run whose session never started.
+    Such a record is real evidence about the harness, not a model sample, so it
+    stays in the archive and the local dashboard while the public report omits it.
+
+    The signature uses only facts already stored in the archive. Two archived
+    categories mean the local harness itself failed before or around the model
+    call: "infrastructure" (the runner raised) and "no_terminal_result" (the CLI
+    exited without any terminal event). Both require the same corroborating
+    facts: no inferred model, no measured tokens, no delivered output and no
+    evaluation evidence. Provider and model failures archive as "session_error"
+    or "transport_interrupted" and always keep their published record.
+    """
+    def never_reached_model(run):
+        metrics = run.get("metrics") or {}
+        measured = [metrics.get(key) for key in ("input_tokens", "output_tokens", "total_tokens", "num_turns")]
+        return (run.get("error_category") in ("infrastructure", "no_terminal_result")
+                and run.get("status") in ("blocked", "failed")
+                and not run.get("reported_models") and all(value is None for value in measured)
+                and not any(((a.get("path") or "").startswith("output/")) for a in run.get("artifacts") or [])
+                and not (run.get("evaluation") or {}).get("evidence"))
+
+    kept, dropped = [], []
+    for run in runs:
+        (dropped if never_reached_model(run) else kept).append(run)
+    return kept, dropped
+
+
 def sanitize(run):
     """Drop host paths and raw text; keep only what the dashboard renders."""
     kept = {key: run.get(key) for key in (
@@ -48,6 +78,11 @@ def sanitize(run):
         "attempt", "retry_of", "generation_status", "generation_finished_at",
         "evaluation_finished_at", "archive_status", "error_category",
     ) if key in run}
+    # Conditions are rendered verbatim, so they must not carry a host path. Any
+    # absolute location inside the project is rewritten to its archive-relative
+    # form; the run's own identity and verdict are never touched.
+    if isinstance(kept.get("conditions"), dict):
+        kept["conditions"] = {key: _relative_location(value) for key, value in kept["conditions"].items()}
     kept["error"] = _error_class(kept.get("error"))
     kept["artifacts"] = [{"path": a.get("path"), "kind": a.get("kind"), "size": a.get("size")}
                          for a in kept.get("artifacts") or []]
@@ -65,6 +100,19 @@ def sanitize(run):
 
 
 MEDIA_RE = re.compile(r"\.(png|jpe?g|webp|gif|webm|mp4)$", re.I)
+ARCHIVE_PATH_RE = re.compile(r"^(?:.*?/)?runs/\d{4}-\d{2}-\d{2}/[0-9a-f]{32}/(.+)$")
+
+
+def _relative_location(value):
+    """Published conditions may describe an archive location, never a host path.
+
+    The project-local directory layout itself is not published either, so only
+    the run-relative tail (for example ``output`` or ``agy-project``) survives.
+    """
+    if not isinstance(value, str):
+        return value
+    match = ARCHIVE_PATH_RE.match(value)
+    return match.group(1) if match else value
 
 # A base64 data URI costs 4 characters per 3 bytes, so inlining the archives
 # verbatim produced a 98MB page: one recording was 28MB of VP8. Everything is
@@ -303,10 +351,11 @@ def main():
     runs = runs["runs"] if isinstance(runs, dict) and "runs" in runs else runs
     tasks = fetch(opener, "/api/tasks")
     tasks = tasks["tasks"] if isinstance(tasks, dict) and "tasks" in tasks else tasks
-    data = {"runs": [sanitize(r) for r in runs], "tasks": tasks}
+    published, excluded = published_records(runs)
+    data = {"runs": [sanitize(r) for r in published], "tasks": tasks}
     # Resolved against the *unsanitized* runs: archive_dir is what locates the
     # bytes on disk, and it is deliberately absent from the snapshot.
-    evidence, stats = collect_evidence(runs, ROOT, cache={})
+    evidence, stats = collect_evidence(published, ROOT, cache={})
     data["evidence"] = evidence
 
     leaked = [key for run in data["runs"] for key in ("archive_dir", "cli_command", "usage_raw")
@@ -331,6 +380,7 @@ def main():
         shown = str(destination)
     print(json.dumps({"destination": shown,
                       "runs": len(data["runs"]),
+                      "excluded_no_model_session": [r["id"] for r in excluded],
                       "evidence": stats,
                       "bytes": destination.stat().st_size}, ensure_ascii=False))
 

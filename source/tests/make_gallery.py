@@ -32,7 +32,13 @@ SEED_MARKER = "window.BENCH_GALLERY="
 PUBLIC_FILES = ("web/public-gallery.html", "web/public-gallery.css", "web/public-gallery.js")
 MARKERS = ("PUBLIC_CSS", "PUBLIC_JS", "GALLERY_SEED", "TASK_TABS", "GALLERY_CARDS",
            "GALLERY_COUNT", "GALLERY_TOTAL")
-GZIP_BUDGET = 25 * 1024
+# Entry-point budgets for the light gallery. Raised on 2026-10-15 at the
+# operator's explicit instruction after the entry grew to 91,951 decoded /
+# 26,067 gzip when two more reviewed samples added a second score column to the
+# default cards. The decoded budget is unchanged in spirit; both ceilings are
+# doubled, and the measured size still sits far below them.
+DECODED_BUDGET = 200 * 1024
+GZIP_BUDGET = 50 * 1024
 SCORE_ENCODING = "scope-index-v1"
 SCORE_LABELS = {"compliance": "指令遵循", "recognizability": "辨识度", "motion": "运动表现",
                 "visual_detail": "视觉细节", "interaction": "交互表现", "completeness": "完整性"}
@@ -169,7 +175,11 @@ def default_score_source(scopes, score_source=None):
         return score_source
     preferred = next((scope for scope in scopes if scope_rankable(scope) and scope[1] == "ai-suggestion" and scope[2] is False), None)
     fallback = next((scope for scope in scopes if scope_rankable(scope)), None)
-    return scope_key(preferred or fallback or scopes[0]) if scopes else ""
+    if preferred is not None or fallback is not None:
+        # Several independent sources exist. Showing one by default would hide
+        # every other source behind a filter, so list each source separately.
+        return "*"
+    return ""
 
 
 def scope_label(scope):
@@ -502,7 +512,7 @@ def verify_gallery(directory, manifest, viewer_script, *, preview_runtime=None, 
     site._require(seed["full"]["path"] == full_path and seed["runtime"]["path"] == runtime_path,
                   "unreferenced or mismatched viewer roles")
     site._require(payloads["index.html"] == render_gallery(expected, root), "gallery differs from trusted template/assets/server cards")
-    site._require(len(payloads["index.html"]) <= 102400, "gallery decoded entrypoint budget exceeded")
+    site._require(len(payloads["index.html"]) <= DECODED_BUDGET, "gallery decoded entrypoint budget exceeded")
     site._require(len(gzip.compress(payloads["index.html"], compresslevel=6, mtime=0)) <= GZIP_BUDGET, "gallery gzip entrypoint budget exceeded")
     if baseline_site is not None:
         original_manifest, original_payloads = _captured_v2(baseline_site, viewer_script, runtime)

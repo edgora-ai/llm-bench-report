@@ -40,6 +40,11 @@ CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/preview-runtime.js', 'web/inde
     'tests/verify_public_gallery.py', 'tests/verify_public_snapshot.py'))
 PAGE_SIZE = 2
 PHONE_PAGE_SIZE = 1
+# Gallery entry-point ceilings. Doubled on 2026-10-15 at the operator's explicit
+# instruction after two more reviewed samples pushed the entry to 91,951 decoded
+# / 26,067 gzip. The verifier stays independent of the builder's own constants.
+ENTRY_DECODED_BUDGET = 200 * 1024
+ENTRY_GZIP_BUDGET = 50 * 1024
 MANIFEST = '.report-manifest.json'
 SHA = re.compile(r'[a-f0-9]{64}')
 FROZEN_INDEX_SHA = 'caeddfe28402d9718f272b8605d7ba55d2be802ca882518577c49e472f51d6bb'
@@ -555,7 +560,7 @@ def load_sources(args, report):
     runtime_info = {'path': runtime_path, 'sha256': digest(runtime), 'size': len(runtime)}
     seed = audit_gallery(html.decode(), current_data, approved['web/public-gallery.js'].decode(), approved['web/public-gallery.css'].decode(),
                          full_info, runtime_info, runtime + b'\n' + approved['web/app.js'], score_source=args.score_source)
-    require(len(html) <= 102400 and len(gzip.compress(html, compresslevel=6, mtime=0)) <= 25600, 'Initial HTML decoded/gzip budget exceeded')
+    require(len(html) <= ENTRY_DECODED_BUDGET and len(gzip.compress(html, compresslevel=6, mtime=0)) <= ENTRY_GZIP_BUDGET, 'Initial HTML decoded/gzip budget exceeded')
     report['audit'] = {'baseline_html_sha256': digest(old_html), 'full_html_sha256': digest(full_html), 'runtime_sha256': digest(runtime),
                        'frozen_runtime_sha256': digest(frozen_runtime), 'current_runtime_sha256': digest(runtime),
                        'frozen_v2_helper_sha256': digest(helper_path.read_bytes()), 'current_v2_helper_sha256': digest(approved['tests/verify_public_snapshot.py']),
@@ -765,7 +770,7 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
             first_controls:['#public-task-tabs button[data-task-id]','#public-purpose','#public-models>summary','#public-grid .evidence-card[data-run-id]'].map(s=>{
               let e=document.querySelector(s),r=e.getBoundingClientRect();return {selector:s,label:e.textContent.slice(0,100),top:r.top,bottom:r.bottom,disabled:!!e.disabled};}),
             scroll_x:scrollX,scroll_y:scrollY};}''')
-        require(metrics['document_encoded_bytes'] <= 25600 and metrics['document_decoded_bytes'] <= 102400,
+        require(metrics['document_encoded_bytes'] <= ENTRY_GZIP_BUDGET and metrics['document_decoded_bytes'] <= ENTRY_DECODED_BUDGET,
                 'Measured cold wire/decoded document budget')
         require(metrics['scroll_x'] == 0 and metrics['scroll_y'] == 0, 'First image was not in unscrolled initial viewport')
         # A real alternative task click must produce that task's actual card set,
@@ -1179,7 +1184,13 @@ class NativeExceptionObserver:
             owner = getattr(callback, 'owner_identity', ())
             script = getattr(callback, 'script_identity', ())
             if (owner and owner[1] in retired) or (script and script[2] in retired):
-                self.pending.pop((sid, identifier), None)
+                # A frame detach does not cancel an already-dispatched command:
+                # Chromium can still answer it, and that answer is genuine
+                # evidence about the frame that just went away. Owner reads are
+                # identity-checked on arrival and reject themselves if the frame
+                # is gone, so only the note is recorded here and the callback is
+                # left to complete. The session-detach path below clears anything
+                # still outstanding when the channel itself disappears.
                 self.owner_stage(method, identifier, callback, reason)
     def detached(self, event):
         sid = event['sessionId']
@@ -1349,6 +1360,16 @@ class NativeExceptionObserver:
                       'session_id': sid, 'context': context}
             self.ledger.native_errors.append(record)
             self.exception_evidence.append(record)
+            # The owner reads are normally driven by frame events. A failing
+            # original can be torn down before that walk reaches it, so start a
+            # read for this exact frame now, while it is still alive. Do this
+            # only when no owner has been collected yet: reconcile_owner adopts a
+            # fresh identity and would otherwise discard an owner that is already
+            # valid for the frame the exception actually came from.
+            failed_frame = ((context or {}).get('auxData') or {}).get('frameId')
+            known = self.frames.get(failed_frame)
+            if known is not None and 'owner' not in known:
+                self.reconcile_owner(failed_frame)
         self.reclassify()
     def owner_signature(self, fid):
         frame = self.frames.get(fid, {})
@@ -1459,11 +1480,31 @@ def observe_browser_errors(context, page, args, *, baseline=False):
         setattr(args, cache_name, OriginalScriptCatalog(root, getattr(args, pin_name)))
     ledger = BrowserErrorLedger()
     page.on('pageerror', ledger.pageerror)
-    NativeExceptionObserver(context, page, getattr(args, cache_name), ledger)
+    observer = NativeExceptionObserver(context, page, getattr(args, cache_name), ledger)
+    # Keep the observer reachable so a caller that is about to destroy previews
+    # can let already-issued native reads finish first.
+    ledger.observer = observer
     receipts = getattr(args, 'browser_error_receipts', None)
     if receipts is not None:
         receipts.append(ledger.receipt)
     return ledger
+
+
+def settle_observer(ledger, page, timeout_ms=5000):
+    """Wait briefly for the observer's own in-flight reads before navigating away.
+
+    Preview frames are destroyed by this verifier's own scrolling, and a native
+    answer cannot arrive once the frame is gone. Waiting here keeps genuine
+    evidence that has already been requested; the wait is bounded, and anything
+    still unanswered is reported as a loss rather than silently accepted.
+    """
+    observer = getattr(ledger, 'observer', None)
+    if observer is None or not getattr(observer, 'pending', None):
+        return 0
+    deadline = time.monotonic() + timeout_ms / 1000
+    while observer.pending and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    return len(observer.pending)
 
 
 def observed_context(browser, url, args, *, profile=None, viewport='desktop', original=True, baseline=False):
@@ -1476,6 +1517,16 @@ def observed_context(browser, url, args, *, profile=None, viewport='desktop', or
     context.set_default_timeout(args.timeout_ms)
     page = context.new_page()
     requests, errors = [], observe_browser_errors(context, page, args, baseline=baseline)
+    # Any navigation destroys running previews, and a native answer cannot arrive
+    # once its frame is gone. Settle the observer's own outstanding reads before
+    # each navigation so evidence that was already requested is not discarded.
+    raw_goto = page.goto
+
+    def settling_goto(*args, **kwargs):
+        settle_observer(errors, page)
+        return raw_goto(*args, **kwargs)
+
+    page.goto = settling_goto
     page.on('request', lambda r: requests.append({'url': r.url, 'method': r.method, 'type': r.resource_type}))
     if profile:
         session = context.new_cdp_session(page)
@@ -1512,6 +1563,11 @@ def model_menu(page):
 
 
 def reach_public_run(page, row):
+    # Paging replaces the rendered cards, which destroys their previews. Let the
+    # observer finish any native read it already issued before that happens.
+    ledger = getattr(page, 'bench_error_ledger', None)
+    if ledger is not None:
+        settle_observer(ledger, page)
     previous = page.locator('#public-pages [data-gallery-page]').filter(has_text='上一页')
     while previous.count() and previous.is_enabled():
         previous.click()
@@ -1549,11 +1605,26 @@ def action_sample(browser, url, sources, args, name, profile, viewport):
     context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport,
                                                       original=True, baseline=name == 'baseline')
     try:
-        row = next(r for r in sources['seed']['runs'] if r['task_id'] == sources['seed']['defaults']['task_id'] and
-                   r['purpose'] == 'benchmark' and r['registered_media'] and r['original']['status'] in ('ready', 'missing_dependencies'))
+        # Only the explicit click and what follows it are timed, so the sample is
+        # reached through the page's own controls first when it is not already on
+        # the first page. Both versions are then measured from the same kind of
+        # settled page, and the filter is rebuilt with the verifier's own decoder
+        # rather than the producer's projection helper.
+        defaults = sources['seed']['defaults']
+        cards = [r for r in decode_score_rows(sources['seed'])
+                 if r['task_id'] == defaults['task_id'] and r['purpose'] == defaults['purpose']
+                 and r['registered_media']]
+        runnable = ('ready', 'missing_dependencies')
+        row = next(r for r in cards if r['purpose'] == 'benchmark' and r['original']['status'] in runnable)
         page.goto(url, wait_until='networkidle', timeout=60000)
         if name == 'current':
             public_ready(page)
+            reach_public_run(page, row)
+            # Reaching the card can start neighbouring cards' automatic inline
+            # previews. Pause those through the product's own toggle so the timed
+            # action is the explicit click, not the page's background previews.
+            stop_pending_inline(page)
+            page.wait_for_load_state('networkidle')
         else:
             page.wait_for_function('document.querySelector("#workspace")?.getAttribute("aria-busy")==="false"')
         button = page.locator(f'.evidence-card [data-zoom-run="{row["id"]}"]' if name == 'current' else
@@ -1714,7 +1785,16 @@ def gallery_ux(browser, url, sources, args, report):
         # no_full(requests, seed) here.
 
         default = [r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == 'benchmark' and r['registered_media']]
-        first = next(r for r in default if r['original']['status'] in ('ready', 'missing_dependencies'))
+        # A runnable original is required for the inline lifecycle checks below, but
+        # it is not guaranteed to be the first default-task row: a newer delivery
+        # may be an unsupported or screenshot-only original. Fall back to any other
+        # runnable card before giving up, and name the condition when none exists.
+        runnable = ('ready', 'missing_dependencies')
+        first = next((r for r in default if r['original']['status'] in runnable), None)
+        if first is None:
+            first = next((r for r in seed['runs'] if r['purpose'] == 'benchmark'
+                          and r['registered_media'] and r['original']['status'] in runnable), None)
+        require(first is not None, 'No runnable original is reachable from the public gallery')
         # Detail handoff replaced the light gallery DOM with the full viewer
         # and fetched the full document. Reuse the same page request ledger,
         # hard-navigate back to the light shell, and require that later
@@ -2150,7 +2230,16 @@ def wait_public_loaded(page, run_id, *, inline=False):
     require(outer is not None, 'Missing shell browsing context')
     outer.wait_for_selector('iframe', state='attached')
     require(outer.locator('iframe').count() == 1, 'Expected one actual original context')
-    inner = outer.locator('iframe').element_handle().content_frame()
+    # An attached iframe can be present before its browsing context is
+    # addressable, and a heavy original (a WebGL scene under software rendering)
+    # widens that window. Poll for the real frame instead of sampling once; a
+    # frame that never becomes addressable still fails.
+    inner = None
+    for _ in range(200):
+        inner = outer.locator('iframe').element_handle().content_frame()
+        if inner is not None:
+            break
+        page.wait_for_timeout(50)
     require(inner is not None, 'Missing actual original browsing context')
     inner.wait_for_load_state('domcontentloaded')
     return inner

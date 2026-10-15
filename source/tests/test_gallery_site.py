@@ -141,8 +141,11 @@ class GallerySiteTests(GalleryFixture):
         # (i=0..6) so latest drops 6; remaining distinct models stay (7 total).
         self.assertEqual(seed["counts"], {"runs": 7, "full_runs": 12, "benchmark": 7, "full_benchmark": 12, "reviews": 1})
         self.assertEqual(seed["defaults"], {"task_id": "crocodile", "purpose": "benchmark", "page_size": 2,
-                                          "mobile_page_size": 1, "score_source": '[null,"label-unverified",null,null]'})
+                                          "mobile_page_size": 1, "score_source": ""})
         self.assertEqual(seed["score_scopes"], [[None, "label-unverified", None, None]])
+        # This fixture's only scope is unrankable (no rubric and no reviewer), so
+        # there is nothing honest to list separately and the default stays empty.
+        self.assertEqual(make_gallery.default_score_source(seed["score_scopes"]), "")
         expected = [self.runs[i]["id"] for i in (0, 11, 7, 8, 9, 10, 6)]
         self.assertEqual([r["id"] for r in seed["runs"]], expected)
         by_id = {run["id"]: run for run in seed["runs"]}
@@ -460,10 +463,14 @@ eval(code.slice(start,end));
             self.assertFalse(self.site.exists())
         template.write_bytes(original)
 
-    def test_gzip_budget_failure_leaves_destination_absent(self):
+    def test_entry_budget_failure_leaves_destination_absent(self):
         css = self.project / "web/public-gallery.css"
-        css.write_text('body{color:#123456}/*' + ''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(800)) + '*/')
-        with self.assertRaisesRegex(RuntimeError, "gzip entrypoint budget"):
+        # Pad past the current entry ceilings rather than a frozen byte count, so
+        # this test keeps proving a size ceiling is enforced after any change.
+        # Whichever ceiling trips first, the build must refuse and leave nothing.
+        filler = ''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(2000))
+        css.write_text('body{color:#123456}/*' + filler + '*/')
+        with self.assertRaisesRegex(RuntimeError, "entrypoint budget"):
             self.build()
         self.assertFalse(self.site.exists())
         self.assertFalse(any(path.name.startswith('.static-site-') for path in self.root.iterdir()))
@@ -723,11 +730,14 @@ class ScoreContractTests(unittest.TestCase):
         self.assertEqual(len(summaries), 5)
         scopes = make_gallery.score_scopes([run])
         self.assertEqual(sum(make_gallery.scope_rankable(scope) for scope in scopes), 4)
-        preferred = json.loads(make_gallery.default_score_source(scopes))
-        self.assertEqual(preferred[1:3], ["ai-suggestion", False])
+        # Independent sources are listed separately by default instead of one
+        # source silently standing in for the others.
+        self.assertEqual(make_gallery.default_score_source(scopes), "*")
         for conditions in ({}, {"rubric_version": "unknown"}, {"rubric_version": "visual-v2"}):
             foreign = self.run_record([self.review(4)], conditions=conditions)
             self.assertFalse(make_gallery.scope_rankable(make_gallery.score_scope(foreign, foreign["reviews"][0])))
+        foreign_scopes = make_gallery.score_scopes([self.run_record([self.review(4)], conditions={})])
+        self.assertEqual(make_gallery.default_score_source(foreign_scopes), "")
         # Task definitions cannot lend their rubric to an old run.
         self.assertIsNone(make_gallery.score_scope(self.run_record([self.review()], conditions={}), self.review())[0])
 

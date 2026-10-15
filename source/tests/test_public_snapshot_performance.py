@@ -158,3 +158,45 @@ class PerformanceHelperTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PublishedRecordSelectionTests(unittest.TestCase):
+    """A harness fault that never reached the model is not a model sample."""
+
+    def setUp(self):
+        import make_snapshot
+        self.builder = make_snapshot
+
+    @staticmethod
+    def record(**overrides):
+        record = {"id": "a" * 32, "reported_models": [], "metrics": {}, "artifacts": [],
+                  "evaluation": {"status": "completed", "evidence": []}}
+        record.update(overrides)
+        return record
+
+    def test_never_reached_model_signature_is_excluded_but_real_failures_are_kept(self):
+        never = [
+            self.record(status="blocked", error_category="infrastructure",
+                        error="AGY runner aborted before any model call"),
+            self.record(status="failed", error_category="no_terminal_result",
+                        error="No AGY terminal result event was observed"),
+        ]
+        # A genuine model or provider failure keeps its published record.
+        real = [
+            self.record(status="failed", error_category="session_error", reported_models=["m"], metrics={"input_tokens": 10}),
+            self.record(status="failed", error_category="session_error",
+                        artifacts=[{"path": "output/index.html", "sha256": "b" * 64, "size": 4}]),
+            self.record(status="failed", error_category="session_error",
+                        evaluation={"status": "completed", "evidence": ["evidence/desktop.png"]}),
+            self.record(status="failed", error_category="transport_interrupted", metrics={"num_turns": 1}),
+            self.record(status="completed", reported_models=["m"]),
+            # Same corroborating facts but a provider-side category: still published.
+            self.record(status="failed", error_category="session_error"),
+        ]
+        kept, dropped = self.builder.published_records([*never, *real])
+        self.assertEqual([r["id"] for r in dropped], [r["id"] for r in never])
+        self.assertEqual(kept, real)
+
+    def test_empty_input_is_stable(self):
+        kept, dropped = self.builder.published_records([])
+        self.assertEqual((kept, dropped), ([], []))

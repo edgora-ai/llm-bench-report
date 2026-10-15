@@ -374,12 +374,25 @@ class GalleryUtilityTests(unittest.TestCase):
     def render_fixture(self, seed):
         payload = json.dumps(seed).replace('<', '\\u003c')
         model = escape(seed['runs'][0]['model'])
-        source = escape(seed['defaults']['score_source'], quote=True)
-        cells = ''.join('<div class="score-cell" data-dimension="' + key + '"><dt>' + label + '</dt><dd>未评审</dd></div>'
-                        for key, label in verifier.v2.SCORE_LABELS.items())
+        # Mirrors the real builder: '*' lists one score sheet per available
+        # scope with its own exact scope, a single source renders that scope, and
+        # an empty default renders the unregistered sheet.
+        source = seed['defaults']['score_source']
+        summaries = seed['runs'][0].get('scores', [])
+        if source == '*' and summaries:
+            # Wire rows are [scope_index, review_index, values]; the rendered
+            # scope attribute is the exact scope key from the scope table.
+            scopes = [verifier.v2.scope_key(seed['score_scopes'][entry[0]]) for entry in summaries]
+        else:
+            scopes = [source]
+        sheets = []
+        for scope in scopes:
+            cells = ''.join('<div class="score-cell" data-dimension="' + key + '"><dt>' + label + '</dt><dd>未评审</dd></div>'
+                            for key, label in verifier.v2.SCORE_LABELS.items())
+            sheets.append('<div class="work-score" data-score-scope="' + escape(scope or '', quote=True) + '"><dl>' + cells + '</dl></div>')
         return ('<style>trusted-css</style><article class="evidence-card" data-run-id="a" data-model-route="' + model + '">'
                 '<div class="work-heading"><h2 class="work-name" aria-label="' + model + '" title="' + model + '">' + model + '</h2></div>'
-                '<div class="work-score" data-score-scope="' + source + '"><dl>' + cells + '</dl></div>'
+                + ''.join(sheets) +
                 '<div class="work-cover"></div><div class="work-actions">'
                 '<button data-run-original="a" disabled></button><button data-select-run="a"></button>'
                 '<button data-zoom-run="a" disabled></button><button data-detail-run="a"></button></div>'
@@ -1651,3 +1664,98 @@ class NativeExceptionAttributionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LateEvidenceAfterDetachTests(unittest.TestCase):
+    """A detach must not discard evidence already in flight."""
+
+    def test_script_source_reply_arriving_after_frame_detach_is_still_recorded(self):
+        observer, commands, _, _ = NativeExceptionAttributionTests.owner_observer(
+            NativeExceptionAttributionTests('test_root_discovered_inner_rejects_active_cache_but_retains_complete_event_proof'))
+        observer.frames['shell']['session_id'] = 'child'
+        NativeExceptionAttributionTests.native_inner(observer)
+        # Capture a candidate script while the frame is alive, then detach the
+        # frame before the native reply is delivered.
+        def callback(value):
+            # Mirrors the observer's real capture callback: store, then report.
+            observer.sources[('child', 'script')] = value.get('scriptSource')
+            return 'captured'
+        callback.script_identity = ('child', 'script', 'inner')
+        observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, callback)
+        # The frame-owner read from native_inner is still outstanding too, so
+        # target the capture command by its method rather than by position.
+        capture_key = next(key for key, value in observer.pending.items()
+                           if value[0] == 'Debugger.getScriptSource')
+        pending_before = dict(observer.pending)
+        self.assertTrue(pending_before)
+        observer.event('child', 'Page.frameDetached', {'frameId': 'inner', 'reason': 'remove'})
+        self.assertTrue(observer.frames['inner']['retired'])
+        # The already-dispatched command stays pending so its real reply can land.
+        self.assertEqual(observer.pending, pending_before)
+        observer.message({'sessionId': capture_key[0],
+                          'message': json.dumps({'id': capture_key[1], 'result': {'scriptSource': 'real source'}})})
+        self.assertEqual(observer.sources[('child', 'script')], 'real source')
+        self.assertNotIn(capture_key, observer.pending)
+
+    def test_session_detach_still_clears_outstanding_commands(self):
+        observer, commands, _, _ = NativeExceptionAttributionTests.owner_observer(
+            NativeExceptionAttributionTests('test_root_discovered_inner_rejects_active_cache_but_retains_complete_event_proof'))
+        observer.frames['shell']['session_id'] = 'child'
+        NativeExceptionAttributionTests.native_inner(observer)
+        callback = lambda value: value
+        callback.script_identity = ('child', 'script', 'inner')
+        observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, callback)
+        self.assertTrue(observer.pending)
+        # When the whole channel goes away, nothing can answer any more.
+        observer.detached({'sessionId': 'child', 'targetId': 'shell'})
+        self.assertEqual(observer.pending, {})
+
+
+class ObserverSettleTests(unittest.TestCase):
+    """Navigation must let already-issued native reads finish first."""
+
+    def test_settle_observer_waits_for_pending_then_returns_remaining(self):
+        from types import SimpleNamespace
+        class Page:
+            def __init__(self): self.waits = 0
+            def wait_for_timeout(self, ms): self.waits += 1
+        page = Page()
+        ledger = verifier.BrowserErrorLedger()
+        ledger.observer = SimpleNamespace(pending={('s', 1): ('m', None)})
+        calls = {'n': 0}
+        def pending_property():
+            calls['n'] += 1
+            if calls['n'] >= 3:
+                ledger.observer.pending = {}
+            return ledger.observer.pending
+        # A plain dict cannot change on its own, so emulate the reply arriving.
+        ledger.observer = SimpleNamespace(pending={('s', 1): ('m', None)})
+        def wait_and_clear(ms):
+            page.waits += 1
+            ledger.observer.pending = {}
+        page.wait_for_timeout = wait_and_clear
+        remaining = verifier.settle_observer(ledger, page)
+        self.assertEqual(remaining, 0)
+        self.assertEqual(page.waits, 1)
+
+    def test_settle_observer_is_a_noop_without_pending_or_observer(self):
+        from types import SimpleNamespace
+        class Page:
+            def wait_for_timeout(self, ms): raise AssertionError('must not wait')
+        page = Page()
+        ledger = verifier.BrowserErrorLedger()
+        self.assertEqual(verifier.settle_observer(ledger, page), 0)
+        ledger.observer = SimpleNamespace(pending={})
+        self.assertEqual(verifier.settle_observer(ledger, page), 0)
+
+    def test_settle_observer_reports_commands_that_never_answered(self):
+        from types import SimpleNamespace
+        class Page:
+            def __init__(self): self.waits = 0
+            def wait_for_timeout(self, ms): self.waits += 1
+        page = Page()
+        ledger = verifier.BrowserErrorLedger()
+        ledger.observer = SimpleNamespace(pending={('s', 1): ('m', None)})
+        # Bounded: an unanswered command cannot make the verifier hang.
+        self.assertEqual(verifier.settle_observer(ledger, page, timeout_ms=50), 1)
+        self.assertGreater(page.waits, 0)

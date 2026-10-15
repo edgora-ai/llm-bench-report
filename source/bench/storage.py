@@ -32,7 +32,9 @@ GENERATION_FIELDS = frozenset({"error", "error_category", "metrics", "duration_m
                               "first_model_event_ms", "final_response", "reported_models",
                               "backend_weights_version", "cli_command", "usage_raw",
                               "exit_code", "finished_at", "generation_finished_at",
-                              "generation_artifacts", "generation_status"})
+                              "generation_artifacts", "generation_status",
+                              # Local AGY transport facts, known only after the session.
+                              "agy_facts"})
 FILTER_COLUMNS = ("tool", "model", "task_id", "purpose", "prompt_version", "status")
 METRICS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens", "cost_usd", "api_duration_ms", "num_turns", "source_bytes", "source_file_count")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -114,7 +116,7 @@ def _manifest(manifest: dict) -> dict:
         raise ValueError("Invalid run status")
     if result.get("purpose") not in ("smoke", "benchmark", "fixture"):
         raise ValueError("Invalid run purpose")
-    if result.get("tool") not in ("claude-code", "opencode"):
+    if result.get("tool") not in ("claude-code", "opencode", "agy"):
         raise ValueError("Invalid tool")
     for field in ("model", "task_id", "task_name", "prompt_version"):
         if not isinstance(result.get(field), str):

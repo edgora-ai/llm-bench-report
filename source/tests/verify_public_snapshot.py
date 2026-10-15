@@ -229,7 +229,11 @@ def default_score_source(scopes, score_source=None):
         return score_source
     preferred = next((scope for scope in scopes if scope_rankable(scope) and scope[1] == 'ai-suggestion' and scope[2] is False), None)
     fallback = next((scope for scope in scopes if scope_rankable(scope)), None)
-    return scope_key(preferred or fallback or scopes[0]) if scopes else ''
+    if preferred is not None or fallback is not None:
+        # Independent sources are listed separately by default; picking one would
+        # hide every other source behind a filter.
+        return '*'
+    return ''
 
 
 def meter(run):
