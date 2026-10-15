@@ -1521,12 +1521,20 @@ def observed_context(browser, url, args, *, profile=None, viewport='desktop', or
     # once its frame is gone. Settle the observer's own outstanding reads before
     # each navigation so evidence that was already requested is not discarded.
     raw_goto = page.goto
+    raw_viewport = page.set_viewport_size
 
     def settling_goto(*args, **kwargs):
         settle_observer(errors, page)
         return raw_goto(*args, **kwargs)
 
+    def settling_viewport(*args, **kwargs):
+        # A viewport change can unmount inline previews through the page's own
+        # observer, so let the native reads already in flight finish first.
+        settle_observer(errors, page)
+        return raw_viewport(*args, **kwargs)
+
     page.goto = settling_goto
+    page.set_viewport_size = settling_viewport
     page.on('request', lambda r: requests.append({'url': r.url, 'method': r.method, 'type': r.resource_type}))
     if profile:
         session = context.new_cdp_session(page)

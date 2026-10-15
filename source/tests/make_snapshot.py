@@ -16,6 +16,8 @@ import tempfile
 from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
+import os
+
 import numpy as np
 from PIL import Image
 
@@ -274,11 +276,62 @@ def _encode(root, run, path, kind, cache):
     return destination, box
 
 
+def _reuse_published(root, run, path, kind, cache):
+    """Return already-published bytes for one evidence file, or None.
+
+    Video encoding is not byte-deterministic: re-encoding the same source yields
+    the same pictures in a different container, so a rebuild would publish a new
+    hash for identical content and strand the previous file in the repository.
+    When the caller names a previously published site, its media is reused for
+    the same run-relative evidence path instead of being encoded again.
+    """
+    if cache is None:
+        return None
+    key = (run.get("id"), str(path), kind)
+    published = cache.get("published")
+    if published is None:
+        published = {}
+        site = cache.get("published_site")
+        if site is not None:
+            site = Path(site)
+            try:
+                seed = json.JSONDecoder().raw_decode(
+                    (site / "index.html").read_text().split("window.BENCH_GALLERY=", 1)[1])[0]
+                data = json.JSONDecoder().raw_decode(
+                    (site / seed["full"]["path"]).read_text().split("window.BENCH_SNAPSHOT=", 1)[1])[0]
+                files = json.loads((site / ".report-manifest.json").read_text())["files"]
+                for evidence_key, media in (data.get("evidence") or {}).items():
+                    run_id, _, relative = str(evidence_key).partition("/")
+                    digest = str(media).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                    info = files.get(media)
+                    if not isinstance(info, dict) or info.get("sha256") != digest:
+                        continue
+                    published[(run_id, relative, "video" if str(media).endswith(".webm") else "image")] = site / media
+            except (OSError, ValueError, KeyError, IndexError):
+                published = {}
+        cache["published"] = published
+    found = published.get(key)
+    if found is None or not Path(found).is_file():
+        return None
+    return Path(found)
+
+
 def _inline(mapping, stats, root, run, path, kind, cache):
     source = _resolve(root, run.get("archive_dir"), path)
     if source is None:
         stats["missing"] += 1
         return False
+    reused = _reuse_published(root, run, path, kind, cache)
+    if reused is not None:
+        mime = "image/jpeg" if kind == "image" else "video/webm"
+        payload = base64.b64encode(reused.read_bytes()).decode("ascii")
+        mapping[f"{run.get('id')}/{path}"] = f"data:{mime};base64,{payload}"
+        stats["bytes"] += reused.stat().st_size
+        stats["original_bytes"] += source.stat().st_size
+        if kind == "video":
+            stats["videos"] += 1
+            stats["reused"] = stats.get("reused", 0) + 1
+        return True
     try:
         encoded, box = _encode(root, run, path, kind, cache)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
@@ -344,6 +397,12 @@ def render_snapshot(data, root=ROOT):
 
 
 def main():
+    # Optional, explicit: reuse media bytes from a previously published site so
+    # an unchanged recording keeps its published hash instead of being encoded
+    # into a new file. Off unless the operator names that site in the
+    # environment, so the documented command line is unchanged.
+    baseline = os.environ.get("BENCH_REUSE_PUBLISHED_MEDIA")
+    baseline = Path(baseline) if baseline else None
     token = (ROOT / "data/dashboard-token").read_text().strip()
     opener = build_opener(HTTPCookieProcessor())
     login(opener, token)
@@ -355,7 +414,11 @@ def main():
     data = {"runs": [sanitize(r) for r in published], "tasks": tasks}
     # Resolved against the *unsanitized* runs: archive_dir is what locates the
     # bytes on disk, and it is deliberately absent from the snapshot.
-    evidence, stats = collect_evidence(published, ROOT, cache={})
+    # Reuse the previously published media bytes when a baseline site is given,
+    # so an unchanged recording keeps its exact published hash instead of being
+    # re-encoded into a new file with identical content.
+    cache = {"published_site": baseline} if baseline is not None else {}
+    evidence, stats = collect_evidence(published, ROOT, cache=cache)
     data["evidence"] = evidence
 
     leaked = [key for run in data["runs"] for key in ("archive_dir", "cli_command", "usage_raw")
