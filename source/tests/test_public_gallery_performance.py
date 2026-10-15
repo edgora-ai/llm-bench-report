@@ -508,6 +508,41 @@ class GalleryUtilityTests(unittest.TestCase):
                 audit(markup)
 
 class PublicRouteHelperTests(unittest.TestCase):
+    def test_native_ledger_is_attached_to_the_page_used_by_pagination(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        page = SimpleNamespace(on=Mock())
+        args = SimpleNamespace(browser_catalog_pins='audited-pins', _original_script_catalog=object())
+        with patch.object(verifier, 'NativeExceptionObserver'):
+            ledger = verifier.observe_browser_errors(object(), page, args)
+        self.assertIs(page.bench_error_ledger, ledger)
+        self.assertIs(page.on.call_args.args[1].__self__, ledger)
+
+    def test_every_pagination_teardown_settles_its_own_inflight_native_reads(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        events = []
+        state = {'page': 2}
+        previous, next_page, grid, history = Mock(), Mock(), Mock(), Mock()
+        previous.count.return_value = next_page.count.return_value = 1
+        previous.is_enabled.side_effect = lambda: state['page'] > 0
+        next_page.is_enabled.return_value = True
+        def move(delta):
+            events.append('previous' if delta < 0 else 'next')
+            state['page'] += delta
+        previous.click.side_effect = lambda: move(-1)
+        next_page.click.side_effect = lambda: move(1)
+        grid.count.side_effect = lambda: int(state['page'] == 1)
+        history.is_visible.return_value = False
+        pages = Mock()
+        pages.filter.side_effect = lambda **kw: previous if kw['has_text'] == '上一页' else next_page
+        def locator(selector):
+            return pages if selector.startswith('#public-pages') else history if selector == '#public-history' else grid
+        page = SimpleNamespace(bench_error_ledger=object(), locator=locator, evaluate=lambda _: 3)
+        with patch.object(verifier, 'settle_observer', side_effect=lambda ledger, page: events.append('settle')):
+            verifier.reach_public_run(page, {'id': 'concrete-run'})
+        self.assertEqual(events, ['settle', 'settle', 'previous', 'settle', 'previous', 'settle', 'next'])
+
     def test_open_run_checks_url_filter_without_retyping_and_remounting(self):
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
@@ -528,6 +563,95 @@ class PublicRouteHelperTests(unittest.TestCase):
                 model.fill.assert_not_called()
                 self.assertIn('model_query=opencode%2Fmodel-free', page.goto.call_args.args[0])
                 self.assertEqual(page.goto.call_args.kwargs, {'wait_until': 'networkidle'})
+
+
+class ActionPairingTests(unittest.TestCase):
+    def fixture(self, states=('error', 'loaded')):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        rows = [{'id': str(i), 'task_id': 'crocodile', 'purpose': 'benchmark', 'registered_media': True,
+                 'original': {'status': 'ready', 'package': {'path': f'originals/{i}.json'}}}
+                for i in range(len(states))]
+        sources = {'seed': {'defaults': {'task_id': 'crocodile'}, 'runs': rows},
+                   'baseline_data': {'originals': {r['id']: copy.deepcopy(r['original']) for r in rows}}}
+        page = Mock()
+        def locator(selector):
+            element = Mock()
+            element.count.return_value = 1
+            index = next(i for i, row in enumerate(rows) if f'="{row["id"]}"' in selector)
+            element.get_attribute.return_value = states[index]
+            element.inner_text.return_value = 'Frozen runtime refuses escaped script'
+            return element
+        page.locator.side_effect = locator
+        context = Mock()
+        return rows, sources, SimpleNamespace(), context, page
+
+    def test_refusal_selects_one_shared_subject_before_cold_measurements(self):
+        from unittest.mock import patch
+        rows, sources, args, context, page = self.fixture()
+        with patch.object(verifier, 'decode_score_rows', return_value=rows), patch.object(
+                verifier, 'observed_context', return_value=(context, page, [], [])) as observed:
+            row, attempts = verifier.select_action_pair(object(), 'https://report.example/', sources, args)
+        self.assertIs(row, rows[1])
+        self.assertEqual([r['state'] for r in attempts], ['error', 'loaded'])
+        self.assertIn('Frozen runtime refuses', attempts[0]['refusal'])
+        self.assertIsNone(attempts[1]['refusal'])
+        self.assertEqual(page.goto.call_count, 2)
+        self.assertEqual(observed.call_args.kwargs, {'original': True, 'baseline': True})
+        context.close.assert_called_once()
+
+    def test_timeout_and_javascript_errors_are_not_candidate_refusals(self):
+        from unittest.mock import patch
+        for timeout in (True, False):
+            with self.subTest(timeout=timeout):
+                rows, sources, args, context, page = self.fixture()
+                errors = [] if timeout else ['unattributed native failure']
+                if timeout:
+                    page.wait_for_function.side_effect = TimeoutError('probe did not settle')
+                with patch.object(verifier, 'decode_score_rows', return_value=rows), patch.object(
+                        verifier, 'observed_context', return_value=(context, page, [], errors)):
+                    with self.assertRaises(TimeoutError if timeout else AssertionError):
+                        verifier.select_action_pair(object(), 'https://report.example/', sources, args)
+                self.assertEqual(page.goto.call_count, 1)
+                context.close.assert_called_once()
+
+    def test_pair_requires_the_same_package_and_a_real_loaded_candidate(self):
+        from unittest.mock import patch
+        for mismatch in (True, False):
+            with self.subTest(mismatch=mismatch):
+                rows, sources, args, context, page = self.fixture(('error',))
+                if mismatch:
+                    sources['baseline_data']['originals']['0']['package']['path'] = 'originals/other.json'
+                with patch.object(verifier, 'decode_score_rows', return_value=rows), patch.object(
+                        verifier, 'observed_context', return_value=(context, page, [], [])):
+                    with self.assertRaisesRegex(AssertionError, 'package differs' if mismatch else 'actually starts'):
+                        verifier.select_action_pair(object(), 'https://report.example/', sources, args)
+                context.close.assert_called_once()
+
+    def test_all_repeats_and_both_legs_receive_the_same_action_row(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        row = {'id': 'shared-original'}
+        args = SimpleNamespace(trust_root=Path('/trusted'))
+        urls = {'baseline': 'https://baseline.example/', 'baseline_actions': 'https://actions.example/',
+                'current': 'https://current.example/'}
+        def sample(browser, url, sources, args, profile, viewport, repeat):
+            value = 50 if url == urls['current'] else 100
+            return {'profile': profile, 'viewport': viewport, 'first_actually_visible_image_ms': value,
+                    'interactive_ms': value}
+        def summarized(samples):
+            return {key: {'median': samples[0][key]} for key in ('first_actually_visible_image_ms', 'interactive_ms')}
+        action = Mock(return_value={'primary_original_run_id': row['id']})
+        report = {}
+        with patch.object(verifier, 'select_action_pair', return_value=(row, [])) as select, patch.object(
+                verifier, 'gallery_sample', side_effect=sample), patch.object(verifier, 'baseline_sample', side_effect=sample), patch.object(
+                verifier, 'summary', side_effect=summarized), patch.object(verifier, 'action_sample', action):
+            verifier.paired_performance(object(), urls, {}, args, report)
+        select.assert_called_once()
+        self.assertEqual(action.call_count, len(verifier.PROFILES) * len(verifier.VIEWPORTS) * 3 * 2)
+        self.assertTrue(all(call.args[-1] is row for call in action.call_args_list))
+        self.assertEqual(report['performance']['action_pairing']['run_id'], row['id'])
+        self.assertTrue(all(c['pass'] for c in report['performance']['comparisons']))
 
 
 class NativeExceptionAttributionTests(unittest.TestCase):
@@ -933,7 +1057,8 @@ class NativeExceptionAttributionTests(unittest.TestCase):
                 stage = 'empty' if outcome.startswith('empty') else outcome
                 self.assertTrue(any('stage=' + stage in row for row in chain))
                 self.assertTrue(any(f'command_id={request["id"]},' in row and "sid='child'" in row for row in chain))
-                self.assertLessEqual(len(chain), 4 * len(self.owner_requests(commands)))
+                proof_commands = [c for _, c in commands if c['method'].startswith('DOM.')]
+                self.assertLessEqual(len(chain), 4 * len(proof_commands))
                 if outcome == 'error':
                     self.assertTrue(any('Owner frame detached' in row for row in notes))
                 if outcome == 'pending':
@@ -1087,43 +1212,36 @@ class NativeExceptionAttributionTests(unittest.TestCase):
                 loop.run_until_complete(asyncio.gather(*observer._target_tasks, return_exceptions=True))
             loop.close()
 
-    def test_forwarding_stages_distinguish_ack_from_native_response(self):
-        import asyncio
-        observer, _, _, _ = self.owner_observer()
-        loop = asyncio.new_event_loop()
-        acknowledgement = loop.create_future()
-        replies = []
-        async def target_sender(method, params):
-            return await acknowledgement
-        def capture(result):
-            replies.append(result)
-            return 'captured'
-        capture.script_identity = ('child', 'script', 'inner')
-        observer._target_loop, observer._target_sender, observer._target_tasks = loop, target_sender, set()
-        def pump():
-            barrier = loop.create_future()
-            loop.call_soon(barrier.set_result, None)
-            loop.run_until_complete(barrier)
-        try:
-            observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, capture)
-            self.assertFalse(any('forward-started' in x for x in observer.ledger.diagnostics))
-            pump()
-            self.assertTrue(any('stage=forward-started' in x for x in observer.ledger.diagnostics))
-            self.assertFalse(any('stage=forward-ack' in x for x in observer.ledger.diagnostics))
-            self.owner_reply(observer, 'child', {'id': 1}, {'scriptSource': 'native source'})
-            self.assertEqual(replies, [{'scriptSource': 'native source'}])
-            self.assertTrue(any('Native response Debugger.getScriptSource' in x for x in observer.ledger.diagnostics))
-            acknowledgement.set_result({})
-            pump(); pump()
-            self.assertTrue(any('stage=forward-ack' in x for x in observer.ledger.diagnostics))
-            self.assertEqual(len(replies), 1)
-            self.assertEqual(observer.pending, {})
-            self.assertNotIn('native source', '\n'.join(observer.ledger.diagnostics))
-        finally:
-            for task in observer._target_tasks:
-                task.cancel()
-            pump(); pump()
-            loop.close()
+    def test_critical_reads_send_immediately_but_forwarding_ack_is_not_native_evidence(self):
+        from unittest.mock import Mock
+        for identity in ('script_identity', 'owner_identity'):
+            with self.subTest(identity=identity):
+                observer, commands, _, _ = self.owner_observer()
+                replies = []
+                def capture(result):
+                    replies.append(result)
+                    return 'captured'
+                if identity == 'script_identity':
+                    capture.script_identity = ('child', 'script', 'inner')
+                else:
+                    capture.owner_identity = ('child', 'inner', 'shell', 'loader', 1)
+                observer._target_sender = Mock(side_effect=AssertionError('Evidence was deferred'))
+                observer._target_loop = Mock()
+                observer._target_tasks = set()
+                observer.send('child', 'Debugger.getScriptSource', {'scriptId': 'script'}, capture)
+                self.assertEqual(len(commands), 1)
+                self.assertEqual(commands[0][1]['method'], 'Debugger.getScriptSource')
+                observer._target_sender.assert_not_called()
+                observer._target_loop.create_task.assert_not_called()
+                self.assertTrue(any('stage=forward-started' in x for x in observer.ledger.diagnostics))
+                self.assertTrue(any('stage=forward-ack' in x for x in observer.ledger.diagnostics))
+                self.assertEqual(replies, [])
+                self.assertIn(('child', 1), observer.pending)
+                self.owner_reply(observer, 'child', {'id': 1}, {'scriptSource': 'native source'})
+                self.assertEqual(replies, [{'scriptSource': 'native source'}])
+                self.assertTrue(any('Native response Debugger.getScriptSource' in x for x in observer.ledger.diagnostics))
+                self.assertEqual(observer.pending, {})
+                self.assertNotIn('native source', '\n'.join(observer.ledger.diagnostics))
 
     def test_session_detach_retires_pending_owner_and_rejects_late_response(self):
         observer, commands, _, node = self.owner_observer()
@@ -1619,9 +1737,9 @@ class NativeExceptionAttributionTests(unittest.TestCase):
                 self.assertEqual(observer.pending, {})
                 self.assertIn("sid='native-session', script_id='script'", observer.ledger.diagnostics[0])
                 self.assertIn('stage=pending', observer.ledger.diagnostics[0])
-                self.assertIn('No session with given id', observer.ledger.diagnostics[1])
-                self.assertIn("sid='native-session', command_id=1", observer.ledger.diagnostics[1])
-                self.assertIn('stage=error: No session with given id', observer.ledger.diagnostics[2])
+                self.assertTrue(any('No session with given id' in row and "sid='native-session', command_id=1" in row
+                                    for row in observer.ledger.diagnostics))
+                self.assertTrue(any('stage=error: No session with given id' in row for row in observer.ledger.diagnostics))
                 # A later occurrence has its own context/session and two owners,
                 # the same local script ID/hash, and a successful source response.
                 later_context, later_script, later_frame, later_shell, later_owner, _, _ = self.fixture()

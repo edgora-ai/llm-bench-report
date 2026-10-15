@@ -205,7 +205,30 @@ viewBox preserveAspectRatio pathLength startOffset gradientTransform patternTran
         const end = re.exec(html);
         // HTML's escaped/double-escaped script states cannot be modeled by this lexer.
         // Reject before interpreting an apparent close tag or resource tag inside JS text.
-        if (raw === 'script' && html.slice(at, end ? end.index : html.length).includes('<!--')) fail('Escaped script tokenizer states unsupported');
+        // A browser leaves the script-data escaped state at "-->", so a balanced
+        // comment block cannot change how the document is built. Only a "<script"
+        // or "</script" reached while the state is still open makes the browser
+        // and this lexer disagree, and only that has to be refused.
+        if (raw === 'script') {
+          const span = html.slice(at, end ? end.index : html.length);
+          let cursor = 0, escaped = false;
+          while (cursor < span.length) {
+            if (escaped) {
+              const closed = span.indexOf('-->', cursor);
+              const closeTag = span.indexOf('</script', cursor);
+              const openTag = span.indexOf('<script', cursor);
+              const inner = Math.min(...[closeTag, openTag].filter(one => one >= 0));
+              if (Number.isFinite(inner) && (closed < 0 || inner < closed)) fail('Escaped script tokenizer states unsupported');
+              if (closed < 0) break;
+              escaped = false; cursor = closed + 3;
+            } else {
+              const opened = span.indexOf('<!--', cursor);
+              if (opened < 0) break;
+              escaped = true; cursor = opened + 4;
+            }
+          }
+          if (escaped) fail('Escaped script tokenizer states unsupported');
+        }
         if (!end) break;
         at = end.index; raw = null;
       }

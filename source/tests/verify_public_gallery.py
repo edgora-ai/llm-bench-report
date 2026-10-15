@@ -867,6 +867,9 @@ def paired_performance(browser, urls, sources, args, report):
     performance = report['performance'] = {'profiles': PROFILES, 'viewports': VIEWPORTS,
         'definition': 'Decoded real visible thumbnail; actual alternative-task rendering response after unscrolled cold network-idle capture. Interactive timestamp includes this deliberate wait; not earliest readiness or formal TTI.',
         'order': [], 'versions': {name: {'samples': [], 'summaries': {}} for name in ('baseline', 'current')}}
+    action_row, attempts = select_action_pair(browser, urls['baseline_actions'], sources, args)
+    performance['action_pairing'] = {'run_id': action_row['id'], 'preflight': attempts,
+                                     'definition': 'One shared subject, selected before all cold measurements in a separate disposable context'}
     for profile in PROFILES:
         for viewport in VIEWPORTS:
             for repeat in range(1, 4):
@@ -878,7 +881,8 @@ def paired_performance(browser, urls, sources, args, report):
                     performance['versions'][name]['samples'].append(sample)
                     require(sample['first_actually_visible_image_ms'] is not None, 'Frozen baseline has no actual first image; do not report fake improvement')
                     sample.update(action_sample(browser, urls['baseline_actions'] if name == 'baseline' else urls[name],
-                                                sources, args, name, profile, viewport))
+                                                sources, args, name, profile, viewport, action_row))
+                    require(sample['primary_original_run_id'] == action_row['id'], 'Paired action subject changed')
             for version in performance['versions'].values():
                 selected = [s for s in version['samples'] if s['profile'] == profile and s['viewport'] == viewport]
                 version['summaries'][profile + '/' + viewport] = summary(selected)
@@ -1137,9 +1141,11 @@ class NativeExceptionObserver:
             if sid:
                 envelope = {'sessionId': sid,
                     'message': json.dumps({'id': identifier, 'method': method, 'params': params or {}})}
-                if getattr(self, '_target_sender', None) is not None:
-                    # Use the same native Playwright channel without serially
-                    # awaiting each forwarding ACK inside a target event handler.
+                critical = getattr(callback, 'owner_identity', None) is not None or getattr(callback, 'script_identity', None) is not None
+                if getattr(self, '_target_sender', None) is not None and not critical:
+                    # Domain setup can be pipelined. Evidence reads cannot wait
+                    # for a scheduled task: an original's own error handler may
+                    # destroy its target before that task sends the request.
                     async def forward():
                         if sid in getattr(self, '_retired_sessions', set()):
                             self.owner_stage(method, identifier, callback, 'forward-skipped-retired')
@@ -1158,7 +1164,11 @@ class NativeExceptionObserver:
                             self.command_failed(sid, identifier, method, callback, 'Native forwarding cancelled')
                     task.add_done_callback(completed)
                 else:
+                    # Send the native read now, without pausing the debugger or
+                    # postponing the product's actual error/teardown lifecycle.
+                    self.owner_stage(method, identifier, callback, 'forward-started')
                     self.session.send('Target.sendMessageToTarget', envelope)
+                    self.owner_stage(method, identifier, callback, 'forward-ack')
             else:
                 result = self.session.send(method, params or {})
         except Exception as error:
@@ -1484,6 +1494,7 @@ def observe_browser_errors(context, page, args, *, baseline=False):
     # Keep the observer reachable so a caller that is about to destroy previews
     # can let already-issued native reads finish first.
     ledger.observer = observer
+    page.bench_error_ledger = ledger
     receipts = getattr(args, 'browser_error_receipts', None)
     if receipts is not None:
         receipts.append(ledger.receipt)
@@ -1578,6 +1589,8 @@ def reach_public_run(page, row):
         settle_observer(ledger, page)
     previous = page.locator('#public-pages [data-gallery-page]').filter(has_text='上一页')
     while previous.count() and previous.is_enabled():
+        if ledger is not None:
+            settle_observer(ledger, page)
         previous.click()
     limit = page.evaluate('window.BENCH_GALLERY.runs.length') + 1
     for _ in range(limit):
@@ -1591,6 +1604,8 @@ def reach_public_run(page, row):
                 return
         next_page = page.locator('#public-pages [data-gallery-page]').filter(has_text='下一页')
         require(next_page.count() == 1 and next_page.is_enabled(), 'Requested concrete run is not reachable in basic gallery')
+        if ledger is not None:
+            settle_observer(ledger, page)
         next_page.click()
     require(False, 'Requested run exceeded exact-record bounded pagination')
 
@@ -1608,22 +1623,48 @@ def click_clock(locator, page):
     locator.click()
 
 
-def action_sample(browser, url, sources, args, name, profile, viewport):
+def select_action_pair(browser, url, sources, args):
+    """Probe the frozen runtime once, outside every measured cold context."""
+    runnable = ('ready', 'missing_dependencies')
+    originals = sources['baseline_data'].get('originals') or {}
+    defaults = sources['seed']['defaults']
+    candidates = [r for r in decode_score_rows(sources['seed'])
+                  if r['task_id'] == defaults['task_id'] and r['purpose'] == 'benchmark'
+                  and r['registered_media'] and r['original']['status'] in runnable
+                  and (originals.get(r['id']) or {}).get('status') in runnable]
+    require(candidates, 'No original candidate runnable in both paired legs')
+    context, page, requests, errors = observed_context(browser, url, args, original=True, baseline=True)
+    attempts = []
+    try:
+        for row in candidates:
+            require(same(row['original']['package'], originals[row['id']]['package']),
+                    'Paired original package differs between legs')
+            page.goto(url, wait_until='networkidle', timeout=60000)
+            page.wait_for_function('document.querySelector("#workspace")?.getAttribute("aria-busy")==="false"')
+            button = page.locator(f'.evidence-card [data-run-original="{row["id"]}"]')
+            require(button.count() == 1, 'Paired candidate has no unique frozen original control')
+            button.click()
+            preview = page.locator(f'#original-content .original-preview[data-original-run="{row["id"]}"]')
+            page.wait_for_function('id=>["loaded","error"].includes(document.querySelector(`#original-content .original-preview[data-original-run="${id}"]`)?.dataset.previewState)',
+                                   arg=row['id'])
+            state = preview.get_attribute('data-preview-state')
+            attempts.append({'run_id': row['id'], 'state': state,
+                             'refusal': preview.inner_text() if state == 'error' else None})
+            require(not errors, 'Action pairing preflight JavaScript errors: ' + '; '.join(errors))
+            if state == 'loaded':
+                return row, attempts
+        require(False, 'No original actually starts in both paired legs')
+    finally:
+        context.close()
+
+
+def action_sample(browser, url, sources, args, name, profile, viewport, row):
     """Extra waiting is measured separately; never called fake TTI or cold shell time."""
     context, page, requests, errors = observed_context(browser, url, args, profile=profile, viewport=viewport,
                                                       original=True, baseline=name == 'baseline')
     try:
-        # Only the explicit click and what follows it are timed, so the sample is
-        # reached through the page's own controls first when it is not already on
-        # the first page. Both versions are then measured from the same kind of
-        # settled page, and the filter is rebuilt with the verifier's own decoder
-        # rather than the producer's projection helper.
-        defaults = sources['seed']['defaults']
-        cards = [r for r in decode_score_rows(sources['seed'])
-                 if r['task_id'] == defaults['task_id'] and r['purpose'] == defaults['purpose']
-                 and r['registered_media']]
-        runnable = ('ready', 'missing_dependencies')
-        row = next(r for r in cards if r['purpose'] == 'benchmark' and r['original']['status'] in runnable)
+        # Both legs measure the same preselected original in fresh contexts. Only
+        # their actual product controls differ; selection never warms this context.
         page.goto(url, wait_until='networkidle', timeout=60000)
         if name == 'current':
             public_ready(page)
@@ -1724,6 +1765,7 @@ def gallery_ux(browser, url, sources, args, report):
                 actual = []
                 for index in range(max(1, (len(media) + PAGE_SIZE - 1)//PAGE_SIZE)):
                     if index:
+                        settle_observer(errors, page)
                         page.locator(f'#public-pages [data-gallery-page="{index}"]').click()
                     expected = media[index*PAGE_SIZE:(index+1)*PAGE_SIZE]
                     page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card[data-run-id]")].map(e=>e.dataset.runId))===JSON.stringify(ids)', arg=expected)
@@ -1896,6 +1938,7 @@ def gallery_ux(browser, url, sources, args, report):
         replacement = next_page if next_page.count() and next_page.is_enabled() else previous
         require(replacement.count() == 1 and replacement.is_enabled(), 'Need another actual page for inline teardown proof')
         old_ids = public_ids(page)
+        settle_observer(errors, page)
         replacement.click()
         page.wait_for_function('ids=>JSON.stringify([...document.querySelectorAll("#public-grid .evidence-card")].map(e=>e.dataset.runId))!==JSON.stringify(ids)', arg=old_ids)
         require(inline.is_detached(), 'Pagination retained previous page inline sandbox')

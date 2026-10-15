@@ -262,9 +262,14 @@ class OriginalsTests(unittest.TestCase):
         for patch in patches:
             self.assertEqual(raw[patch["start"]:patch["end"]].decode(), patch["original"])
 
-    def test_script_escaped_and_doubleescaped_content_is_unsupported(self):
-        for script in ('<!--\nwindow.example=1;\n//-->',
-                       '<!--\nconst a=\'<script>\';const b=\'</script><script src="one.js">\';\nwindow.inlineText=b;\n//-->'):
+    def test_script_escaped_state_divergence_is_unsupported(self):
+        # A browser leaves the script-data escaped state at "-->", so a balanced
+        # comment block cannot change how the document is built. Only a "<script"
+        # or "</script" reached while the state is still open makes a browser and
+        # a plain CDATA parser disagree, and those stay unsupported.
+        divergent = ['<!--\nconst a=\'<script>\';const b=\'</script><script src="one.js">\';\nwindow.inlineText=b;\n//-->',
+                     '<!-- note without a close </script>']
+        for script in divergent:
             self.files = {"index.html": '<!doctype html><html><head><script>' + script +
                           '</script><script src="one.js"></script></head><body></body></html>',
                           "one.js": "window.example=1;"}
@@ -273,6 +278,18 @@ class OriginalsTests(unittest.TestCase):
                 descriptors, payloads = self.build()
                 self.assertEqual(descriptors["failed-run"]["status"], "unsupported")
                 self.assertEqual(payloads, {})
+
+    def test_balanced_script_comment_block_is_supported(self):
+        # "<!--" ... "//-->" is an ordinary JavaScript comment idiom: the escape
+        # state opens and closes, so the page runs instead of being withheld.
+        script = '<!--\nwindow.example=1;\n//-->'
+        self.files = {"index.html": '<!doctype html><html><head><script>' + script +
+                      '</script><script src="one.js"></script></head><body></body></html>',
+                      "one.js": "window.other=2;"}
+        self.register()
+        descriptors, payloads = self.build()
+        self.assertEqual(descriptors["failed-run"]["status"], "ready")
+        self.assertTrue(payloads)
 
     def test_bom_and_entity_refs_preserve_raw_bytes_and_offsets(self):
         for source_ref in ("js&#47;one&#46;js", "js&#x2f;one&#x2e;js", "js&sol;one&period;js"):

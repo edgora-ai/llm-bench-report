@@ -218,10 +218,31 @@ class EntryParser(HTMLParser):
         if self.in_style:
             self.styles.append(data)
         if self.in_script:
-            # HTMLParser does not implement HTML script escaped/double-escaped
-            # states. Reject their entry marker before a misleading </script>
-            # can cause JS string contents to be mistaken for resource tags.
-            supported("<!--" not in data, "unsupported escaped script tokenizer state")
+            # HTMLParser treats a script element as plain CDATA and ends it at the
+            # first "</script". A browser instead enters the script-data escaped
+            # state at "<!--" and leaves it at "-->": while escaped, "</script"
+            # and "<script" do not end or nest the element, so the two parsers
+            # would build different documents. Balanced annotations with no such
+            # token inside the escaped span cannot diverge, so a page that merely
+            # writes "<!-- ... -->" inside a template string still runs.
+            index, escaped = 0, False
+            while index < len(data):
+                if escaped:
+                    closed = data.find("-->", index)
+                    inner = min((position for position in
+                                 (data.find("</script", index), data.find("<script", index))
+                                 if position >= 0), default=-1)
+                    if inner >= 0 and (closed < 0 or inner < closed):
+                        raise Unsupported("unsupported escaped script tokenizer state")
+                    if closed < 0:
+                        break
+                    escaped, index = False, closed + 3
+                else:
+                    opened = data.find("<!--", index)
+                    if opened < 0:
+                        break
+                    escaped, index = True, opened + 4
+            supported(not escaped, "unsupported escaped script tokenizer state")
             self.scripts.append(data)
 
 
