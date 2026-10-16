@@ -466,7 +466,8 @@ def validate_manifest(manifest: dict) -> dict:
             _require("thumbnail" not in info["role"] or info["mime"] == "image/jpeg", "thumbnails must be JPEG")
         elif original:
             _require(set(info) == {"sha256", "mime", "size", "role"} and info["sha256"] == original.group(1)
-                     and info["mime"] == "application/json" and info["role"] == "original"
+                     and info["mime"] == "application/json"
+                     and info["role"] in ({"original", "repair"} if v3 else {"original"})
                      and info["size"] <= MAX_PACKAGE_BYTES, "invalid original metadata")
         elif viewer:
             mime, role = (("text/html", "viewer") if viewer.group(2) == "html"

@@ -35,7 +35,8 @@ class FrozenPinTests(unittest.TestCase):
         self.assertEqual(verifier.CANDIDATE_SOURCES, frozenset((
             'web/app.js', RUNTIME_SOURCE, 'web/index.html', 'web/styles.css',
             'web/public-gallery.html', 'web/public-gallery.css', 'web/public-gallery.js',
-            'tests/make_gallery.py', 'tests/test_gallery_site.py',
+            'tests/make_gallery.py', 'tests/make_repairs.py', 'tests/make_originals.py', 'tests/make_site.py',
+            'tests/make_snapshot.py', 'tests/source_export.py', 'tests/test_gallery_site.py',
             'tests/test_public_gallery_performance.py', 'tests/verify_public_gallery.py',
             'tests/verify_public_snapshot.py')))
 
@@ -99,7 +100,7 @@ class GalleryRuntimeTrustTests(GalleryFixture):
         self.lock.write_text(json.dumps({'sha256': pins}))
 
     def write_candidate(self, *, runtime=None, offline_runtime=None, full_runtime=None,
-                        offline_data=None, full_data=None, full_suffix=b'', offline_suffix=b''):
+                        offline_data=None, full_data=None, full_suffix=b'', offline_suffix=b'', repairs=None):
         runtime = self.current_runtime if runtime is None else runtime
         offline_runtime = runtime if offline_runtime is None else offline_runtime
         full_runtime = runtime if full_runtime is None else full_runtime
@@ -111,7 +112,7 @@ class GalleryRuntimeTrustTests(GalleryFixture):
         data = copy.deepcopy(self.full_data if full_data is None else full_data)
         data['offline'] = {'path': 'offline.html', 'sha256': verifier.digest(offline), 'size': len(offline)}
         full = verifier.current_document(data, self.sources, full_runtime) + full_suffix
-        seed = make_gallery.project_gallery(data, full, runtime, self.viewer.read_bytes())
+        seed = make_gallery.project_gallery(data, full, runtime, self.viewer.read_bytes(), repairs=repairs)
         html = make_gallery.render_gallery(seed, root=self.project)
         if isinstance(html, str):
             html = html.encode()
@@ -163,7 +164,19 @@ class GalleryRuntimeTrustTests(GalleryFixture):
                         {**pins, 'web/unplanned.js': verifier.digest(b'unplanned')}):
             with self.subTest(keys=sorted(changed)):
                 self.write_candidate_lock(changed)
-                with self.assertRaisesRegex(AssertionError, 'exactly the twelve'):
+                with self.assertRaisesRegex(AssertionError, 'exactly the planned'):
+                    self.checked_sources()
+
+    def test_repair_validator_and_package_dependency_must_be_locked(self):
+        pins = json.loads(self.lock.read_text())['sha256']
+        for source in ('tests/make_repairs.py', 'tests/make_originals.py', 'tests/make_site.py',
+                       'tests/make_snapshot.py', 'tests/source_export.py'):
+            with self.subTest(source=source):
+                self.write_candidate_lock({key: value for key, value in pins.items() if key != source})
+                with self.assertRaisesRegex(AssertionError, 'exactly the planned'):
+                    self.checked_sources()
+                self.write_candidate_lock({**pins, source: verifier.digest(b'unapproved source')})
+                with self.assertRaisesRegex(AssertionError, 'Approved current source bytes differ'):
                     self.checked_sources()
 
     def test_missing_lock_fails_closed(self):
@@ -249,6 +262,90 @@ class GalleryRuntimeTrustTests(GalleryFixture):
         (self.site / verifier.MANIFEST).write_text(json.dumps(manifest))
         with self.assertRaisesRegex(AssertionError, 'exactly inherited assets'):
             self.audit()
+
+    def test_only_validated_extra_package_is_excluded_while_full_offline_and_originals_stay_frozen(self):
+        import base64
+        run_id = self.full_data['runs'][0]['id']
+        original = self.full_data['originals'][run_id]
+        package = json.loads((self.baseline / original['package']['path']).read_bytes())
+        entry = package['entrypoint']
+        body = base64.b64decode(package['files'][entry]['base64']).replace(b'Synthetic original', b'Synthetic derivative')
+        package['files'][entry].update(base64=base64.b64encode(body).decode(), size=len(body), sha256=verifier.digest(body))
+        raw = json.dumps(package).encode()
+        path = 'originals/' + verifier.digest(raw) + '.json'
+        descriptor = {**copy.deepcopy(original), 'entry_sha256': verifier.digest(body),
+                      'package': {'path': path, 'sha256': verifier.digest(raw), 'size': len(raw)}}
+        repairs = {run_id: {'version': 1, 'recipe_id': 'isolated-validator-fixture',
+            'source_sha256': original['entry_sha256'], 'result_sha256': descriptor['entry_sha256'],
+            'operations': [], 'review': {'reason': 'Synthetic validator wiring test, not a production recipe'},
+            'descriptor': descriptor}}
+        # Isolate loader wiring using independently pinned synthetic validator code;
+        # real fixed-recipe acceptance is tested by the actual make_repairs suite.
+        validator = ('def validate_repairs(repairs, payloads, originals):\n'
+                     + '    assert repairs == ' + repr(repairs) + '\n'
+                     + '    assert payloads[' + repr(path) + '] == ' + repr(raw) + '\n'
+                     + '    assert originals[' + repr(run_id) + '] == ' + repr(original) + '\n'
+                     + '    return {' + repr(path) + '}\n')
+        (self.project / 'tests/make_repairs.py').write_text(validator)
+        self.write_candidate_lock()
+        self.write_candidate(repairs=repairs)
+        (self.site / path).write_bytes(raw)
+        manifest = self.manifest()
+        manifest['files'][path] = {'role': 'repair', 'mime': 'application/json',
+                                   'sha256': verifier.digest(raw), 'size': len(raw)}
+        (self.site / verifier.MANIFEST).write_text(json.dumps(manifest))
+        report = {}
+        result = self.audit(report)
+        self.assertEqual(result['seed']['repairs'], repairs)
+        self.assertEqual(result['data']['originals'], self.full_data['originals'])
+        self.assertEqual(result['data']['runs'], self.full_data['runs'])
+        self.assertEqual(report['audit']['validated_repair_paths'], [path])
+        self.assertEqual(report['audit']['repair_exception_policy'], 'fail-all-repair-or-shared-source-errors')
+        self.assertNotIn('repairs', result['data'])
+        self.assertEqual((self.site / original['package']['path']).read_bytes(),
+                         (self.baseline / original['package']['path']).read_bytes())
+
+    def test_unreferenced_repair_asset_cannot_escape_v2_inventory_comparison(self):
+        raw = b'{"derived-but-unreferenced":true}'
+        name = 'originals/' + verifier.digest(raw) + '.json'
+        (self.site / name).write_bytes(raw)
+        manifest = self.manifest()
+        manifest['files'][name] = {'sha256': verifier.digest(raw), 'size': len(raw),
+                                   'mime': 'application/json', 'role': 'repair'}
+        (self.site / verifier.MANIFEST).write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(AssertionError, 'exactly the repair-role'):
+            self.audit()
+
+    def test_unrecognized_repair_and_unknown_seed_fields_fail_closed(self):
+        original_html = (self.site / 'index.html').read_text()
+        parsed = verifier.GalleryHTML(); parsed.feed(original_html); parsed.close()
+        seed = verifier.gallery_seed(parsed)
+        run_id = seed['runs'][0]['id']
+        for fields in ({'repairs': {run_id: {'version': 1, 'recipe_id': 'unknown'}}},
+                       {'repairs': {}}, {'unexpected_repair_metadata': {}}):
+            changed = {**seed, **fields}
+            program = 'window.BENCH_GALLERY=' + json.dumps(changed, ensure_ascii=False).replace('<', '\\u003c') + ';'
+            raw = original_html.replace(parsed.scripts[0], program).encode()
+            self.rewrite_payload('index.html', raw)
+            with self.subTest(fields=fields), self.assertRaises((AssertionError, RuntimeError)):
+                self.audit()
+
+    def test_repair_cannot_mutate_original_projection_or_scores(self):
+        original_html = (self.site / 'index.html').read_text()
+        parsed = verifier.GalleryHTML(); parsed.feed(original_html); parsed.close()
+        seed = verifier.gallery_seed(parsed)
+        # This unit isolates strict projection from the recipe validator, covered separately.
+        repairs = {seed['runs'][0]['id']: {'descriptor': {'status': 'ready'}}}
+        for field, value in (('original', {'status': 'ready', 'package': {'path': 'derived.json'}}),
+                             ('meter', [4, 4, 4, 4, 4, 4]), ('repair', repairs)):
+            changed = copy.deepcopy(seed)
+            changed['repairs'] = repairs
+            changed['runs'][0][field] = value
+            program = 'window.BENCH_GALLERY=' + json.dumps(changed, ensure_ascii=False).replace('<', '\\u003c') + ';'
+            html = original_html.replace(parsed.scripts[0], program)
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, 'projection/order'):
+                verifier.audit_gallery(html, self.full_data, self.sources['web/public-gallery.js'].decode(),
+                    self.sources['web/public-gallery.css'].decode(), {}, {}, b'', repairs=repairs)
 
     def test_census_stays_frozen(self):
         self.args.expected_runs += 1

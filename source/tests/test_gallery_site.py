@@ -235,6 +235,9 @@ const sdk={async readPackage(){return new Uint8Array(0);},create(host,options){c
 let ensureSDK=async()=>sdk;
 const pathURL=path=>'https://example.test/report/'+path;
 const fetch=async()=>new Response();
+const seed={},s=/^[a-f0-9]{32}$/;
+const helpers=code.indexOf('  function repairFor(');
+eval(code.slice(helpers,code.indexOf('  function card(',helpers)));
 eval(code.slice(start,end));
 (async()=>{
  const c={run:{id:'a'.repeat(32),original:{status:'ready',package:{path:'originals/'+'a'.repeat(64)+'.json',sha256:'a'.repeat(64)}}},node:{isConnected:true,dataset:{}},host:{style:{},replaceChildren(){}},status:{},start:{},viewport:'fit',token:0,loading:false,runtime:null,alive:true,inline:true,visible:false,paused:false};
@@ -491,6 +494,80 @@ eval(code.slice(start,end));
         self.assertEqual(payload["runs"], 12)
         self.assertEqual(self.seed()["counts"]["runs"], 7)
         self.verify()
+
+
+class RepairGalleryIntegrationTests(GalleryFixture):
+    """Synthetic integration fixtures; real recipes are tested in test_repairs."""
+
+    def derived(self):
+        run_id = self.runs[0]["id"]
+        raw = b"synthetic derived package for gallery wiring only"
+        sha = hashlib.sha256(raw).hexdigest()
+        path = "originals/" + sha + ".json"
+        descriptor = copy.deepcopy(self.full_data["originals"][run_id])
+        descriptor.update(entry_sha256="b" * 64, package={"path": path, "sha256": sha, "size": len(raw)})
+        record = {"version": 1, "recipe_id": "synthetic-integration-only", "source_sha256": self.full_data["originals"][run_id]["entry_sha256"],
+                  "result_sha256": "b" * 64, "operations": [{"type": "synthetic"}],
+                  "review": {"reason": "Synthetic repair <not original>"}, "descriptor": descriptor}
+        return {run_id: record}, {path: raw}
+
+    def test_repair_roundtrip_keeps_exact_v2_and_original_statistics(self):
+        records, payloads = self.derived()
+        before = self.snapshot_files(self.baseline)
+        with mock.patch.object(make_gallery, "build_repairs", return_value=(records, payloads)) as build, \
+             mock.patch.object(make_gallery, "validate_repairs", return_value=set(payloads)) as validate:
+            make_gallery.build_gallery(self.baseline, self.site, self.viewer, input_runtime=self.runtime,
+                                       root=self.project, archive_root=self.root / "archives", repair_audit={"synthetic": True})
+            build.assert_called_once()
+            self.assertEqual(self.seed()["repairs"], records)
+            self.assertEqual(self.verify()["stats"]["original_packages"], self.source_manifest["stats"]["original_packages"])
+            self.assertGreaterEqual(validate.call_count, 2)
+        self.assertEqual(self.snapshot_files(self.baseline), before)
+        seed = self.seed()
+        self.assertEqual((self.site / seed["full"]["path"]).read_bytes(), before["index.html"])
+        self.assertEqual((self.site / "offline.html").read_bytes(), before["offline.html"])
+        for path, raw in payloads.items():
+            self.assertEqual((self.site / path).read_bytes(), raw)
+            self.assertEqual(self.manifest()["files"][path]["role"], "repair")
+        self.assertEqual(seed["counts"]["reviews"], 1)
+        self.assertEqual(seed["runs"], make_gallery.project_gallery(self.full_data, before["index.html"],
+                                                                 self.runtime.read_bytes(), self.viewer.read_bytes())["runs"])
+        html = (self.site / "index.html").read_text()
+        self.assertIn("修复版，非原始交付", html)
+        self.assertIn("Synthetic repair &lt;not original&gt;", html)
+        self.assertIn('data-preview-mode="repair"', html)
+
+    def test_orphan_repair_role_rejected_instead_of_omitting_from_baseline(self):
+        records, payloads = self.derived()
+        with mock.patch.object(make_gallery, "build_repairs", return_value=(records, payloads)), \
+             mock.patch.object(make_gallery, "validate_repairs", return_value=set(payloads)):
+            make_gallery.build_gallery(self.baseline, self.site, self.viewer, input_runtime=self.runtime,
+                                       root=self.project, archive_root=self.root / "archives", repair_audit={"synthetic": True})
+        seed = self.seed()
+        del seed["repairs"]
+        self.rewrite_payload("index.html", make_gallery.render_gallery(seed, self.project))
+        with self.assertRaisesRegex(RuntimeError, "repair"):
+            self.verify()
+
+    def test_repair_role_is_v3_only_and_requires_json_content_address(self):
+        manifest = copy.deepcopy(self.source_manifest)
+        path = next(path for path, meta in manifest["files"].items() if meta["role"] == "original")
+        manifest["files"][path]["role"] = "repair"
+        with self.assertRaisesRegex(RuntimeError, "original metadata"):
+            make_site.validate_manifest(manifest)
+        manifest.update(version=3, format=make_gallery.FORMAT)
+        # A role extension does not authorize a malformed gallery without viewer/runtime.
+        with self.assertRaisesRegex(RuntimeError, "viewer and one runtime"):
+            make_site.validate_manifest(manifest)
+
+    def test_repairs_require_archive_and_audit_and_latest_binding(self):
+        with self.assertRaisesRegex(RuntimeError, "both archive root"):
+            make_gallery.build_gallery(self.baseline, self.site, self.viewer, input_runtime=self.runtime,
+                                       root=self.project, archive_root=self.root / "archives")
+        self.assertFalse(self.site.exists())
+        with self.assertRaisesRegex(RuntimeError, "latest gallery run"):
+            make_gallery.project_gallery(self.full_data, (self.baseline / "index.html").read_bytes(),
+                                         self.runtime.read_bytes(), self.viewer.read_bytes(), repairs={"f" * 32: {}})
 
 
 class ModelVisibilityTests(unittest.TestCase):

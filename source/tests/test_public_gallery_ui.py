@@ -29,13 +29,15 @@ class PublicGalleryUITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def preview_javascript(self, body, extra_functions=()):
-        functions = [('previewButtons', False), ('togglePreview', False),
+        functions = [('repairFor', False), ('previewChoice', False), ('previewLabel', False),
+                     ('previewAvailable', False), ('previewFallback', False), ('setPreviewMode', False),
+                     ('previewButtons', False), ('togglePreview', False),
                      ('stopPreview', False), ('destroyPreview', False),
                      ('suspendCards', False), ('clearCards', False),
                      ('resumeCards', False), ('pathURL', False), ('startPreview', True)]
         self.javascript(functions + list(extra_functions), """
 let activePreview=null,previewObserver=null,fullPending=false,fullIntent=0,returnURL=null,fullFetch=null;
-const cardPreviews=new Map();
+const cardPreviews=new Map(),seed={},s=/^[a-f0-9]{32}$/;
 const allowedOriginal=run=>['ready','missing_dependencies'].includes(run.original.status);
 const dialogs={'#original-dialog':{open:false},'#public-zoom':{open:false}};
 const $=selector=>dialogs[selector]||null;
@@ -58,6 +60,23 @@ function makePreview(id,paused=false){
  cardPreviews.set(id,preview);return preview;
 }
 """ + body)
+
+    def repair_preview_javascript(self, body, extra_functions=()):
+        self.preview_javascript(r"""
+function makeRepair(id='1'.repeat(32),originalStatus='ready'){
+ const preview=makePreview(id);
+ Object.assign(preview.run,{model:'Synthetic model',image:{full:'media/'+'d'.repeat(64)+'.png',width:800,height:500,label:'历史截图'}});
+ Object.assign(preview.run.original,{status:originalStatus,entrypoint:'index.html',entry_sha256:'a'.repeat(64),missing:[],policy:'opaque-srcdoc-v1'});
+ if(originalStatus==='unsupported')preview.run.original.package=null;
+ const descriptor={status:'ready',entrypoint:'index.html',entry_sha256:'b'.repeat(64),missing:[],policy:'opaque-srcdoc-v1',package:{path:'originals/'+'c'.repeat(64)+'.json',size:3,sha256:'c'.repeat(64)}};
+ const repair={version:1,recipe_id:'synthetic-recipe-v1',source_sha256:'a'.repeat(64),operations:[{kind:'replace',before:'broken',after:'repaired'}],result_sha256:'b'.repeat(64),review:{reason:'固定修复说明 <script>not executable</script>'},descriptor};
+ seed.repairs??={};seed.repairs[id]=repair;
+ Object.assign(preview,previewChoice(preview.run));preview.host.dataset={};
+ const buttons=['repair','original','static'].map(mode=>({dataset:{previewMode:mode},setAttribute(key,value){this[key]=value;}}));
+ preview.controls={buttons,querySelectorAll:()=>buttons};preview.zoom={};
+ return preview;
+}
+""" + body, extra_functions)
 
     def runtime_javascript(self, body):
         # Execute only the trusted SDK; fake srcdoc elements never execute originals.
@@ -129,6 +148,180 @@ function instance(descriptor,onState=()=>{}){const host=new Element(),states=[];
         result = subprocess.run(['node', '-e', program, str(ROOT / 'web/preview-runtime.js')],
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_repair_mapping_is_optional_bound_to_run_entry_and_strict_external_descriptor(self):
+        self.repair_preview_javascript(r"""
+const preview=makeRepair(),run=preview.run,valid=structuredClone(seed.repairs),id=run.id;
+assert.equal(repairFor(run),seed.repairs[id]);assert.equal(previewChoice(run).mode,'repair');
+const original=JSON.stringify(run.original),changes=[
+ value=>{value[id].version=2;},value=>{value[id].source_sha256='0'.repeat(64);},
+ value=>{value[id].result_sha256='0'.repeat(64);},value=>{value[id].recipe_id=' ';},
+ value=>{value[id].operations=[];},value=>{value[id].review.reason=' ';},
+ value=>{value[id].descriptor.status='unsupported';},value=>{value[id].descriptor.entrypoint='../index.html';},
+ value=>{value[id].descriptor.policy='unsafe';},value=>{value[id].descriptor.extra=true;},
+ value=>{value[id].descriptor.missing=['../secret'];},value=>{value[id].descriptor.missing=['asset.png'];},
+ value=>{value[id].descriptor.package.path='https://evil.test/repair.json';},
+ value=>{value[id].descriptor.package.path='originals/'+'0'.repeat(64)+'.json';},
+ value=>{value[id].descriptor.package.path='../'+value[id].descriptor.package.path;},
+ value=>{value[id].descriptor.package.size=4194305;},value=>{value[id].descriptor.package.size=0;},
+ value=>{value[id].descriptor.package.base64='abc';},value=>{value[id].descriptor.entry_sha256=null;},
+ value=>{value['2'.repeat(32)]=value[id];delete value[id];}
+];
+for(const change of changes){seed.repairs=structuredClone(valid);change(seed.repairs);assert.equal(repairFor(run),null);assert.equal(previewChoice(run).mode,'original');}
+for(const value of [undefined,null,[],{},'not a map',Object.create(valid)]){seed.repairs=value;assert.equal(repairFor(run),null);}
+seed.repairs=valid;assert.equal(repairFor({...run,id:'../'+id}),null);
+assert.equal(repairFor({...run,original:{...run.original,status:'no_entrypoint'}}),null);
+assert.equal(JSON.stringify(run.original),original);
+""")
+
+    def test_repair_default_descriptor_labels_mode_switches_and_original_is_untouched(self):
+        self.repair_preview_javascript(r"""
+const preview=makeRepair(),original=JSON.stringify(preview.run.original);await startPreview(preview);
+assert.equal(created[0].options.descriptor,seed.repairs[preview.run.id].descriptor);
+assert.equal(preview.host.dataset.previewMode,'repair');assert.equal(preview.node.dataset.previewMode,'repair');
+assert.match(downloads[0].url,/originals\/c{64}\.json$/);
+for(const value of [preview.status.textContent,preview.start.textContent,preview.zoom.textContent]){assert.match(value,/修复版/);assert.match(value,/非原始交付/);assert.match(value,/不用于评分/);}
+setPreviewMode(preview,'original');await settle();
+assert.equal(created.at(-1).options.descriptor,preview.run.original);assert.equal(preview.mode,'original');
+assert.equal(preview.host.dataset.previewMode,'original');assert.equal(preview.status.textContent,'实时原作 · 非录像');
+assert.equal(preview.start.textContent,'停止原作');assert.equal(preview.zoom.textContent,'放大原作');
+const count=created.length;setPreviewMode(preview,'static');await settle();
+assert.equal(preview.runtime,null);assert.equal(created.length,count);assert.equal(preview.host.style.visibility,'hidden');
+assert.equal(preview.node.dataset.previewState,'static');assert.equal(preview.start.disabled,true);
+assert.match(preview.status.textContent,/静态历史截图.*原始交付.*不是修复版/);
+assert.equal(preview.controls.buttons[2]['aria-pressed'],'true');resumeCards();await settle();assert.equal(created.length,count);
+setPreviewMode(preview,'repair');await settle();assert.equal(created.length,count+1);
+assert.equal(preview.controls.buttons[0]['aria-pressed'],'true');assert.equal(preview.controls.buttons[1]['aria-pressed'],'false');
+assert.equal(JSON.stringify(preview.run.original),original);
+""")
+
+    def test_repair_loading_switch_aborts_and_late_callbacks_cannot_revive_previous_mode(self):
+        self.repair_preview_javascript(r"""
+let resolveSDK;sdkReady=new Promise(resolve=>resolveSDK=resolve);
+const preview=makeRepair(),pending=startPreview(preview);
+assert.match(preview.status.textContent,/修复版.*非原始交付.*不用于评分.*装载中/);
+setPreviewMode(preview,'static');assert.equal(downloads[0].signal.aborted,true);
+resolveSDK(sdk);await pending;assert.equal(created.length,0);assert.equal(preview.runtime,null);
+setPreviewMode(preview,'repair');await settle();const old=created.at(-1);
+setPreviewMode(preview,'original');await settle();const current=preview.runtime,status=preview.status.textContent,token=preview.token;
+old.options.onState({status:'loaded',message:'late repair'});old.options.onDiagnostic({kind:'error',message:'late repair error'});
+assert.equal(preview.runtime,current);assert.equal(preview.status.textContent,status);assert.equal(preview.token,token);
+setPreviewMode(preview,'repair');await settle();const latest=created.at(-1);togglePreview(preview);
+assert.equal(preview.paused,true);assert.equal(preview.runtime,null);assert.match(preview.status.textContent,/修复版.*不用于评分.*已停止.*历史截图/);
+latest.options.onState({status:'loaded'});latest.options.onDiagnostic({kind:'error',message:'late stopped error'});
+assert.equal(preview.runtime,null);assert.equal(preview.node.dataset.previewState,'stopped');
+resumeCards();await settle();assert.equal(preview.runtime,null);
+""")
+
+    def test_repair_transport_and_runtime_failures_use_historical_not_original_success_fallback(self):
+        self.repair_preview_javascript(r"""
+for(const kind of ['transport','state','diagnostic']){
+ const preview=makeRepair(String(downloads.length+1).repeat(32));
+ if(kind==='transport')global.fetch=async()=>{throw new Error('Package digest mismatch');};
+ else global.fetch=async()=>response();
+ await startPreview(preview);
+ if(kind==='state')created.at(-1).options.onState({status:'error',message:'entry hash mismatch'});
+ if(kind==='diagnostic')created.at(-1).options.onDiagnostic({kind:'error',message:'repair script failed'});
+ assert.equal(preview.runtime,null);assert.equal(preview.paused,true);assert.equal(preview.node.dataset.previewState,'error');
+ assert.equal(preview.host.style.visibility,'hidden');assert.equal(preview.host.dataset.previewMode,'repair');
+ assert.match(preview.status.textContent,/修复版，非原始交付.*不用于评分.*静态历史截图回退（非修复结果）/);
+ assert.doesNotMatch(preview.status.textContent,/原作启动失败|原作运行错误|实时原作/);
+ const status=preview.status.textContent;resumeCards();await settle();assert.equal(preview.status.textContent,status);
+}
+""")
+
+    def test_repair_can_switch_to_unsupported_original_and_original_error_policy_is_unchanged(self):
+        self.repair_preview_javascript(r"""
+const preview=makeRepair(undefined,'unsupported');await startPreview(preview);const count=created.length;
+setPreviewMode(preview,'original');await settle();assert.equal(created.length,count);assert.equal(preview.runtime,null);
+assert.equal(preview.start.disabled,true);assert.match(preview.status.textContent,/原作不可运行（unsupported）.*历史截图/);
+assert.equal(preview.host.dataset.previewMode,'original');assert.equal(preview.zoom.textContent,'放大回退');
+setPreviewMode(preview,'repair');await settle();assert.equal(created.length,count+1);
+const other=makeRepair('2'.repeat(32));setPreviewMode(other,'original');await settle();
+const instance=created.at(-1);instance.options.onDiagnostic({kind:'policy',message:'connect-src blocked'});
+assert.equal(other.runtime,instance.runtime);assert.match(other.status.textContent,/隔离策略诊断.*非验收/);
+instance.options.onDiagnostic({kind:'error',message:'Assignment to constant variable.'});
+assert.equal(other.runtime,null);assert.equal(other.paused,true);assert.equal(other.node.dataset.previewState,'error');
+assert.match(other.status.textContent,/原作运行错误（非验收）.*Assignment to constant variable/);
+assert.doesNotMatch(other.status.textContent,/修复版/);
+""")
+
+    def test_repair_notice_and_mode_buttons_keep_hashes_scoring_and_original_downloads_explicit(self):
+        self.repair_preview_javascript(r"""
+const node=(tag,attrs={},children=[])=>({tag,attrs,children});
+const preview=makeRepair(),notice=repairNotice(preview.run),modes=previewModes(preview.run,'repair');
+const flatten=value=>[value.attrs?.text||'',...(value.children||[]).map(flatten)].join(' '),content=flatten(notice);
+assert.match(content,/修复版，非原始交付.*不用于评分.*历史评分仍针对原始交付/);
+assert.match(content,/完整查看器与离线文件保留原始字节，不含修复版/);
+assert.ok(content.includes('源 SHA-256：'+'a'.repeat(64)));assert.ok(content.includes('结果 SHA-256：'+'b'.repeat(64)));
+assert.ok(content.includes(seed.repairs[preview.run.id].review.reason));
+assert.deepEqual(modes.children.map(button=>button.attrs['data-preview-mode']),['repair','original','static']);
+assert.deepEqual(modes.children.map(button=>button.attrs['aria-pressed']),[true,false,false]);
+assert.ok(modes.children.every(button=>button.attrs['data-preview-run']===preview.run.id));
+""", [('repairNotice', False), ('previewModes', False)])
+
+    def test_no_entrypoint_runs_gain_no_repair_controls_and_absent_mapping_keeps_original_buttons(self):
+        self.repair_preview_javascript(r"""
+const state={selected:new Set(),source:'scope'},a=/^media\/[a-f0-9]{64}\.(jpg|jpeg|png|webp|gif)$/;
+const node=(tag,attrs={},children=[])=>({tag,attrs,children,style:{},append(...values){this.children.push(...values);}});
+const c=()=> '未交付，没有可展示 SVG/HTML',scoreCard=()=>node('div'),meterText=()=>'',text=String,o=String,shownScores=()=>[],n=()=>'';
+const flatten=element=>[element,...element.children.flatMap(flatten)];
+for(let index=1;index<=8;index++){
+ const preview=makeRepair(String(index).repeat(32));preview.run.original.status='no_entrypoint';delete preview.run.image;
+ const elements=flatten(card(preview.run));
+ assert.equal(elements.some(element=>element.attrs['data-preview-mode']),false);
+ assert.equal(elements.some(element=>element.attrs.class==='work-repair'),false);
+ const start=elements.find(element=>element.attrs['data-run-original']);assert.equal(start.attrs.text,'运行原作');assert.equal(start.attrs.disabled,true);
+ const zoom=elements.find(element=>element.attrs['data-zoom-run']);assert.equal(zoom.attrs.disabled,true);
+}
+const preview=makeRepair('f'.repeat(32));delete seed.repairs;
+const elements=flatten(card(preview.run));assert.equal(elements.some(element=>element.attrs['data-preview-mode']),false);
+assert.equal(elements.find(element=>element.attrs['data-run-original']).attrs.text,'运行原作');
+assert.equal(elements.find(element=>element.attrs['data-zoom-run']).attrs.text,'放大原作');
+""", [('card', False), ('repairNotice', False), ('previewModes', False)])
+
+    def test_repair_modal_mode_events_stop_close_and_late_sdk_do_not_resurrect_sandbox(self):
+        self.repair_preview_javascript(r"""
+const handlers=new Map();
+class FakeNode {
+ constructor(tag='div',attrs={},children=[]){this.tag=tag;this.attrs=attrs;this.children=children;this.dataset={};this.hidden=false;this.open=false;this.style={};this.events=new Map();this.isConnected=true;for(const [key,value]of Object.entries(attrs))this.setAttribute(key,value);}
+ setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]=String(value);if(key==='text')this.textContent=value;}
+ replaceChildren(...children){this.children=children;}append(...children){this.children.push(...children);}
+ addEventListener(type,callback){if(!this.events.has(type))this.events.set(type,[]);this.events.get(type).push(callback);}
+ emit(type){for(const callback of this.events.get(type)||[])callback({});}
+ showModal(){this.open=true;}close(){this.open=false;this.emit('close');}
+ closest(){return this;}
+ querySelectorAll(selector){return this.children.flatMap(child=>[...(selector==='[data-preview-mode]'&&child.dataset?.previewMode?[child]:[]),...(child.querySelectorAll?.(selector)||[])]);}
+}
+const node=(tag,attrs,children)=>new FakeNode(tag,attrs,children),a=/^media\/[a-f0-9]{64}\.(jpg|jpeg|png|webp|gif)$/;
+for(const id of ['public-purpose','public-model','public-sort','public-score-source','public-mixed','public-history','public-clear','public-compare','original-dialog','original-title','original-content','public-zoom','public-zoom-image','public-theme'])dialogs['#'+id]=new FakeNode();
+const controller=new AbortController(),scopes=[],n=()=>'',populateHistory=()=>{},narrow={addEventListener(){}},state={};let imageObserver;
+global.document.addEventListener=(type,callback)=>handlers.set(type,callback);
+global.window={addEventListener(){}};global.IntersectionObserver=class {observe(){}disconnect(){}};
+const preview=makeRepair(),records=new Map([[preview.run.id,preview.run]]);
+f();await startPreview(preview);assert.equal(preview.runtime!==null,true);
+const click=attrs=>handlers.get('click')({target:new FakeNode('button',attrs)});
+click({'data-zoom-run':preview.run.id});await settle();
+const modal=activePreview;assert.equal(dialogs['#original-dialog'].open,true);assert.equal(modal.mode,'repair');assert.equal(preview.runtime,null);
+assert.equal(modal.host.dataset.previewMode,'repair');assert.match(dialogs['#original-title'].textContent,/修复版.*非原始交付.*不用于评分/);
+assert.equal(modal.fallback.hidden,true);assert.equal(modal.host.hidden,false);
+const original=JSON.stringify(preview.run.original),first=created.at(-1);
+click({'data-preview-mode':'static','data-preview-run':preview.run.id});await settle();
+assert.equal(modal.runtime,null);assert.equal(modal.start.disabled,true);assert.equal(modal.fallback.hidden,false);assert.equal(modal.host.hidden,true);
+assert.match(modal.status.textContent,/静态历史截图/);assert.match(dialogs['#original-title'].textContent,/历史截图/);
+first.options.onDiagnostic({kind:'error',message:'late modal error'});assert.equal(modal.node.dataset.previewState,'static');
+click({'data-preview-mode':'original','data-preview-run':preview.run.id});await settle();
+assert.equal(modal.mode,'original');assert.equal(created.at(-1).options.descriptor,preview.run.original);
+assert.doesNotMatch(dialogs['#original-title'].textContent,/修复版/);
+click({'data-preview-mode':'repair','data-preview-run':preview.run.id});await settle();
+modal.start.emit('click');assert.equal(modal.runtime,null);assert.equal(modal.paused,true);assert.match(modal.status.textContent,/修复版.*已停止/);
+let resolveSDK;sdkReady=new Promise(resolve=>resolveSDK=resolve);modal.start.emit('click');await settle();
+assert.equal(modal.loading,true);preview.paused=true;const count=created.length,signal=modal.abort.signal;
+click({'data-public-close':'original-dialog'});assert.equal(signal.aborted,true);assert.equal(activePreview,null);assert.equal(modal.alive,false);
+assert.equal(dialogs['#original-dialog'].open,false);assert.deepEqual(dialogs['#original-content'].children,[]);
+resolveSDK(sdk);await settle();assert.equal(created.length,count);assert.equal(modal.runtime,null);assert.equal(preview.runtime,null);
+assert.equal(JSON.stringify(preview.run.original),original);
+""", [('g', False), ('cancelFull', False), ('repairNotice', False), ('previewModes', False), ('f', False)])
 
     def test_shared_numeric_decoder_initialization_bounds_and_exact_output_keys(self):
         program = r"""

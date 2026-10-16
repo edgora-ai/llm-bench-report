@@ -24,6 +24,7 @@ if __name__ == "__main__":
 
 import make_site as site
 from make_originals import FORMAT_V2
+from make_repairs import build_repairs, validate_repairs
 from make_snapshot import ROOT
 
 FORMAT = site.FORMAT_V3
@@ -307,7 +308,7 @@ def project_runs(data):
     return selected
 
 
-def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes, *, score_source=None):
+def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes, *, score_source=None, repairs=None):
     """Latest-per-triple projection; never select best or invent scores."""
     site._require(data.get("format") == FORMAT_V2 and data.get("transport") == "external",
                   "gallery input must be verified external v2")
@@ -343,6 +344,9 @@ def project_gallery(data, full_bytes, runtime_bytes, viewer_bytes, *, score_sour
                        "full_benchmark": sum(run.get("purpose") == "benchmark" for run in data["runs"]),
                        "reviews": sum(len(run.get("reviews") or []) for run in data["runs"])},
             "full": full, "runtime": _descriptor(runtime_bytes, "js"), "offline": copy.deepcopy(data["offline"])}
+    if repairs:
+        site._require(set(repairs) <= {row["id"] for row in runs}, "repair is not a latest gallery run")
+        seed["repairs"] = copy.deepcopy(repairs)
     site._public_data(seed)
     decode_scores(seed)
     return seed
@@ -378,7 +382,21 @@ def short_scope(scope):
     return ("盲评" if scope[2] is True else "非盲评" if scope[2] is False else "盲评未声明") + " · 来源标签未核实"
 
 
-def render_card(run, score_source=""):
+def render_repair(run_id, repair):
+    """Derived previews never borrow the original-work label or historical scores."""
+    e = lambda value: escape(str(value), quote=True)
+    modes = ''.join('<button type="button" data-preview-mode="' + mode + '" data-preview-run="' + e(run_id)
+                    + '" aria-pressed="' + ('true' if mode == 'repair' else 'false') + '">' + label + '</button>'
+                    for mode, label in (("repair", "修复版"), ("original", "原始交付"), ("static", "历史截图")))
+    return ('<aside class="work-repair"><p class="repair-label">修复版，非原始交付 · 不用于评分；历史评分仍针对原始交付</p>'
+            '<div class="preview-modes" role="group" aria-label="预览版本">' + modes + '</div>'
+            '<details><summary>固定修复说明 / 源与结果 SHA-256</summary><p>' + e(repair["recipe_id"]) + ' · '
+            + e(repair["review"]["reason"]) + '</p><p class="repair-hash">源 SHA-256：' + e(repair["source_sha256"])
+            + '</p><p class="repair-hash">结果 SHA-256：' + e(repair["result_sha256"])
+            + '</p><p>完整查看器和离线版仅含原始交付，不含修复版。</p></details></aside>')
+
+
+def render_card(run, score_source="", repair=None):
     """Server markup and bootstrap share six scores, exact scope and meter facts."""
     e = lambda value: escape(str(value if value is not None else "unknown"), quote=True)
     run_id, image = e(run["id"]), run["image"]
@@ -403,14 +421,17 @@ def render_card(run, score_source=""):
              + '" height="' + e(image["height"]) + '" alt="' + e(run["model"] + ' · ' + run["id"] + ' · ' + image["label"])
              + '" decoding="async">') if image else '<p class="work-empty">' + e(media_text(run)) + '</p>'
     cover_style = ' style="aspect-ratio:' + e(image["width"]) + '/' + e(image["height"]) + '"' if image else ''
-    disabled = '' if run["original"]["status"] in {"ready", "missing_dependencies"} else ' disabled'
+    descriptor = repair["descriptor"] if repair else run["original"]
+    disabled = '' if descriptor["status"] in {"ready", "missing_dependencies"} else ' disabled'
     zoom_disabled = '' if image or not disabled else ' disabled'
-    zoom_label = '放大原作' if not disabled else '放大回退'
+    zoom_label = '放大修复版' if repair else '放大原作' if not disabled else '放大回退'
+    start_label = '运行修复版' if repair else '运行原作'
     model = run["model"][9:] if run["model"].startswith("opencode/") else run["model"]
     return ('<article class="evidence-card' + ('' if run["registered_media"] else ' no-registered-media') + '" data-run-id="' + run_id + '" data-model-route="' + e(run["model"]) + '">'
             '<div class="work-heading"><h2 class="work-name" title="' + e(run["model"]) + '" aria-label="' + e(run["model"]) + '">' + e(model) + '</h2></div>'
-            + score + '<div class="work-cover' + ('' if image else ' empty-cover') + '"' + cover_style + '>' + cover + '</div>'
-            '<div class="work-actions"><button type="button" data-run-original="' + run_id + '"' + disabled + '>运行原作</button>'
+            + score + (render_repair(run["id"], repair) if repair else '')
+            + '<div class="work-cover' + ('' if image else ' empty-cover') + '"' + cover_style + '>' + cover + '</div>'
+            '<div class="work-actions"><button type="button" data-run-original="' + run_id + '"' + disabled + '>' + start_label + '</button>'
             '<button type="button" data-select-run="' + run_id + '" aria-pressed="false">加入对比</button>'
             '<button type="button" data-zoom-run="' + run_id + '"' + zoom_disabled + '>' + zoom_label + '</button>'
             '<button type="button" data-detail-run="' + run_id + '">详情 ↗</button></div>'
@@ -438,7 +459,8 @@ def render_gallery(seed, root=ROOT):
     defaults = seed["defaults"]
     filtered = [run for run in seed["runs"] if run["task_id"] == defaults["task_id"] and run["purpose"] == defaults["purpose"]]
     values = {"PUBLIC_CSS": css, "PUBLIC_JS": bootstrap, "GALLERY_SEED": encoded,
-              "TASK_TABS": tabs, "GALLERY_CARDS": ''.join(render_card(run, defaults["score_source"]) for run in included[:defaults["page_size"]]),
+              "TASK_TABS": tabs, "GALLERY_CARDS": ''.join(render_card(run, defaults["score_source"], seed.get("repairs", {}).get(run["id"]))
+                                                           for run in included[:defaults["page_size"]]),
               "GALLERY_COUNT": f"{len(filtered)} 最新 · 无媒体 {len(filtered) - len(included)}",
               "GALLERY_TOTAL": str(seed["counts"]["full_runs"])}
     # One pass prevents a literal template marker in source data being expanded.
@@ -496,16 +518,20 @@ def verify_gallery(directory, manifest, viewer_script, *, preview_runtime=None, 
     runtime = Path(preview_runtime) if preview_runtime is not None else Path(viewer_script).with_name("preview-runtime.js")
     trusted_runtime = site._read(runtime)
     site._require(payloads[runtime_path] == trusted_runtime, "untrusted gallery preview runtime")
+    data = site.audit_snapshot(payloads[full_path].decode("utf-8"), viewer_script, static=True, preview_runtime=runtime)
+    repairs = seed.get("repairs", {})
+    repair_paths = validate_repairs(repairs, payloads, data["originals"])
+    site._require(repair_paths == {path for path, info in manifest["files"].items() if info["role"] == "repair"},
+                  "unreferenced or mismatched repair roles")
     legacy_files = {path: info for path, info in manifest["files"].items()
-                    if path not in {"index.html", full_path, runtime_path}}
+                    if path not in {"index.html", full_path, runtime_path} | repair_paths}
     legacy_files["index.html"] = {**manifest["files"][full_path], "role": "index"}
     legacy = site.validate_manifest({"version": 2, "format": FORMAT_V2, "files": legacy_files,
                                    "stats": {**manifest["stats"], "index_bytes": len(payloads[full_path])}})
     legacy_payloads = {path: payloads[full_path] if path == "index.html" else payloads[path] for path in legacy_files}
     site._verify_site_payloads(legacy, legacy_payloads, viewer_script, preview_runtime=runtime)
-    data = site.audit_snapshot(payloads[full_path].decode("utf-8"), viewer_script, static=True, preview_runtime=runtime)
     expected = project_gallery(data, payloads[full_path], trusted_runtime, site._read(viewer_script),
-                               score_source=seed.get("preferred_score_source"))
+                               score_source=seed.get("preferred_score_source"), repairs=repairs)
     # Canonical JSON comparison distinguishes booleans from integers (True == 1).
     canonical = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     site._require(canonical(seed) == canonical(expected), "gallery projection differs from full v2 data")
@@ -521,20 +547,27 @@ def verify_gallery(directory, manifest, viewer_script, *, preview_runtime=None, 
     return manifest
 
 
-def build_gallery(source, destination, input_viewer, *, input_runtime=None, root=ROOT, score_source=None):
+def build_gallery(source, destination, input_viewer, *, input_runtime=None, root=ROOT, score_source=None,
+                  archive_root=None, repair_audit=None):
     source, root = Path(source), Path(root)
     viewer = Path(input_viewer)
     runtime = Path(input_runtime) if input_runtime is not None else viewer.with_name("preview-runtime.js")
     manifest, captured = _captured_v2(source, viewer, runtime)
     runtime_bytes, viewer_bytes = site._read(runtime), site._read(viewer)
-    seed = project_gallery(site.audit_snapshot(captured["index.html"].decode("utf-8"), viewer, static=True,
-                                              preview_runtime=runtime), captured["index.html"], runtime_bytes, viewer_bytes,
-                           score_source=score_source)
+    data = site.audit_snapshot(captured["index.html"].decode("utf-8"), viewer, static=True, preview_runtime=runtime)
+    site._require((archive_root is None) == (repair_audit is None), "repairs require both archive root and independent audit")
+    repairs, repair_payloads = build_repairs(data["runs"], archive_root, repair_audit) if repair_audit is not None else ({}, {})
+    repair_paths = validate_repairs(repairs, repair_payloads, data["originals"])
+    site._require(repair_paths == set(repair_payloads) and not repair_paths.intersection(captured), "repair asset collision")
+    seed = project_gallery(data, captured["index.html"], runtime_bytes, viewer_bytes,
+                           score_source=score_source, repairs=repairs)
     payloads = {path: raw for path, raw in captured.items() if path != "index.html"}
+    payloads.update(repair_payloads)
     payloads[seed["full"]["path"]] = captured["index.html"]
     payloads[seed["runtime"]["path"]] = runtime_bytes
     payloads["index.html"] = render_gallery(seed, root)
     files = {path: info for path, info in manifest["files"].items() if path != "index.html"}
+    files.update({path: site._file_info(raw, "application/json", "repair") for path, raw in repair_payloads.items()})
     files[seed["full"]["path"]] = site._file_info(captured["index.html"], "text/html", "viewer")
     files[seed["runtime"]["path"]] = site._file_info(runtime_bytes, "text/javascript", "runtime")
     files["index.html"] = site._file_info(payloads["index.html"], "text/html", "index")
@@ -553,11 +586,14 @@ def main(argv=None):
     parser.add_argument("--input-viewer", required=True, type=Path, help="independent trusted app.js matching v2 input")
     parser.add_argument("--input-runtime", required=True, type=Path, help="independent trusted preview-runtime.js matching v2 input")
     parser.add_argument("--root", type=Path, default=ROOT, help="project with trusted web/public-gallery.html/css/js")
+    parser.add_argument("--archive-root", type=Path, help="read-only archives for fixed repair recipes; requires --repair-audit")
+    parser.add_argument("--repair-audit", type=Path, help="independent full-source review of derived previews, not original review")
     parser.add_argument("--score-source", help="preferred exact canonical JSON scope (or * for separate scopes); omitted keeps legacy default")
     args = parser.parse_args(argv)
     try:
         stats = build_gallery(args.source, args.destination, args.input_viewer,
-                              input_runtime=args.input_runtime, root=args.root, score_source=args.score_source)
+                              input_runtime=args.input_runtime, root=args.root, score_source=args.score_source,
+                              archive_root=args.archive_root, repair_audit=args.repair_audit)
     except (RuntimeError, OSError, UnicodeError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
     print(json.dumps({"destination": str(args.destination), "version": VERSION, "format": FORMAT, **stats}, ensure_ascii=False))

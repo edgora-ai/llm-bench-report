@@ -36,7 +36,9 @@ VIEWPORTS = v2.PERFORMANCE_VIEWPORTS
 FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'trend', 'blind', 'scores')
 CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/preview-runtime.js', 'web/index.html', 'web/styles.css',
     'web/public-gallery.html', 'web/public-gallery.css', 'web/public-gallery.js',
-    'tests/make_gallery.py', 'tests/test_gallery_site.py', 'tests/test_public_gallery_performance.py',
+    'tests/make_gallery.py', 'tests/make_repairs.py', 'tests/make_originals.py', 'tests/make_site.py',
+    'tests/make_snapshot.py', 'tests/source_export.py',
+    'tests/test_gallery_site.py', 'tests/test_public_gallery_performance.py',
     'tests/verify_public_gallery.py', 'tests/verify_public_snapshot.py'))
 PAGE_SIZE = 2
 PHONE_PAGE_SIZE = 1
@@ -67,6 +69,18 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def strict_json(raw, label):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'Duplicate ' + label + ' key: ' + key)
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        require(False, 'Nonfinite ' + label + ' value: ' + value)
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+
+
 def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--site', required=True, type=Path, help='Final, existing v3 bundle; never rebuilt here')
@@ -74,7 +88,7 @@ def arguments(argv=None):
     p.add_argument('--trust-root', required=True, type=Path, help='Frozen independent baseline checkout, not candidate site')
     p.add_argument('--baseline-lock', type=Path, default=Path('/tmp/bench-gallery-baseline.json'))
     p.add_argument('--new-v2-baseline-lock', type=Path, help='Explicit independently supplied JSON {index_sha256, manifest_sha256}; overrides only v2 data pins, never frozen programs or budgets')
-    p.add_argument('--candidate-source-lock', type=Path, help='Independent final operator JSON {sha256:{12 planned relative paths:digest}}; mandatory for candidate verification including runtime, outside source/input bundles')
+    p.add_argument('--candidate-source-lock', type=Path, help='Independent final operator JSON {sha256:{all CANDIDATE_SOURCES relative paths:digest}}; mandatory including repair validator/dependency, outside source/input bundles')
     p.add_argument('--candidate-viewer-script', type=Path, help='Current app.js named in the independent candidate-source-lock, not the frozen viewer')
     p.add_argument('--source-root', type=Path, default=ROOT, help='Reviewed current project source; never the generated candidate')
     p.add_argument('--gallery-bootstrap', type=Path, default=ROOT / 'web/public-gallery.js')
@@ -136,7 +150,7 @@ def inventory(root, files):
 
 
 def checked_manifest(root, version):
-    m = json.loads(safe_read(root, MANIFEST))
+    m = strict_json(safe_read(root, MANIFEST), 'manifest')
     require(isinstance(m, dict) and set(m) == {'version', 'format', 'files', 'stats'}, 'Manifest schema')
     require(type(m['version']) is int and m['version'] == version and m['format'] ==
             {2: 'static-media-v2', 3: 'progressive-static-v3'}[version], 'Manifest version/profile')
@@ -155,7 +169,8 @@ def checked_manifest(root, version):
                     {'jpg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp', 'gif': 'image/gif', 'webm': 'video/webm', 'mp4': 'video/mp4'}[ext]
                     and meta.get('role') in ('evidence', 'thumbnail', 'evidence+thumbnail'), 'Media role/MIME/path')
         elif re.fullmatch(r'originals/[a-f0-9]{64}\.json', name):
-            require(meta['sha256'] == Path(name).stem and meta.get('mime') == 'application/json' and meta.get('role') == 'original', 'Original role/MIME/path')
+            require(meta['sha256'] == Path(name).stem and meta.get('mime') == 'application/json' and
+                    meta.get('role') in (('original', 'repair') if version == 3 else ('original',)), 'Original/repair role/MIME/path')
         elif version == 3 and re.fullmatch(r'viewer/[a-f0-9]{64}\.(html|js)', name):
             require(meta['sha256'] == Path(name).stem and meta.get('mime') ==
                     ('text/html' if name.endswith('.html') else 'text/javascript') and meta.get('role') ==
@@ -315,6 +330,11 @@ def project_runs(data):
     return sorted(selected, key=lambda r: (r['tool'], r['model'], r['started_at'] or r['date'] or '', r['id']))
 
 
+def default_preview_descriptor(seed, run):
+    repair = seed.get('repairs', {}).get(run['id'])
+    return repair['descriptor'] if repair else run['original']
+
+
 def full_history_ids(data):
     """Exact full-run IDs that are NOT the latest attempt for their (tool, model, task) triple."""
     ordered = sorted(data['runs'], key=lambda r: (r.get('tool') or 'unknown', r.get('model') or 'unknown',
@@ -364,16 +384,41 @@ def decode_score_rows(seed):
     return decoded
 
 
-def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_program, *, score_source=None):
+def gallery_seed(parsed):
+    require(len(parsed.scripts) == 2, 'Gallery script census')
+    match = re.fullmatch(r'\s*window\.BENCH_GALLERY=(\{.*\});\s*', parsed.scripts[0], re.S)
+    require(match is not None and '<' not in parsed.scripts[0], 'Unescaped gallery seed')
+    seed = strict_json(match[1], 'gallery seed')
+    require(isinstance(seed, dict), 'Gallery seed object required')
+    return seed
+
+
+def checked_repairs(seed, manifest, root, originals, validator):
+    """Only independently validated derived packages may be excluded from v2 equality."""
+    repairs = seed.get('repairs', {})
+    require(isinstance(repairs, dict) and ('repairs' not in seed or bool(repairs)),
+            'Optional gallery repairs must be a nonempty mapping')
+    require(set(repairs) <= set(originals), 'Repair run is not in frozen originals')
+    payloads = {path: safe_read(root, path) for path, meta in manifest['files'].items()
+                if meta.get('role') in ('original', 'repair')}
+    paths = validator(repairs, payloads, originals)
+    role_paths = {path for path, meta in manifest['files'].items() if meta.get('role') == 'repair'}
+    require(isinstance(paths, set) and paths == role_paths,
+            'Validated repair paths must equal exactly the repair-role assets')
+    return repairs, paths
+
+
+def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_program, *, score_source=None, repairs=None):
     parsed = GalleryHTML()
     parsed.feed(html)
     parsed.close()
     require(not parsed.unsafe and len(parsed.scripts) == 2 and len(parsed.styles) == 1, 'Unsafe gallery scaffold')
-    match = re.fullmatch(r'\s*window\.BENCH_GALLERY=(\{.*\});\s*', parsed.scripts[0], re.S)
-    require(match is not None and '<' not in parsed.scripts[0], 'Unescaped gallery seed')
-    seed = json.loads(match[1])
+    seed = gallery_seed(parsed)
     require(parsed.scripts[1].strip() == bootstrap.strip() and parsed.styles[0].strip() == css.strip(), 'Gallery executable/style differs from trusted source')
     expected_keys = {'version', 'format', 'score_encoding', 'tasks', 'runs', 'score_scopes', 'defaults', 'counts', 'full', 'runtime', 'offline'}
+    if repairs:
+        expected_keys.add('repairs')
+    require(same(seed.get('repairs', {}), repairs or {}), 'Gallery repairs differ from independently validated mapping')
     if score_source is not None:
         expected_keys.add('preferred_score_source')
         require(seed.get('preferred_score_source') == score_source, 'Independent preferred source differs')
@@ -382,6 +427,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     rows = decode_score_rows(seed)
     # Independently verify every deferred reference and six values against the raw record.
     expected_rows = project_runs(data)
+    require(set(repairs or {}) <= {row['id'] for row in expected_rows}, 'Repair is not a latest gallery run')
     for row in expected_rows:
         if 'scores' in row:
             row['scores'] = [{key: summary[key] for key in ('scope', 'index', 'values')} for summary in row['scores']]
@@ -439,7 +485,7 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
             buttons = [b for b in parsed.buttons if b.get(attr) == row['id']]
             require(len(buttons) == 1, 'Missing/duplicate server card action: ' + attr)
             if attr in ('data-run-original', 'data-zoom-run'):
-                runnable = row['original']['status'] in ('ready', 'missing_dependencies')
+                runnable = default_preview_descriptor(seed, row)['status'] in ('ready', 'missing_dependencies')
                 disabled = not (row['image'] or runnable) if attr == 'data-zoom-run' else not runnable
                 require(('disabled' in buttons[0]) == disabled, 'Server disabled state differs')
     return seed
@@ -482,7 +528,7 @@ def candidate_sources(args, report):
     raw = path.read_bytes()
     lock = json.loads(raw, object_pairs_hook=unique)
     require(isinstance(lock, dict) and set(lock) == {'sha256'} and isinstance(lock['sha256'], dict)
-            and set(lock['sha256']) == CANDIDATE_SOURCES, 'Candidate source lock must name exactly the twelve planned sources')
+            and set(lock['sha256']) == CANDIDATE_SOURCES, 'Candidate source lock must name exactly the planned sources')
     sources = {}
     for relative, expected in lock['sha256'].items():
         require(isinstance(expected, str) and SHA.fullmatch(expected), 'Invalid candidate source digest')
@@ -524,6 +570,19 @@ def load_sources(args, report):
     frozen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(frozen)
     approved = candidate_sources(args, report)
+    # Execute the already locked validator bytes, not an unpinned imported copy.
+    # Its shared package validator is itself part of the exact candidate lock.
+    import make_originals
+    import make_site
+    import make_snapshot
+    import source_export
+    for module, relative in ((make_originals, 'tests/make_originals.py'), (make_site, 'tests/make_site.py'),
+                             (make_snapshot, 'tests/make_snapshot.py'), (source_export, 'tests/source_export.py')):
+        require(digest(Path(module.__file__).read_bytes()) == digest(approved[relative]),
+                'Repair validator dependency differs from locked current source: ' + relative)
+    repair_spec = importlib.util.spec_from_file_location('gallery_locked_repairs', args.source_root / 'tests/make_repairs.py')
+    repair_helper = importlib.util.module_from_spec(repair_spec)
+    exec(compile(approved['tests/make_repairs.py'], str(repair_spec.origin), 'exec'), repair_helper.__dict__)
     viewer = safe_read(args.trust_root, 'web/app.js')
     frozen_runtime = safe_read(args.trust_root, 'web/preview-runtime.js')
     runtime = approved['web/preview-runtime.js']
@@ -534,9 +593,14 @@ def load_sources(args, report):
     full_paths = [name for name, info in manifest['files'].items() if info.get('role') == 'viewer']
     require(len(full_paths) == 1, 'Exactly one trusted full viewer required')
     full_path, runtime_path = full_paths[0], 'viewer/' + digest(runtime) + '.js'
+    html = safe_read(args.site, 'index.html')
+    parsed = GalleryHTML(); parsed.feed(html.decode()); parsed.close()
+    repairs, repair_paths = checked_repairs(gallery_seed(parsed), manifest, args.site, old_data['originals'],
+                                            repair_helper.validate_repairs)
     inherited = set(old_manifest['files']) - {'index.html', 'offline.html'}
-    require(set(manifest['files']) == inherited | {'index.html', 'offline.html', full_path, runtime_path},
-            'Candidate must contain exactly inherited assets, current documents, viewer and runtime')
+    require(not repair_paths & inherited, 'Repair assets cannot replace frozen original assets')
+    require(set(manifest['files']) - repair_paths == inherited | {'index.html', 'offline.html', full_path, runtime_path},
+            'Candidate must contain exactly inherited assets, validated repairs, current documents, viewer and runtime')
     for name, meta in old_manifest['files'].items():
         if name not in ('index.html', 'offline.html'):
             require(same(manifest['files'][name], meta) and safe_read(args.site, name) == safe_read(args.baseline_site, name), 'Inherited asset changed: ' + name)
@@ -554,19 +618,20 @@ def load_sources(args, report):
             'Full viewer is not the exact current composition with versioned offline descriptor')
     require(len(old_data['runs']) == args.expected_runs and sum(r.get('purpose') == 'benchmark' for r in old_data['runs']) == args.expected_benchmark
             and sum(len(r.get('reviews') or []) for r in old_data['runs']) == args.expected_reviews, 'Frozen census differs')
-    html = safe_read(args.site, 'index.html')
     require(same(manifest['stats'], {**old_manifest['stats'], 'index_bytes': len(html), 'offline_bytes': len(offline_html)}), 'Inherited manifest statistics changed')
     full_info = {'path': full_path, 'sha256': digest(full_html), 'size': len(full_html)}
     runtime_info = {'path': runtime_path, 'sha256': digest(runtime), 'size': len(runtime)}
     seed = audit_gallery(html.decode(), current_data, approved['web/public-gallery.js'].decode(), approved['web/public-gallery.css'].decode(),
-                         full_info, runtime_info, runtime + b'\n' + approved['web/app.js'], score_source=args.score_source)
+                         full_info, runtime_info, runtime + b'\n' + approved['web/app.js'], score_source=args.score_source, repairs=repairs)
     require(len(html) <= ENTRY_DECODED_BUDGET and len(gzip.compress(html, compresslevel=6, mtime=0)) <= ENTRY_GZIP_BUDGET, 'Initial HTML decoded/gzip budget exceeded')
     report['audit'] = {'baseline_html_sha256': digest(old_html), 'full_html_sha256': digest(full_html), 'runtime_sha256': digest(runtime),
                        'frozen_runtime_sha256': digest(frozen_runtime), 'current_runtime_sha256': digest(runtime),
                        'frozen_v2_helper_sha256': digest(helper_path.read_bytes()), 'current_v2_helper_sha256': digest(approved['tests/verify_public_snapshot.py']),
                        'current_html_sha256': digest(html), 'decoded_html_bytes': len(html), 'gzip_html_bytes': len(gzip.compress(html, compresslevel=6, mtime=0)),
                        'exact_data_equality_including_offline': True, 'run_ids': [r['id'] for r in seed['runs']], 'counts': seed['counts'],
-                       'candidate_files': len(manifest['files']), 'baseline_files': len(old_manifest['files'])}
+                       'candidate_files': len(manifest['files']), 'baseline_files': len(old_manifest['files']),
+                       'validated_repair_paths': sorted(repair_paths), 'repair_run_ids': sorted(repairs),
+                       'repair_exception_policy': 'fail-all-repair-or-shared-source-errors'}
     return {'seed': seed, 'data': current_data, 'baseline_data': old_data, 'manifest': manifest,
             'baseline_manifest': old_manifest, 'frozen_runtime': frozen_runtime}
 
@@ -683,9 +748,10 @@ def validate_requests(requests, url, manifest, seed=None, *, cold=False, viewpor
         packages = set()
         for run_id in preview_ids:
             row = rows.get(run_id)
-            require(row is not None and row.get('original', {}).get('status') in ('ready', 'missing_dependencies'),
+            descriptor = default_preview_descriptor(seed, row) if row is not None else {}
+            require(descriptor.get('status') in ('ready', 'missing_dependencies'),
                     'Initial preview is not an eligible concrete card')
-            packages.add(row['original']['package']['path'])
+            packages.add(descriptor['package']['path'])
         runtime = seed.get('runtime', {}).get('path') if packages else None
         allowed = {'index.html'} | thumbs | packages | ({runtime} if runtime else set())
         require(all(name in allowed for name in names), 'Cold full-viewer/video/full-image/nonvisible-original request')
@@ -754,7 +820,8 @@ def gallery_sample(browser, url, sources, args, profile_name, viewport, repeat):
         preview_ids = page.locator('#public-grid .work-cover').evaluate_all('''covers=>covers.filter(e=>{
           const r=e.getBoundingClientRect();return r.bottom> -80&&r.top<innerHeight+80&&r.width>0;
         }).map(e=>e.closest('[data-run-id]').dataset.runId)''')
-        preview_ids = [run_id for run_id in preview_ids if next(r for r in sources['seed']['runs'] if r['id'] == run_id)['original']['status'] in ('ready', 'missing_dependencies')]
+        preview_ids = [run_id for run_id in preview_ids if default_preview_descriptor(sources['seed'],
+                       next(r for r in sources['seed']['runs'] if r['id'] == run_id))['status'] in ('ready', 'missing_dependencies')]
         if preview_ids:
             page.wait_for_function('window.__galleryMetrics.inline!==null')
         names = validate_requests(cold, url, sources['manifest'], sources['seed'], cold=True,
@@ -914,6 +981,7 @@ def catalog_audit_pins(sources, *, baseline=False):
         pins['frozen_runtime_base64'] = base64.b64encode(frozen).decode()
     else:
         pins['runtime'] = sources['seed']['runtime']
+        pins['repairs'] = sources['seed'].get('repairs', {})
     return json.dumps(pins, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
@@ -944,6 +1012,14 @@ class OriginalScriptCatalog:
             raw = base64.b64decode(pins['frozen_runtime_base64'], validate=True)
             require(digest(raw) == FROZEN_PROGRAMS['web/preview-runtime.js'], 'Native catalog frozen runtime bytes differ')
         self.runs, self.script_hashes, self.trusted_script_hashes = {}, set(), {digest(raw)}
+        self.repair_runs, self.repair_script_hashes = {}, set()
+        repairs = pins.get('repairs', {})
+        require(isinstance(repairs, dict) and set(repairs) <= set(originals), 'Native catalog repair/run census differs')
+        repair_descriptors = {run_id: record['descriptor'] for run_id, record in repairs.items()}
+        repair_paths = [descriptor['package']['path'] for descriptor in repair_descriptors.values()]
+        require(len(repair_paths) == len(set(repair_paths)) and set(repair_paths) ==
+                {path for path, meta in manifest['files'].items() if meta.get('role') == 'repair'},
+                'Native catalog package census differs from audited repair descriptors')
         # The pinned SDK serializes this exact trusted function into the model
         # iframe. Even byte-identical model delivery cannot whitelist it.
         diagnostics = re.search(r'(function originalDiagnostics\(\) \{.*?\n  \})\n', raw.decode(), re.S)
@@ -967,18 +1043,21 @@ class OriginalScriptCatalog:
                 if tag == 'script' and self.current is not None:
                     self.bodies.append(''.join(self.current))
                     self.current = None
-        for run_id, descriptor in originals.items():
+        deliveries = [('original', run_id, descriptor) for run_id, descriptor in originals.items()]
+        deliveries += [('repair', run_id, descriptor) for run_id, descriptor in repair_descriptors.items()]
+        for role, run_id, descriptor in deliveries:
             if descriptor.get('package') is None:
                 continue
             expected = descriptor['package']
             path, meta = expected['path'], manifest['files'][expected['path']]
-            require(meta['sha256'] == expected['sha256'] == Path(path).stem and meta['size'] == expected['size'],
+            require(meta.get('role') == role and meta['sha256'] == expected['sha256'] == Path(path).stem and meta['size'] == expected['size'],
                     'Native catalog package differs from audited run descriptor: ' + run_id)
             raw = safe_read(root, path)
             require(len(raw) == expected['size'] and digest(raw) == expected['sha256'],
                     'Native exception audited package bytes changed: ' + path)
-            package = json.loads(raw)
-            require(package['version'] == 1 and package['run_id'] == run_id and run_id not in self.runs and
+            package = strict_json(raw, 'native source package')
+            destination = self.runs if role == 'original' else self.repair_runs
+            require(package['version'] == 1 and package['run_id'] == run_id and run_id not in destination and
                     package['entrypoint'] == descriptor['entrypoint'] and same(package['missing'], descriptor['missing']) and
                     package['files'][package['entrypoint']]['sha256'] == descriptor['entry_sha256'],
                     'Native exception catalog audited run/entry binding differs: ' + run_id)
@@ -996,9 +1075,11 @@ class OriginalScriptCatalog:
                     if script:
                         sources[digest(script.encode('utf-8'))] = {'file': filename, 'file_sha256': file['sha256'],
                             'script_sha256': digest(script.encode('utf-8')), 'source': script}
-            self.runs[run_id] = {'package_path': path, 'package_sha256': digest(raw),
+            destination[run_id] = {'package_path': path, 'package_sha256': digest(raw),
                 'entry_sha256': package['files'][package['entrypoint']]['sha256'], 'scripts': sources}
             self.script_hashes.update(sources)
+            if role == 'repair':
+                self.repair_script_hashes.update(sources)
 
 
 def model_exception_proof(context, script, frame, shell, owner, source, catalog):
@@ -1015,6 +1096,9 @@ def model_exception_proof(context, script, frame, shell, owner, source, catalog)
         return None
     binding = shell.get('binding') or {}
     run_id = binding.get('run_id')
+    mode = binding.get('preview_mode')
+    if mode not in (None, 'original') or (run_id in getattr(catalog, 'repair_runs', {}) and mode != 'original'):
+        return None  # Repair/static/unmarked derived frames never earn a model-delivery exemption.
     if not (run_id in catalog.runs and binding.get('nodeName') == 'IFRAME' and
             binding.get('sandbox') == 'allow-scripts' and binding.get('referrerpolicy') == 'no-referrer' and
             binding.get('title') == '原作隔离预览 ' + run_id and binding.get('has_srcdoc') is True and
@@ -1026,7 +1110,8 @@ def model_exception_proof(context, script, frame, shell, owner, source, catalog)
     source_hash = digest(source.encode('utf-8')) if isinstance(source, str) else None
     match = package['scripts'].get(source_hash)
     trusted = getattr(catalog, 'trusted_script_hashes', None)
-    if not trusted or not match or match['source'] != source or script.get('hash') != source_hash or source_hash in trusted:
+    if (not trusted or not match or match['source'] != source or script.get('hash') != source_hash or
+            source_hash in trusted or source_hash in getattr(catalog, 'repair_script_hashes', set())):
         return None
     return {'run_id': run_id, 'package_path': package['package_path'], 'package_sha256': package['package_sha256'],
             'entry_sha256': package['entry_sha256'], 'file': match['file'], 'file_sha256': match['file_sha256'],
@@ -1085,7 +1170,7 @@ class NativeExceptionObserver:
       const card=host?.closest('.evidence-card[data-run-id],.original-preview[data-original-run]');
       return {run_id:card?.dataset.originalRun||card?.dataset.runId,nodeName:this.nodeName,
         sandbox:this.getAttribute('sandbox'),referrerpolicy:this.getAttribute('referrerpolicy'),
-        title:this.getAttribute('title'),has_srcdoc:this.hasAttribute('srcdoc'),
+        title:this.getAttribute('title'),has_srcdoc:this.hasAttribute('srcdoc'),preview_mode:host?.dataset.previewMode||null,
         host_class:host?.classList.contains('work-preview-host')?'work-preview-host':host?.classList.contains('preview-host')?'preview-host':null,
         host_direct:this.parentElement?.parentElement===host,shell_count:host?.querySelectorAll('iframe').length};}'''
     def __init__(self, context, page, catalog, ledger):
@@ -1475,6 +1560,11 @@ class NativeExceptionObserver:
                 owner = None
             proof = model_exception_proof(context, script, frame, shell, owner, source, self.catalog) if (
                 frame and frame.get('session_id') == sid) else None
+            repair_source = record['evidence']['source_sha256'] in getattr(self.catalog, 'repair_script_hashes', set())
+            repair_frame = ((shell or {}).get('binding') or {}).get('preview_mode') == 'repair'
+            if repair_source or repair_frame:
+                record['attribution'] = 'repair-or-shared-source' if repair_source else 'repair'
+                proof = None  # Every repair exception fails; never count it as original model delivery.
             if proof:
                 record['evidence'] = json.loads(json.dumps(record['evidence']))
                 record.update(attribution='model-original', proof=proof)
@@ -1631,7 +1721,8 @@ def select_action_pair(browser, url, sources, args):
     candidates = [r for r in decode_score_rows(sources['seed'])
                   if r['task_id'] == defaults['task_id'] and r['purpose'] == 'benchmark'
                   and r['registered_media'] and r['original']['status'] in runnable
-                  and (originals.get(r['id']) or {}).get('status') in runnable]
+                  and (originals.get(r['id']) or {}).get('status') in runnable
+                  and r['id'] not in sources['seed'].get('repairs', {})]
     require(candidates, 'No original candidate runnable in both paired legs')
     context, page, requests, errors = observed_context(browser, url, args, original=True, baseline=True)
     attempts = []
@@ -1840,10 +1931,11 @@ def gallery_ux(browser, url, sources, args, report):
         # may be an unsupported or screenshot-only original. Fall back to any other
         # runnable card before giving up, and name the condition when none exists.
         runnable = ('ready', 'missing_dependencies')
-        first = next((r for r in default if r['original']['status'] in runnable), None)
+        first = next((r for r in default if r['original']['status'] in runnable and r['id'] not in seed.get('repairs', {})), None)
         if first is None:
             first = next((r for r in seed['runs'] if r['purpose'] == 'benchmark'
-                          and r['registered_media'] and r['original']['status'] in runnable), None)
+                          and r['registered_media'] and r['original']['status'] in runnable
+                          and r['id'] not in seed.get('repairs', {})), None)
         require(first is not None, 'No runnable original is reachable from the public gallery')
         # Detail handoff replaced the light gallery DOM with the full viewer
         # and fetched the full document. Reuse the same page request ledger,
@@ -1878,7 +1970,7 @@ def gallery_ux(browser, url, sources, args, report):
         checks['checks'].append('model-filter exact IDs, runnable zoom, modal single-toggle stop/restart and detached close')
         zoom_states = Counter()
         for r in seed['runs']:
-            runnable = r['original']['status'] in ('ready', 'missing_dependencies')
+            runnable = default_preview_descriptor(seed, r)['status'] in ('ready', 'missing_dependencies')
             open_public_run(page, url, r)
             zoom = page.locator(f'[data-zoom-run="{r["id"]}"]')
             require(zoom.is_disabled() == (not runnable and not r['image']), 'Original/screenshot zoom enabled state differs')
@@ -2068,7 +2160,7 @@ def original_intent_counts(seed, run_ids):
     counts = {}
     for run_id in run_ids:
         run = next(row for row in seed['runs'] if row['id'] == run_id)
-        descriptor = run['original']
+        descriptor = default_preview_descriptor(seed, run)
         require(descriptor['status'] in ('ready', 'missing_dependencies') and descriptor.get('package'),
                 'Package prefetch intent is not eligible')
         path = descriptor['package']['path']
@@ -2094,7 +2186,8 @@ def delayed_lifecycle(browser, sources, args, report):
     """Real delayed SDK/full-document and real HTTP503 retry; no interception."""
     seed = sources['seed']
     row = next(r for r in seed['runs'] if r['task_id'] == seed['defaults']['task_id'] and r['purpose'] == 'benchmark'
-               and r['registered_media'] and r['original']['status'] == 'ready')
+               and r['registered_media'] and r['original']['status'] == 'ready'
+               and r['id'] not in seed.get('repairs', {}))
     results = report['lifecycle'] = []
     with serve_gallery(args.site, sources['manifest'], delays={seed['runtime']['path']: 2, seed['full']['path']: 1}) as (url, server_requests):
         context, page, requests, errors = observed_context(browser, url, args)
@@ -2145,13 +2238,13 @@ def delayed_lifecycle(browser, sources, args, report):
         try:
             page.goto(url, wait_until='networkidle')
             public_ready(page)
-            before = wait_inline_registered(page, seed['runs'])
+            before = wait_inline_registered(page, seed['runs'], seed=seed)
             page.locator('[data-full-view="evidence"]').first.click()
             page.wait_for_load_state('networkidle')
             require(page.locator('#public-grid').is_visible() and public_ids(page), 'Failed full request erased current gallery')
             require(all(frame.is_detached() for _, frame in before), 'Full handoff retained old inline sandbox')
             require(page.evaluate('document.documentElement.dataset.fullViewerReady') != 'true', 'HTTP503 incorrectly marked full ready')
-            restored = wait_inline_registered(page, seed['runs'])
+            restored = wait_inline_registered(page, seed['runs'], seed=seed)
             require([run_id for run_id, _ in restored] == [run_id for run_id, _ in before],
                     'HTTP503 recovery changed registered inline run IDs')
             # Exercise the restored registration, not merely its existing host.
@@ -2315,9 +2408,9 @@ def stop_pending_inline(page):
     return ids
 
 
-def wait_inline_registered(page, rows):
+def wait_inline_registered(page, rows, *, seed=None):
     """Prove restored registration by loaded real frames, not retained card DOM."""
-    eligible = [r for r in rows if r['original']['status'] in ('ready', 'missing_dependencies') and
+    eligible = [r for r in rows if default_preview_descriptor(seed or {}, r)['status'] in ('ready', 'missing_dependencies') and
                 page.locator(f'#public-grid [data-run-id="{r["id"]}"]').count()]
     require(eligible, 'Need an eligible card to verify restored inline registrations')
     return [(r['id'], wait_public_loaded(page, r['id'], inline=True)) for r in eligible]
@@ -2390,6 +2483,8 @@ def original_smoke(browser, url, sources, args, report):
         import base64
         canvas_rows = []
         for candidate in sources['seed']['runs']:
+            if candidate['id'] in sources['seed'].get('repairs', {}):
+                continue  # This smoke measures original deliveries, not the default derived preview.
             descriptor = candidate.get('original') or {}
             if descriptor.get('status') not in ('ready', 'missing_dependencies') or descriptor.get('entrypoint') != 'index.html':
                 continue
@@ -2437,10 +2532,12 @@ def original_smoke(browser, url, sources, args, report):
     pair_errors = observe_browser_errors(pair_context, pair_page, args)
     try:
         row_a = next(r for r in sources['seed']['runs']
-                     if r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
+                     if r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies')
+                     and r['id'] not in sources['seed'].get('repairs', {}))
         row_b = next(r for r in sources['seed']['runs']
                      if r['id'] != row_a['id'] and r['task_id'] == row_a['task_id'] and r['purpose'] == row_a['purpose']
-                     and r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies'))
+                     and r['registered_media'] and r.get('original', {}).get('status') in ('ready', 'missing_dependencies')
+                     and r['id'] not in sources['seed'].get('repairs', {}))
         pair_page.goto(url + '?' + urlencode({'task_id': row_a['task_id'], 'purpose': row_a['purpose']}), wait_until='networkidle')
         public_ready(pair_page)
         reach_public_run(pair_page, row_a)

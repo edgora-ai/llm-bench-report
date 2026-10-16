@@ -28,7 +28,7 @@ REQUIRED_FILES = (
 OPTIONAL_HELPERS = (
     "publish.py", "make_snapshot.py", "dashboard_e2e.py", "evaluate_e2e.py",
     "gateway_e2e.py", "verify_archives.py", "reconcile_batches.py",
-    "source_export.py", "verify_public_snapshot.py", "make_site.py", "make_originals.py",
+    "source_export.py", "verify_public_snapshot.py", "make_site.py", "make_originals.py", "make_repairs.py",
     "verify_preview_isolation.py", "verify_original_previews.py", "make_gallery.py", "verify_public_gallery.py",
 )
 

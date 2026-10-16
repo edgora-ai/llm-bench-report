@@ -8,6 +8,7 @@ import time
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -205,6 +206,62 @@ class GalleryUtilityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             verifier.checked_manifest(self.site, 2)
 
+    def test_repair_role_is_only_v3_and_only_content_addressed_json(self):
+        repair = self.add_addressed('originals', b'{"derived":true}', 'json', 'application/json', 'repair')
+        self.write_manifest()
+        self.assertEqual(verifier.checked_manifest(self.site, 3)['files'][repair]['role'], 'repair')
+        for name in (self.js, self.full):
+            (self.site / name).unlink()
+            del self.files[name]
+        (self.site / 'viewer').rmdir()
+        self.manifest.update(version=2, format='static-media-v2')
+        self.write_manifest()
+        with self.assertRaisesRegex(AssertionError, 'Original/repair role'):
+            verifier.checked_manifest(self.site, 2)
+        self.manifest.update(version=3, format='progressive-static-v3')
+        self.files[repair]['mime'] = 'text/javascript'
+        self.write_manifest()
+        with self.assertRaisesRegex(AssertionError, 'Original/repair role'):
+            verifier.checked_manifest(self.site, 3)
+
+    def test_repair_validation_requires_exact_manifest_role_set(self):
+        repair = self.add_addressed('originals', b'{"derived":true}', 'json', 'application/json', 'repair')
+        originals = {'run': {'status': 'ready'}}
+        repairs = {'run': {'descriptor': {'package': {'path': repair}}}}
+        validator = mock.Mock(return_value={repair})
+        self.assertEqual(verifier.checked_repairs({'repairs': repairs}, self.manifest, self.site,
+                                                 originals, validator), (repairs, {repair}))
+        validator.assert_called_once_with(repairs, {self.original: (self.site / self.original).read_bytes(),
+                                                   repair: (self.site / repair).read_bytes()}, originals)
+        for returned in (set(), {repair, self.original}, {self.original}, [repair]):
+            with self.subTest(returned=returned), self.assertRaisesRegex(AssertionError, 'exactly the repair-role'):
+                verifier.checked_repairs({'repairs': repairs}, self.manifest, self.site, originals,
+                                         mock.Mock(return_value=returned))
+        # A relabelled original or an undeclared extra derived asset cannot be silently ignored.
+        self.files[repair]['role'] = 'original'
+        with self.assertRaisesRegex(AssertionError, 'exactly the repair-role'):
+            verifier.checked_repairs({'repairs': repairs}, self.manifest, self.site, originals, validator)
+
+    def test_optional_repairs_absence_is_legacy_compatible_but_unknown_or_empty_is_not(self):
+        validator = mock.Mock(return_value=set())
+        self.assertEqual(verifier.checked_repairs({}, self.manifest, self.site, {}, validator), ({}, set()))
+        for repairs in ({}, [], None, {'unknown': {}}):
+            validator.reset_mock()
+            with self.subTest(repairs=repairs), self.assertRaises(AssertionError):
+                verifier.checked_repairs({'repairs': repairs}, self.manifest, self.site, {}, validator)
+            validator.assert_not_called()
+        validator.side_effect = AssertionError('unknown recipe must fail')
+        with self.assertRaisesRegex(AssertionError, 'unknown recipe'):
+            verifier.checked_repairs({'repairs': {'run': {}}}, self.manifest, self.site, {'run': {}}, validator)
+
+    def test_strict_seed_rejects_duplicate_top_level_nested_and_nonfinite_fields(self):
+        for raw in ('{"repairs":{},"repairs":{}}', '{"repairs":{"run":{},"run":{}}}',
+                    '{"repairs":{"run":{"version":1,"version":2}}}', '{"x":NaN}'):
+            parsed = verifier.GalleryHTML()
+            parsed.feed('<script>window.BENCH_GALLERY=' + raw + ';</script><script>void 0;</script>')
+            with self.subTest(raw=raw), self.assertRaises(AssertionError):
+                verifier.gallery_seed(parsed)
+
     def test_cold_request_budget_requires_actual_thumbnail(self):
         seed = {'runs': [{'image': {'thumb': self.thumb}}]}
         url = 'http://example.test/'
@@ -235,6 +292,24 @@ class GalleryUtilityTests(unittest.TestCase):
             with self.subTest(names=names, ids=ids), self.assertRaises(AssertionError):
                 verifier.validate_requests(rows(names), url, self.manifest, seed,
                                            cold=True, viewport='phone', preview_ids=ids)
+
+    def test_cold_default_repair_allows_only_derived_package_not_original_or_double_fetch(self):
+        repair = self.add_addressed('originals', b'{"derived":true}', 'json', 'application/json', 'repair')
+        row = {'id': 'visible', 'image': {'thumb': self.thumb}, 'original': {
+            'status': 'no_entrypoint', 'package': {'path': self.original}}}
+        descriptor = {'status': 'ready', 'package': {'path': repair}}
+        seed = {'runtime': {'path': self.js}, 'runs': [row], 'repairs': {'visible': {'descriptor': descriptor}}}
+        url = 'https://example.test/'
+        requests = lambda names: [{'url': url + name, 'method': 'GET'} for name in names]
+        good = ['index.html', self.thumb, self.js, repair]
+        self.assertEqual(verifier.validate_requests(requests(good), url, self.manifest, seed,
+                         cold=True, viewport='phone', preview_ids=['visible']), good)
+        for names in (good + [self.original], good[:-1] + [self.original], good + [repair]):
+            with self.subTest(names=names), self.assertRaises(AssertionError):
+                verifier.validate_requests(requests(names), url, self.manifest, seed,
+                                           cold=True, viewport='phone', preview_ids=['visible'])
+        self.assertEqual(verifier.original_intent_counts(seed, ['visible', 'visible']), {repair: 2})
+        self.assertEqual(row['original']['status'], 'no_entrypoint')
 
     def test_pages_subdirectory_preserves_exact_inventory_and_origin(self):
         url = 'https://example.test/llm-bench-report/'
@@ -1511,6 +1586,78 @@ class NativeExceptionAttributionTests(unittest.TestCase):
         sources = {'manifest': manifest, 'data': {'runs': [{'id': '1' * 32}], 'originals': {'1' * 32: descriptor}},
                    'seed': {'runtime': {'path': runtime_path, 'sha256': runtime_sha, 'size': len(runtime)}}}
         return root, sources, source, package, runtime
+
+    def add_catalog_repair(self, root, sources, package, source):
+        import base64
+        package = copy.deepcopy(package)
+        entry = ('<html><script>' + source + '</script></html>').encode()
+        package['files']['index.html'] = {'mime': 'text/html', 'size': len(entry),
+            'sha256': verifier.digest(entry), 'base64': base64.b64encode(entry).decode()}
+        package['repair_fixture'] = True
+        raw = json.dumps(package).encode(); sha = verifier.digest(raw); path = 'originals/' + sha + '.json'
+        (root / path).write_bytes(raw)
+        sources['manifest']['files'][path] = {'role': 'repair', 'sha256': sha, 'size': len(raw)}
+        descriptor = {'entrypoint': 'index.html', 'entry_sha256': verifier.digest(entry), 'missing': [],
+                      'package': {'path': path, 'sha256': sha, 'size': len(raw)}}
+        sources['seed']['repairs'] = {'1' * 32: {'descriptor': descriptor}}
+        (root / verifier.MANIFEST).write_text(json.dumps(sources['manifest']))
+        return path
+
+    def test_catalog_separates_repair_sources_and_rejects_unknown_role_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, sources, original, package, _ = self.catalog_fixture(directory)
+            repair = 'let radius = 0; radius = 1;'
+            path = self.add_catalog_repair(root, sources, package, repair)
+            catalog = verifier.OriginalScriptCatalog(root, verifier.catalog_audit_pins(sources))
+            self.assertIn(verifier.digest(original.encode()), catalog.runs['1' * 32]['scripts'])
+            self.assertNotIn(verifier.digest(repair.encode()), catalog.runs['1' * 32]['scripts'])
+            self.assertIn(verifier.digest(repair.encode()), catalog.repair_script_hashes)
+            self.assertEqual(catalog.repair_runs['1' * 32]['package_path'], path)
+            self.assertIn(verifier.digest(repair.encode()), catalog.script_hashes)
+            sources['seed'].pop('repairs')
+            with self.assertRaisesRegex(AssertionError, 'audited repair descriptors'):
+                verifier.OriginalScriptCatalog(root, verifier.catalog_audit_pins(sources))
+
+    def test_repair_mode_shared_source_and_missing_mode_never_earn_original_exemption(self):
+        for mode in ('repair', 'static', None, 'unknown'):
+            evidence = self.fixture()
+            evidence[6].repair_runs = {'1' * 32: {}}
+            if mode is not None:
+                evidence[3]['binding']['preview_mode'] = mode
+            with self.subTest(mode=mode):
+                self.assertIsNone(verifier.model_exception_proof(*evidence))
+        evidence = self.fixture()
+        evidence[6].repair_runs = {'1' * 32: {}}
+        evidence[3]['binding']['preview_mode'] = 'original'
+        self.assertIsNotNone(verifier.model_exception_proof(*evidence))
+        evidence[6].repair_script_hashes = {verifier.digest(evidence[5].encode())}
+        self.assertIsNone(verifier.model_exception_proof(*evidence))
+
+    def test_repair_exception_is_failing_not_counted_as_original_even_with_identical_body(self):
+        from types import SimpleNamespace
+        for mode, shared in (('repair', False), ('original', True)):
+            context, script, frame, shell, owner, source, catalog = self.fixture()
+            shell['binding']['preview_mode'] = mode
+            catalog.repair_runs = {'1' * 32: {}}
+            catalog.repair_script_hashes = {script['hash']} if shared else set()
+            frame['owner'] = owner
+            ledger = verifier.BrowserErrorLedger()
+            observer = verifier.NativeExceptionObserver.__new__(verifier.NativeExceptionObserver)
+            observer.catalog, observer.ledger = catalog, ledger
+            observer.scripts = {('native-session', 'script'): script}
+            observer.frames = {'inner': frame, 'shell': shell}
+            observer.sources = {('native-session', 'script'): source}
+            record = {'description': 'repair failure', 'attribution': 'trusted-or-unknown',
+                'session_id': 'native-session', 'context': context,
+                'native': {'exceptionDetails': {'scriptId': 'script', 'executionContextId': 3}}}
+            observer.exception_evidence = [record]; ledger.native_errors.append(record)
+            observer.reclassify()
+            ledger.pageerror(SimpleNamespace(stack='repair failure'))
+            self.assertTrue(ledger)
+            self.assertEqual(ledger.receipt['model_original_errors'], [])
+            self.assertIn(record['attribution'], ('repair', 'repair-or-shared-source'))
+            self.assertNotIn('proof', record)
+            self.assertEqual(list(ledger), ['repair failure'])
 
     def test_catalog_checks_package_and_file_integrity_and_exact_inline_body(self):
         with tempfile.TemporaryDirectory() as directory:
