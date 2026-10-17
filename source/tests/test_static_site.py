@@ -119,6 +119,18 @@ class StaticSiteTests(unittest.TestCase):
         self.assertEqual(make_site.verify_site(self.site, self.viewer)["stats"], stats)
         self.assertEqual(set(self.manifest()["files"]), {"index.html", "offline.html", *data["assets"]})
 
+    def test_complete_viewer_budget_is_two_mib(self):
+        self.build()
+        manifest = self.manifest()
+        for size in (1024 * 1024 + 1, 2 * 1024 * 1024):
+            manifest["files"]["index.html"]["size"] = size
+            manifest["stats"]["index_bytes"] = size
+            make_site.validate_manifest(manifest)
+        manifest["files"]["index.html"]["size"] += 1
+        manifest["stats"]["index_bytes"] += 1
+        with self.assertRaisesRegex(RuntimeError, "entrypoint budget"):
+            make_site.validate_manifest(manifest)
+
     def test_thumbnail_width_aspect_ratio_and_jpeg_decode(self):
         self.build()
         data = self.audit()
@@ -527,6 +539,17 @@ class StaticSiteV2Tests(unittest.TestCase):
         self.assertEqual(html.count("<script>"), 2)
         self.assertNotIn("<iframe", html)
         self.assertIn(self.runtime.read_text() + "\n" + self.legacy.viewer.read_text(), html)
+
+    def test_v2_complete_viewer_budget_is_two_mib(self):
+        self.upgrade()
+        manifest = json.loads((self.destination / make_site.MANIFEST).read_text())
+        manifest["files"]["index.html"]["size"] = 2 * 1024 * 1024
+        manifest["stats"]["index_bytes"] = 2 * 1024 * 1024
+        make_site.validate_manifest(manifest)
+        manifest["files"]["index.html"]["size"] += 1
+        manifest["stats"]["index_bytes"] += 1
+        with self.assertRaisesRegex(RuntimeError, "entrypoint budget"):
+            make_site.validate_manifest(manifest)
 
     def test_v2_standalone_svg_uses_existing_original_json_role(self):
         from test_originals import SVG_SOURCE

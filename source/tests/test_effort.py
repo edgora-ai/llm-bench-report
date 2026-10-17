@@ -66,6 +66,27 @@ class EffortTests(unittest.TestCase):
         self.assertIsNone(record["applied"])
         self.assertEqual(record["control"], "not_in_catalogue")
 
+    def test_deepseek_flash_alias_uses_versioned_catalogue_effort(self):
+        entry = {"reasoning": True, "reasoning_options": [
+            {"type": "effort", "values": ["low", "high", "max"]}]}
+        catalogue = {"opencode": {"models": {"deepseek-v4.1-flash": entry}}}
+        record = effort.resolve(catalogue, "deepseek-flash", allowed=list(effort.CEILING_ORDER))
+        self.assertEqual(record["applied"], "max")
+        self.assertEqual(record["supported"], ["low", "high", "max"])
+        command = claude_code.command("deepseek-flash", record["applied"])
+        self.assertEqual(command[command.index("--model") + 1], "deepseek-flash")
+        self.assertEqual(command[command.index("--effort") + 1], "max")
+
+    def test_deepseek_flash_exact_entry_takes_precedence_over_alias(self):
+        catalogue = {"opencode": {"models": {
+            "deepseek-flash": {"reasoning_options": [
+                {"type": "effort", "values": ["high"]}]},
+            "deepseek-v4.1-flash": {"reasoning_options": [
+                {"type": "effort", "values": ["max"]}]},
+        }}}
+        record = effort.resolve(catalogue, "deepseek-flash", allowed=list(effort.CEILING_ORDER))
+        self.assertEqual(record["applied"], "high")
+
     def test_bare_and_provider_qualified_ids_resolve_identically(self):
         self.assertEqual(self.resolve("gpt-6.1-sol")["applied"],
                          self.resolve("opencode/gpt-6.1-sol")["applied"])

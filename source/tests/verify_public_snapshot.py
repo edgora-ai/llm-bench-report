@@ -543,7 +543,7 @@ def cold_load(browser, url, data, args, report, name, enforce_budget, viewport=N
         else:
             require(bool(first_controls), 'Phone first viewport lacks an actionable task/workspace entry')
             require(page.evaluate('document.documentElement.scrollWidth<=innerWidth'), 'Cold phone viewport overflows')
-        require(report['source']['html_bytes'] <= 1024 * 1024, 'Static entry exceeds 1 MiB budget')
+        require(report['source']['html_bytes'] <= 2 * 1024 * 1024, 'Complete viewer exceeds 2 MiB budget')
         require(sum(row['transfer_bytes'] for row in requests) <= 1536 * 1024, 'Cold first viewport exceeds 1.5 MiB transfer budget')
         require(not any(row['type'] == 'media' for row in requests), 'Video loaded before action')
         require(all('thumbnail' in row.get('role', '') for row in requests if row['type'] == 'image'), 'Full image loaded before action')

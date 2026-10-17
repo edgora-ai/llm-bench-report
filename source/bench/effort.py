@@ -82,6 +82,10 @@ def lookup(catalogue: dict, model: str) -> dict:
 
     bare = model.split("/", 1)[1] if model.startswith("opencode/") else model
     matches = [mapping(value) for key, value in items if key == model or key == bare]
+    # Claude uses the official rolling alias; the directory names its version.
+    # Reuse only declared metadata, preserving both the requested ID and unknowns.
+    if not matches and model == "deepseek-flash":
+        matches = [mapping(value) for key, value in items if key == "deepseek-v4.1-flash"]
     if not matches:
         return {"status": "not_in_catalogue"}
     if len(matches) > 1 and any(mapping(v).get("id", k) != matches[0].get("id", k)

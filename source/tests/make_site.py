@@ -43,7 +43,8 @@ MEDIA_PATH = re.compile(r"media/([a-f0-9]{64})\.(jpg|png|webp|gif|webm|mp4)\Z")
 DATA_URI = re.compile(r"data:(image/(?:jpeg|png|webp|gif)|video/(?:webm|mp4));base64,([A-Za-z0-9+/=\r\n]+)\Z")
 EVIDENCE_SUFFIX = re.compile(r"\.(png|jpe?g|webp|gif|webm|mp4)\Z", re.I)
 MAX_FILE_BYTES = 256 * 1024 * 1024
-INDEX_BUDGET = 1024 * 1024
+# Operator-approved complete-viewer ceiling; the v3 gallery entry stays bounded separately.
+INDEX_BUDGET = 2 * 1024 * 1024
 THUMBNAIL_WIDTH = 480
 PRIVATE_KEYS = {"archivedir", "clicommand", "usageraw", "apikey", "accesstoken", "authorization",
                 "password", "passwd", "secret", "clientsecret", "token", "refreshtoken", "cookie",
