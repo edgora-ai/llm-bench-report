@@ -33,7 +33,7 @@ import verify_public_snapshot as v2
 require = v2.require
 PROFILES = v2.PERFORMANCE_PROFILES
 VIEWPORTS = v2.PERFORMANCE_VIEWPORTS
-FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'trend', 'blind', 'scores')
+FULL_VIEWS = ('gallery', 'matrix', 'batch', 'evidence', 'timeline', 'trend', 'blind', 'scores')
 CANDIDATE_SOURCES = frozenset(('web/app.js', 'web/preview-runtime.js', 'web/index.html', 'web/styles.css',
     'web/public-gallery.html', 'web/public-gallery.css', 'web/public-gallery.js',
     'tests/make_gallery.py', 'tests/make_repairs.py', 'tests/make_originals.py', 'tests/make_site.py',

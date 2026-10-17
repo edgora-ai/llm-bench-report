@@ -378,7 +378,9 @@ def short_scope(scope):
     if not scope:
         return "未评审 · 不借用历史评分"
     if scope[1] == "ai-suggestion":
-        return "非盲 AI 建议 · 待人工复核"
+        # Two AI scopes must stay distinguishable; derive the label from the
+        # recorded reviewer string instead of inventing a review date.
+        return "AI 复核 · score-first-v1" if "score-first" in str(scope[3] or "") else "AI 建议 · 待复核"
     return ("盲评" if scope[2] is True else "非盲评" if scope[2] is False else "盲评未声明") + " · 来源标签未核实"
 
 
@@ -427,6 +429,8 @@ def render_card(run, score_source="", repair=None):
     zoom_label = '放大修复版' if repair else '放大原作' if not disabled else '放大回退'
     start_label = '运行修复版' if repair else '运行原作'
     model = run["model"][9:] if run["model"].startswith("opencode/") else run["model"]
+    timeline_button = ('<button type="button" data-model-profile="' + e(run["model"]) + '" data-model-task="' + e(run["task_id"])
+                       + '">历次作品 ↗</button>') if int(run.get("history_count") or 0) > 0 else ''
     return ('<article class="evidence-card' + ('' if run["registered_media"] else ' no-registered-media') + '" data-run-id="' + run_id + '" data-model-route="' + e(run["model"]) + '">'
             '<div class="work-heading"><h2 class="work-name" title="' + e(run["model"]) + '" aria-label="' + e(run["model"]) + '">' + e(model) + '</h2></div>'
             + score + (render_repair(run["id"], repair) if repair else '')
@@ -434,11 +438,11 @@ def render_card(run, score_source="", repair=None):
             '<div class="work-actions"><button type="button" data-run-original="' + run_id + '"' + disabled + '>' + start_label + '</button>'
             '<button type="button" data-select-run="' + run_id + '" aria-pressed="false">加入对比</button>'
             '<button type="button" data-zoom-run="' + run_id + '"' + zoom_disabled + '>' + zoom_label + '</button>'
-            '<button type="button" data-detail-run="' + run_id + '">详情 ↗</button></div>'
+            '<button type="button" data-detail-run="' + run_id + '">详情 ↗</button>' + timeline_button + '</div>'
             '<details class="work-facts"><summary>计量 / 条件 / 来源 · 历史 ' + e(int(run.get("history_count") or 0) + 1) + ' 次</summary>'
             '<p class="work-metrics">' + e(meter_text(run["meter"])) + '</p><p class="work-meta">' + e(run["tool"]) + ' · ' + e(run["date"]) + ' · ' + e(run["task_id"]) + ' · ' + e(run["purpose"]) + ' · ' + e(run["prompt_version"]) + '</p>'
             '<p class="work-status">会话 ' + e(run["status"]) + ' · 入口 ' + e(run["entry_status"]) + ' · 评估 ' + e(run["evaluation_status"]) + '</p>'
-            '<p>' + e(media_text(run)) + '</p>' + sources + '<button type="button" data-model-profile="' + e(run["model"]) + '">模型全史 ↗</button></details></article>')
+            '<p>' + e(media_text(run)) + '</p>' + sources + '<button type="button" data-model-profile="' + e(run["model"]) + '" data-model-task="' + e(run["task_id"]) + '">作品时间轴 ↗</button></details></article>')
 
 
 def render_gallery(seed, root=ROOT):

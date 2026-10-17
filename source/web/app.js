@@ -26,7 +26,7 @@
   let compareRequest = 0;
   let compareMode = 'media';
   let comparePair = [];
-  const state = { runs: [], tasks: [], options: {}, view: 'gallery', filters: {}, selected: new Set(), selectionRuns: new Map(), compareLimit: 2, mixed: false, compareRuns: [], compareStage: 'desktop', compareIndex: 0, galleryStage: 'desktop', defaultTaskPending: false, authenticated: false, loaded: false, request: 0, detailRequest: 0, controller: null, trendMetric: 'duration_ms', trendPage: 0, blindQueue: [], blindIndex: 0, blindSignature: '', texture: false, loading: false };
+  const state = { runs: [], tasks: [], options: {}, view: 'gallery', filters: {}, selected: new Set(), selectionRuns: new Map(), compareLimit: 2, mixed: false, compareRuns: [], compareStage: 'desktop', compareIndex: 0, galleryStage: 'desktop', defaultTaskPending: false, authenticated: false, loaded: false, request: 0, detailRequest: 0, controller: null, trendMetric: 'duration_ms', trendPage: 0, timelineLens: 'completeness', timelineOnlyScored: false, blindQueue: [], blindIndex: 0, blindSignature: '', texture: false, loading: false };
   const staticMedia = snapshot && (source.format === 'static-media-v1' || (source.format === 'static-media-v2' && source.transport === 'external'));
   state.scoreSort = ''; state.scoreSource = '';
   const scoreKeys = Object.keys(scoreLabels), scoreCache = snapshot ? new WeakMap() : null;
@@ -326,7 +326,7 @@
     return el('div', { class: 'empty' }, [el('div', { class: 'empty-symbol', text: '∅', 'aria-hidden': 'true' }), el('h3', { text: title }), el('p', { text: detail })]);
   }
   function render() {
-    hideTooltip(); renderSummary(); renderTaskContext(); updateSelection();
+    hideTooltip(); timelinePeekClose(); renderSummary(); renderTaskContext(); updateSelection();
     const blind = state.view === 'blind';
     $('#summary').hidden = blind; $('#summary-explanation').hidden = blind; $('#filters').hidden = blind; $('#task-workspace').hidden = blind;
     document.body.classList.toggle('snapshot', snapshot);
@@ -343,6 +343,7 @@
     if (!state.runs.length) { root.append(empty()); return; }
     if (state.view === 'batch') renderBatch(root);
     else if (state.view === 'trend') renderTrend(root);
+    else if (state.view === 'timeline') renderTimeline(root);
     else if (state.view === 'gallery') renderGallery(root);
     else renderEvidence(root);
   }
@@ -565,6 +566,210 @@
     if (last >= 0) svg.append(svgEl('text', { x: Math.min(382, x(last)), y: Math.max(18, y(values[last].value) - 12), 'text-anchor': 'end', class: 'value-label' }, metricFormat(values[last].value, metric)));
     panel.append(el('div', { class: 'chart-scroll' }, svg), tableDisclosure(['日期', `${name}均值`, '已知 / 完成'], values.map(item => [item.date, metricFormat(item.value, metric), `${item.count}/${item.total}`])));
     return panel;
+  }
+  // ── Timeline ────────────────────────────────────────────────────────────
+  // One lane per tool/model and one bead per attempt. The six dimensions stay
+  // independent: a missing value stays missing instead of becoming zero, and
+  // several score scopes are listed side by side rather than merged.
+  const timelineBeadSize = 42, timelineLaneHeight = 64;
+  const timelineCoarse = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;
+  function timelineDate(value) {
+    const date = String(value || '').slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date + 'T00:00:00Z')) ? date : null;
+  }
+  function timelineOffsets(count) {
+    // Same-day attempts sit side by side; the column is sized to fit them.
+    return Array.from({ length: count }, (_, index) => (index - (count - 1) / 2) * 50);
+  }
+  function timelineColumns(runs) {
+    // Only dates that actually contain a run take width. Empty calendar days
+    // are not stretched into blank space; the real dates remain on the labels.
+    const dates = [...new Set(runs.map(run => timelineDate(dateOf(run))).filter(Boolean))].sort();
+    if (!dates.length) return null;
+    const perDate = new Map(dates.map(date => [date, new Map()]));
+    for (const run of runs) {
+      const date = timelineDate(dateOf(run)); if (!date) continue;
+      const lane = JSON.stringify([run.tool, run.model]);
+      const tally = perDate.get(date);
+      tally.set(lane, (tally.get(lane) || 0) + 1);
+    }
+    const columns = []; let left = 0;
+    for (const date of dates) {
+      const count = Math.max(1, ...perDate.get(date).values());
+      const width = Math.max(96, count * timelineBeadSize + (count - 1) * 8 + 32);
+      columns.push({ date, width, start: left, center: left + width / 2, count });
+      left += width;
+    }
+    const width = Math.max(1180, left), shift = (width - left) / 2;
+    if (shift) for (const column of columns) { column.start += shift; column.center += shift; }
+    return { dates, columns, width, byDate: new Map(columns.map(column => [column.date, column])) };
+  }
+  function timelineSheets(run) {
+    const summaries = scoreSummaries(run);
+    return snapshot && state.scoreSource !== '*' ? summaries.filter(item => item.scope === state.scoreSource) : summaries;
+  }
+  function timelineLensValue(sheets, lens) {
+    const index = scoreKeys.indexOf(lens);
+    if (index < 0) return null;
+    const values = sheets.map(sheet => sheet.values[index]).filter(value => value !== null);
+    return values.length === 1 ? values[0] : null;
+  }
+  function timelineHasReview(run) { return timelineSheets(run).length > 0; }
+  function timelineSections(runs) {
+    const sections = new Map(), splitPurpose = !state.filters.purpose;
+    for (const run of runs) {
+      const date = timelineDate(dateOf(run)); if (!date) continue;
+      const key = JSON.stringify(splitPurpose ? [run.task_id, run.purpose] : [run.task_id, null]);
+      if (!sections.has(key)) sections.set(key, { task: run.task_id, taskName: run.task_name || run.task_id, purpose: splitPurpose ? run.purpose : null, runs: [] });
+      sections.get(key).runs.push(run);
+    }
+    const order = taskOptions().map(task => task.id);
+    return [...sections.values()].sort((a, b) => {
+      const left = order.indexOf(a.task), right = order.indexOf(b.task);
+      return (left < 0 ? 999 : left) - (right < 0 ? 999 : right) || String(a.purpose || '').localeCompare(String(b.purpose || ''));
+    });
+  }
+  function timelineLanes(runs) {
+    const lanes = new Map();
+    for (const run of runs) {
+      const key = JSON.stringify([run.tool, run.model]);
+      if (!lanes.has(key)) lanes.set(key, { tool: run.tool, model: run.model, runs: [] });
+      lanes.get(key).runs.push(run);
+    }
+    const first = lane => lane.runs.map(run => timelineDate(dateOf(run))).filter(Boolean).sort()[0] || '';
+    return [...lanes.values()].sort((a, b) => String(first(a)).localeCompare(String(first(b))) || text(a.model).localeCompare(text(b.model)));
+  }
+  function timelineUpdate(mutate, focus) {
+    const scroller = $('.timeline-scroll'), left = scroller ? scroller.scrollLeft : 0, top = window.scrollY;
+    mutate(); render();
+    const next = $('.timeline-scroll'); if (next) next.scrollLeft = left;
+    window.scrollTo(0, top);
+    if (focus) $(focus)?.focus();
+  }
+  function timelineScopeControl() {
+    const select = el('select', { id: 'timeline-source', 'aria-label': '评分口径，来源标签非身份认证', onchange: event => {
+      const requested = event.target.value;
+      if (!validScoreSource(requested)) { notify('评分口径无效；未切换、未回退。', true); return; }
+      timelineUpdate(() => { state.scoreSource = requested; state.scoreError = ''; }, '#timeline-source');
+      syncURL();
+    } }, [el('option', { value: '*', text: '全部口径 · 分列，不合并' }), ...snapshotScoreScopes().map(scope => el('option', { value: JSON.stringify(scope), text: scoreScopeLabel(scope) }))]);
+    select.value = state.scoreSource;
+    if (!validScoreSource(state.scoreSource)) select.prepend(el('option', { value: state.scoreSource, disabled: true, text: '口径无效 · 请重新选择' }));
+    return el('label', { class: 'timeline-control' }, ['评分口径 · 来源标签非身份认证', select]);
+  }
+  let timelineCard = null, timelineCardTimer = 0, timelineSequence = 0, timelineAnchor = null;
+  function timelinePeekHide(delay = 0) {
+    clearTimeout(timelineCardTimer);
+    timelineCardTimer = window.setTimeout(() => {
+      if (!timelineCard) return;
+      if (timelineCard.matches(':hover') || timelineCard.contains(document.activeElement)) return;
+      timelineCard.hidden = true; timelineCard.replaceChildren();
+    }, delay);
+  }
+  function timelinePeekClose() { clearTimeout(timelineCardTimer); if (timelineCard) { timelineCard.hidden = true; timelineCard.replaceChildren(); } }
+  function timelinePeekPosition() {
+    // The panel sits in a fixed corner, so a bead scrolling out of view closes it.
+    if (!timelineCard || !timelineAnchor?.isConnected) return timelinePeekClose();
+    const box = timelineAnchor.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > window.innerHeight || box.right < 0 || box.left > window.innerWidth) timelinePeekClose();
+  }
+  function timelinePeek(run, anchor) {
+    clearTimeout(timelineCardTimer);
+    if (!timelineCard) {
+      timelineCard = el('aside', { class: 'timeline-postcard', role: 'group', 'aria-label': '作品明信片', hidden: true });
+      timelineCard.addEventListener('pointerenter', () => clearTimeout(timelineCardTimer));
+      timelineCard.addEventListener('pointerleave', () => timelinePeekHide(90));
+      timelineCard.addEventListener('keydown', event => { if (event.key === 'Escape') timelinePeekClose(); });
+      document.body.append(timelineCard);
+    }
+    timelineAnchor = anchor;
+    timelineCard.replaceChildren(...timelinePostcardContent(run));
+    timelineCard.hidden = false;
+    timelinePeekPosition();
+  }
+  function timelineScopeShort(scope) {
+    if (scope && scope[1] === 'ai-suggestion') return /score-first/i.test(String(scope[3] || '')) ? 'AI 复核 · score-first-v1' : 'AI 建议 · 待复核';
+    return scoreScopeLabel(scope);
+  }
+  function timelinePostcardContent(run) {
+    const path = stagePath(run, 'desktop'), uri = path ? mediaURI(run, path, true) : null;
+    const sheets = timelineSheets(run);
+    const scores = sheets.length ? sheets.map(summary => {
+      const scope = JSON.parse(summary.scope);
+      return el('section', { class: 'timeline-peek-score' }, [
+        el('p', { class: 'timeline-peek-source', title: scoreScopeLabel(scope), text: `${timelineScopeShort(scope)}${summary.created_at ? ` · 评审 ${String(summary.created_at).slice(0, 10)}` : ' · 评审日期未记录'}` }),
+        el('dl', { class: 'score-six timeline-score-six', 'aria-label': '六项独立评分' }, scoreKeys.map((key, index) => scoreCell(run, summary, key, index)))
+      ]);
+    }) : [el('p', { class: 'timeline-peek-empty', text: scoreReason(run, null) })];
+    return [
+      uri ? el('img', { class: 'timeline-peek-image', src: uri, alt: `${text(run.model)} · 历史桌面截图`, decoding: 'async' }) : el('div', { class: 'timeline-peek-image is-empty', text: '无公开截图' }),
+      el('p', { class: 'timeline-peek-meta', text: `${dateOf(run)} · ${text(run.task_name || run.task_id)} · ${text(run.purpose)}` }),
+      el('p', { class: 'timeline-peek-model', text: text(run.model) }),
+      ...scores,
+      el('div', { class: 'timeline-peek-actions' }, [el('button', { text: '本次详情', onclick: () => { timelinePeekClose(); openDetail(run.id); } }), selectButton(run)])
+    ];
+  }
+  function timelineBead(run, x, y) {
+    const sheets = timelineSheets(run), value = sheets.length > 1 ? null : timelineLensValue(sheets, state.timelineLens);
+    const path = stagePath(run, 'desktop'), uri = path ? mediaURI(run, path, true) : null;
+    const reason = !sheets.length ? '未评审' : value === null ? (sheets.length > 1 ? '多口径分别列示' : '该维度未评') : `${value}/4`;
+    const bead = el('button', { type: 'button', class: `timeline-bead${value === null ? ' is-unscored' : ` tl-s${value}`}${sheets.length > 1 ? ' is-multi' : ''}${uri ? '' : ' is-empty'}`, style: `left:${Math.round(x - timelineBeadSize / 2)}px;top:${Math.round(y - timelineBeadSize / 2)}px;--tl-i:${Math.min(timelineSequence++, 16)}`, 'data-run-id': run.id, 'aria-label': `${dateOf(run)} · ${text(run.model)} · ${text(run.task_name || run.task_id)} · ${scoreLabels[state.timelineLens]} ${reason}`, onclick: () => { timelinePeekClose(); openDetail(run.id); } });
+    if (uri) bead.append(el('img', { class: 'timeline-bead-image', src: uri, alt: '', loading: 'lazy', decoding: 'async', onerror: () => { bead.classList.add('is-empty'); bead.querySelector('img')?.remove(); } }));
+    else bead.append(el('span', { class: 'timeline-bead-mark', text: '—', 'aria-hidden': 'true' }));
+    if (value !== null) bead.append(el('span', { class: 'timeline-bead-score', text: String(value), 'aria-hidden': 'true' }));
+    else if (sheets.length > 1) bead.append(el('span', { class: 'timeline-bead-score', text: '2', 'aria-hidden': 'true' }));
+    if (!(timelineCoarse?.matches)) {
+      bead.addEventListener('pointerenter', () => timelinePeek(run, bead));
+      bead.addEventListener('pointerleave', () => timelinePeekHide(160));
+      bead.addEventListener('focus', () => timelinePeek(run, bead));
+      bead.addEventListener('blur', () => timelinePeekHide(120));
+    }
+    return bead;
+  }
+  function timelineLane(lane, layout, index) {
+    const plot = el('div', { class: 'timeline-lane-plot', style: `width:${layout.width}px;height:${timelineLaneHeight}px` });
+    const guides = svgEl('svg', { class: 'timeline-guides', width: layout.width, height: timelineLaneHeight, 'aria-hidden': 'true', focusable: 'false' });
+    guides.append(svgEl('line', { x1: 0, x2: layout.width, y1: timelineLaneHeight / 2, y2: timelineLaneHeight / 2, class: 'timeline-baseline' }));
+    for (const column of layout.columns) {
+      if (column.start > 0) guides.append(svgEl('line', { x1: column.start, x2: column.start, y1: 0, y2: timelineLaneHeight, class: 'timeline-column-line' }));
+      guides.append(svgEl('line', { x1: column.center, x2: column.center, y1: timelineLaneHeight / 2 - 3, y2: timelineLaneHeight / 2 + 3, class: 'timeline-column-tick' }));
+    }
+    plot.append(guides);
+    const byDate = new Map();
+    for (const run of stableRuns(lane.runs)) { const date = timelineDate(dateOf(run)); if (!date) continue; if (!byDate.has(date)) byDate.set(date, []); byDate.get(date).push(run); }
+    for (const [date, runs] of [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const column = layout.byDate.get(date); if (!column) continue;
+      const offsets = timelineOffsets(runs.length);
+      runs.forEach((run, at) => plot.append(timelineBead(run, column.center + offsets[at], timelineLaneHeight / 2)));
+    }
+    return el('div', { class: `timeline-lane${index % 2 ? ' is-alt' : ''}` }, [el('div', { class: 'timeline-lane-label' }, [el('strong', { title: text(lane.model), text: text(lane.model) }), el('small', { text: text(lane.tool) })]), plot]);
+  }
+  function renderTimeline(root) {
+    const placed = state.runs.filter(run => timelineDate(dateOf(run)));
+    const runs = state.timelineOnlyScored ? placed.filter(timelineHasReview) : placed;
+    const layout = timelineColumns(runs);
+    const dated = [...new Set(runs.map(run => timelineDate(dateOf(run))).filter(Boolean))];
+    root.append(el('div', { class: 'section-heading timeline-heading' }, [el('div', {}, [el('p', { class: 'eyebrow', text: 'TIMELINE / ATTEMPTS OVER TIME' }), el('h2', { text: '作品时间轴' }), el('p', { text: '按有运行的日期从左到右排列；每次交付是一张历史截图。切换单项查看起伏，六项独立，不合成总分。' })]), el('p', { class: 'timeline-count', text: `${runs.length} 次尝试 · ${runs.filter(timelineHasReview).length} 次有评审 · ${dated.length} 个运行日期` })]));
+    const lens = el('div', { class: 'timeline-lens', role: 'group', 'aria-label': '观察维度' }, scoreKeys.map(key => el('button', { type: 'button', 'data-timeline-lens': key, 'aria-pressed': String(state.timelineLens === key), text: scoreLabels[key], onclick: () => timelineUpdate(() => { state.timelineLens = key; }, '[data-timeline-lens="' + key + '"]') })));
+    const only = el('label', { class: 'checkbox-label timeline-only' }, [el('input', { type: 'checkbox', checked: state.timelineOnlyScored, onchange: event => timelineUpdate(() => { state.timelineOnlyScored = event.target.checked; }, '.timeline-only input') }), '仅已评 · 隐藏未评尝试']);
+    root.append(el('div', { class: 'timeline-controls' }, [lens, ...(snapshot ? [timelineScopeControl()] : []), only]));
+    root.append(el('p', { class: 'timeline-legend' }, [el('span', { class: 'timeline-key tl-s4', text: '4' }), el('span', { class: 'timeline-key tl-s3', text: '3' }), el('span', { class: 'timeline-key tl-s1', text: '1' }), '环色 = 当前维度 0–4', el('span', { class: 'timeline-key is-unscored', text: '○' }), '未评 / 未交付', el('span', { class: 'timeline-key', text: '2' }), '多口径分列', el('span', { class: 'timeline-key is-empty', text: '·' }), '无公开截图']));
+    if (!runs.length) { root.append(empty(state.timelineOnlyScored ? '当前筛选没有已评作品。' : '当前筛选没有可排入时间轴的运行。', '调整任务、用途或日期；未评尝试不会被补分。')); return; }
+    if (!layout) { root.append(el('p', { class: 'notice error', role: 'status', text: '当前筛选没有可排入时间轴的运行。' })); return; }
+    const scroll = el('div', { class: 'timeline-scroll', role: 'region', tabindex: '0', 'aria-label': '作品时间轴，可横向滚动' });
+    timelineSequence = 0;
+    const inner = el('div', { class: 'timeline-inner', style: `--tl-plot:${layout.width}px` });
+    const axisPlot = el('div', { class: 'timeline-axis-plot', style: `width:${layout.width}px` }, layout.columns.map(column => el('span', { class: 'timeline-tick', style: `left:${column.center}px`, text: column.date.slice(5) })));
+    for (const column of layout.columns) {
+      if (column.start > 0) axisPlot.append(el('span', { class: 'timeline-axis-rule', style: `left:${column.start}px` }));
+    }
+    inner.append(el('div', { class: 'timeline-axis' }, [el('div', { class: 'timeline-axis-label' }, [el('span', { text: '模型 / 工具' }), el('small', { text: layout.dates[0].slice(0, 4) })]), axisPlot]));
+    for (const section of timelineSections(runs)) {
+      inner.append(el('div', { class: 'timeline-section-head' }, [el('h3', { text: `${text(section.taskName)}${section.purpose ? ` · ${text(section.purpose)}` : ''}` }), el('p', { text: `${section.runs.length} 次尝试 · ${section.runs.filter(timelineHasReview).length} 次有评审 · 按首次出现排序` })]));
+      timelineLanes(section.runs).forEach((lane, index) => inner.append(timelineLane(lane, layout, index)));
+    }
+    scroll.append(inner); root.append(scroll);
+    root.append(el('p', { class: 'footnote', text: '只排列有运行的日期，空白日不占宽度；日期标签是真实运行日期。缩略图是公开的历史采样，不是实时画面；六项评分各自 0–4，无总分、均分或加权分；不同口径分列，不合并。' }));
   }
   function renderMatrix(root) {
     root.append(el('div', { class: 'section-heading' }, [el('div', {}, [el('h2', { text: '尝试，不等于覆盖。' }), el('p', { text: '按工具 / 模型 × 任务记录事实。每次尝试单独计数；没有记录仅指当前筛选，不推断从未测试。' })]), el('button', { text: '查看两任务（清除任务筛选）', onclick: () => chooseTask('') })]));
@@ -904,7 +1109,7 @@
         const scopedReviews = (run.reviews || []).filter(review => review && typeof review === 'object' && !Array.isArray(review) && JSON.stringify(scoreScope(run, review)) === summary.scope);
         const record = el('div', {}, [el('span', { text: text(summary.created_at) }), el('small', { text: `最近真实评审 · ${scopedReviews.length} 条本口径记录` }), el('details', { class: 'score-record' }, [el('summary', { text: '评审 ID / 原序' }), el('p', { text: `${text(summary.id)} / ${text(summary.index)}` })])]);
         const details = el('details', { class: 'score-record' }, [el('summary', { text: `全部本口径评审 (${scopedReviews.length})` }), reviewList(scopedReviews, run)]);
-        return [identity, el('span', { class: 'score-run-date', text: `运行 ${text(run.started_at || run.date)}` }), record, ...scoreKeys.map((key, index) => el('td', { class: 'numeric score-history-value' }, el('dl', { class: 'score-history-cell' }, scoreCell(run, summary, key, index)))), el('div', { class: 'card-actions' }, [detailButton(run, '运行详情'), originalButton(run), details])];
+        return [identity, el('span', { class: 'score-run-date', text: `运行 ${text(run.started_at || run.date)}` }), record, ...scoreKeys.map((key, index) => el('td', { class: 'numeric score-history-value' }, el('dl', { class: 'score-history-cell' }, scoreCell(run, summary, key, index)))), el('div', { class: 'card-actions' }, [detailButton(run, '运行详情'), originalButton(run), selectButton(run), details])];
       });
       section.append(table(['模型 / 运行', '运行日期', '评审日期 / 记录', ...Object.values(scoreLabels), '检查原记录'], rows, 'scores-table score-history-table', ordered.map(({ run, summary }) => ({ 'data-score-run': run.id, 'data-score-scope': summary.scope }))));
       wrapper.append(section);
@@ -1140,7 +1345,7 @@
   }
   function setView(view) {
     cancelPreviewContext();
-    state.view = ['batch', 'trend', 'gallery', 'matrix', 'blind', 'evidence', ...(snapshot ? ['scores'] : [])].includes(view) ? view : 'gallery';
+    state.view = ['batch', 'trend', 'timeline', 'gallery', 'matrix', 'blind', 'evidence', ...(snapshot ? ['scores'] : [])].includes(view) ? view : 'gallery';
     $$('[data-view]').forEach(button => { const active = button.dataset.view === state.view; button.classList.toggle('active', active); if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
     // Entering anonymous review must not leave an identifying dialog open.
     if (state.view === 'blind') { ['detail-dialog', 'compare-dialog', 'zoom-dialog'].forEach(id => { releaseMedia($(`#${id}`)); $(`#${id}`).close(); }); }
@@ -1192,6 +1397,8 @@
   $('#compare-mode').addEventListener('change', event => { stopPreviews(); compareMode = event.target.value; renderComparison(); });
   window.addEventListener('pagehide', () => { stopPreviews(); ++compareRequest; ++state.detailRequest; });
   document.addEventListener('visibilitychange', () => { if (document.hidden) { stopPreviews(); ++compareRequest; ++state.detailRequest; } });
+  window.addEventListener('resize', () => timelinePeekClose());
+  document.addEventListener('scroll', event => { if (timelineCard && !timelineCard.hidden && !timelineCard.contains(event.target)) timelinePeekPosition(); }, true);
   $('#clear-selection').addEventListener('click', () => { state.selected.clear(); state.selectionRuns.clear(); updateSelection(); });
   $('#compare-button').addEventListener('click', openComparison);
   $('#compare-limit').addEventListener('change', event => { state.compareLimit = Number(event.target.value); updateSelection(); });
@@ -1205,7 +1412,7 @@
     button.disabled = true;
     try { const response = await api(`/api/export?format=${button.dataset.export}&${query()}`); await download(response, `bench-runs.${button.dataset.export}`); notify('已导出当前筛选的运行数据。'); } catch (error) { notify(error.message, true); } finally { updateAuth(); }
   }));
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { hideTooltip(); timelinePeekClose(); } });
   window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
   window.addEventListener('popstate', () => { clearTimeout(filterTimer); const params = new URLSearchParams(location.search); state.defaultTaskPending = false; for (const key of filterKeys) state.filters[key] = params.get(key) || (key === 'purpose' && !params.has('purpose') ? 'benchmark' : ''); readScoreURL(params); fillOptions(); setView(location.hash.slice(1)); loadData(); });
   // The public shell may hand off only to this read-only snapshot viewer.
@@ -1214,6 +1421,7 @@
     if (Object.hasOwn(action, 'score_source') && !validScoreSource(action.score_source)) throw new Error('评分口径不存在或格式无效；未自动回退。');
     if (Object.hasOwn(action, 'score_sort') && action.score_sort !== '' && !scoreKeys.includes(action.score_sort)) throw new Error('排序分项必须是六项之一或空值。');
     if (action.kind === 'model' && (typeof action.model !== 'string' || !action.model)) throw new Error('缺少具体模型。');
+    if (action.task_id !== undefined && (typeof action.task_id !== 'string' || (action.task_id && !/^[A-Za-z0-9_-]{1,80}$/.test(action.task_id)))) throw new Error('任务标识无效。');
     const ids = action.selected;
     if (action.kind === 'compare' && (!Array.isArray(ids) || ids.length !== 2 || new Set(ids).size !== 2)) throw new Error('对照需要两个不同的运行。');
     if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length)) throw new Error('运行选择必须是不同的记录。');
@@ -1226,6 +1434,7 @@
       state.filters = Object.fromEntries(filterKeys.map(key => [key, '']));
       state.filters.model = action.model; fillOptions();
     }
+    if (action.task_id && (action.kind === 'model' || action.kind === 'view')) { state.filters.task_id = action.task_id; fillOptions(); }
     if (runs) {
       state.selected = new Set(ids); state.selectionRuns = new Map(runs.map(run => [run.id, run]));
       state.mixed = action.mixed === true; $('#mixed-comparison').checked = state.mixed; updateSelection();

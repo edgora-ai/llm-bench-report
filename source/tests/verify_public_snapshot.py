@@ -694,7 +694,7 @@ def view_matrix(page, args, report, expect):
         page.set_viewport_size({"width": width, "height": height})
         for theme in ("light", "dark"):
             set_theme(page, theme, expect)
-            for view in ('batch', 'gallery', 'trend', 'evidence', 'blind'):
+            for view in ('batch', 'gallery', 'trend', 'timeline', 'evidence', 'blind'):
                 page.locator(f'[data-view="{view}"]').click()
                 overflow(page, f'{view}-{size}-{theme}', report)
                 if view == 'gallery':
@@ -986,7 +986,7 @@ def browser_suite(browser, url, data, args, report):
                 page.set_viewport_size({'width': width, 'height': height})
                 for theme in ('light', 'dark'):
                     set_theme(page, theme, expect)
-                    for view in ('gallery', 'matrix', 'batch', 'trend', 'evidence', 'blind'):
+                    for view in ('gallery', 'matrix', 'batch', 'trend', 'timeline', 'evidence', 'blind'):
                         page.locator(f'[data-view="{view}"]').click()
                         overflow(page, f'{view}-{size}-{theme}', report)
                         if view == 'gallery':

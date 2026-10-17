@@ -938,7 +938,7 @@ class ScoreFirstPresentationTests(unittest.TestCase):
         self.assertEqual([cell['dimension'] for cell in cells], list(make_gallery.SCORE_LABELS))
         self.assertEqual([''.join(cell['value']) for cell in cells], ['0/4', '分项缺失', '2.5/4', '分项缺失', '4/4', '分项缺失'])
         self.assertTrue(all(not cell['folded'] for cell in cells))
-        self.assertIn('非盲 AI 建议 · 待人工复核', html)
+        self.assertIn('AI 建议 · 待复核', html)
         self.assertEqual(parsed.structure[row['id']], ['work-heading', 'work-score', 'work-cover', 'work-actions', 'work-facts'])
         foreign = make_gallery.scope_key(['visual-v1', 'ai-suggestion', False, 'Other AI 建议'])
         self.assertEqual(make_gallery.render_card(row, foreign).count('本来源无记录'), 6)
