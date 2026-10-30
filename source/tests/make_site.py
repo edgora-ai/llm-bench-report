@@ -487,7 +487,7 @@ def validate_manifest(manifest: dict) -> dict:
     stats_keys = STATS_KEYS | ({"original_packages", "original_bytes", "original_files"} if v2 else set())
     _require(isinstance(stats, dict) and set(stats) == stats_keys
              and all(type(value) is int and value >= 0 for value in stats.values()), "invalid manifest statistics")
-    _require(stats["index_bytes"] == files["index.html"]["size"] <= (100 * 1024 if v3 else INDEX_BUDGET)
+    _require(stats["index_bytes"] == files["index.html"]["size"] <= (200 * 1024 if v3 else INDEX_BUDGET)
              and stats["offline_bytes"] == files["offline.html"]["size"], "invalid HTML size statistics or entrypoint budget")
     return manifest
 

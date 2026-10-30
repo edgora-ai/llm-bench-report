@@ -455,11 +455,23 @@ eval(code.slice(start,end));
         with self.assertRaises(RuntimeError):
             make_site.validate_manifest(legacy)
 
+    def test_manifest_entry_budget_matches_gallery_builder(self):
+        self.build()
+        manifest = self.manifest()
+        for size in (100 * 1024 + 1, make_gallery.DECODED_BUDGET):
+            manifest["files"]["index.html"]["size"] = size
+            manifest["stats"]["index_bytes"] = size
+            make_site.validate_manifest(manifest)
+        manifest["files"]["index.html"]["size"] += 1
+        manifest["stats"]["index_bytes"] += 1
+        with self.assertRaisesRegex(RuntimeError, "entrypoint budget"):
+            make_site.validate_manifest(manifest)
+
     def test_missing_duplicate_markers_and_oversize_entrypoint_fail_without_output(self):
         template = self.project / "web/public-gallery.html"
         original = template.read_bytes()
         for raw in (original.replace(b"{{GALLERY_SEED}}", b""), original + b"{{GALLERY_CARDS}}",
-                    original + b"x" * (101 * 1024)):
+                    original + b"x" * (make_gallery.DECODED_BUDGET + 1024)):
             template.write_bytes(raw)
             with self.assertRaises(RuntimeError):
                 self.build()

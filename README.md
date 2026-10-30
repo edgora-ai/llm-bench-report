@@ -24,6 +24,7 @@ index.html 随发布更新。日期命名文件是首次创建时的合并数据
 - [2026-10-13](index.html?purpose=benchmark&date_from=2026-10-13&date_to=2026-10-13)
 - [2026-10-14](index.html?purpose=benchmark&date_from=2026-10-14&date_to=2026-10-14)
 - [2026-10-17](index.html?purpose=benchmark&date_from=2026-10-17&date_to=2026-10-17)
+- [2026-10-30](index.html?purpose=benchmark&date_from=2026-10-30&date_to=2026-10-30)
 
 ## 结果解释
 
