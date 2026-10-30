@@ -2,7 +2,7 @@
 
 This is NOT the docker-network-none-unix-inference-bridge-v1 strategy. The AGY
 CLI runs on the host with its own project directory and cwd set to this run's
-output directory, so file writes can only land in that run. No inference
+output directory. This is not an OS-level filesystem boundary. No inference
 gateway exists for this tool: provider_route stays unknown and unreported
 metrics stay null.
 """
@@ -97,6 +97,8 @@ def agy_version():
 
 def build_manifest(root, task, purpose, tool_model, run_id, date, batch_id, prompt):
     model = tool_model
+    variant = model.rsplit("-", 1)[-1]
+    effort = variant if variant in ("low", "medium", "high") else None
     # The AGY session runs with its cwd at this run's output directory, so the
     # project flag only needs the relative layout, never a host path.
     project = f"runs/{date}/{run_id}/agy-project"
@@ -120,10 +122,11 @@ def build_manifest(root, task, purpose, tool_model, run_id, date, batch_id, prom
         "command_sha256": runner_module.digest(["<PROMPT>" if arg == "<PROMPT>" else arg for arg in cli]),
         "task_definition_sha256": runner_module.digest(task),
         "model_directory_sha256": None,
-        "reasoning_effort_requested": "high",
+        "reasoning_effort_requested": effort,
         "reasoning_effort_applied": None,
         "reasoning_effort_supported": None,
-        "reasoning_effort_control": "vendor_variant_in_model_name_not_bench_effort_ladder",
+        "reasoning_effort_control": ("vendor_variant_in_model_name_not_bench_effort_ladder" if effort else
+                                     "vendor_managed_thinking_no_explicit_effort"),
         "print_timeout_s": PRINT_TIMEOUT,
     }
     manifest = {

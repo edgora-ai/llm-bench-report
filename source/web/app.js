@@ -93,6 +93,16 @@
   const durationText = value => { const seconds = value / 1000; return value > 0 && value < 1000 ? '<1 秒' : seconds < 60 ? `${number(seconds)} 秒` : `${Math.floor(seconds / 60)} 分 ${number(seconds % 60)} 秒`; };
   const metricFormat = (value, key) => !finite(value) ? '未上报' : key.includes('duration') ? durationText(value) : key === 'cost_usd' ? value > 0 && value < .01 ? '< USD 0.01' : `USD ${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}` : number(value);
   const dateOf = run => String(run.date || run.started_at || '').slice(0, 10);
+  function operatorAssisted(run) {
+    const a = run.public_annotation;
+    return a?.kind === 'operator_assisted' && a.reason === 'stalled_npm_playwright_selfcheck_sigterm' && a.duration_comparable === false;
+  }
+  const operatorWarning = '操作员协助：操作员向停滞的 npm exec playwright --version 自检发送 SIGTERM；原始交付未修改。原始耗时包含停滞，不作正常速度比较。未标注不代表已证实无人协助。';
+  function operatorNotice(run) { return operatorAssisted(run) ? [el('p', { class: 'public-annotation', text: operatorWarning })] : []; }
+  // Presentation eligibility only: valueOf and all stored/raw metrics stay intact.
+  const speedExcluded = (run, key) => operatorAssisted(run) && ['duration_ms', 'api_duration_ms'].includes(key);
+  const comparisonValue = (run, key) => speedExcluded(run, key) ? null : valueOf(run, key);
+  const metricText = (run, key) => metricFormat(valueOf(run, key), key) + (speedExcluded(run, key) ? ' · 已排除速度比较（原值保留）' : '');
   const coverage = (n, total) => total ? `${Math.round(n / total * 100)}%` : '—';
   function el(tag, attrs = {}, children = []) {
     const node = document.createElement(tag);
@@ -376,9 +386,12 @@
     pattern.append(base, stroke); defs.append(pattern); svg.append(defs); return svg;
   }
   function barPanel(key) {
-    const [title, unit] = metricDefs[key], all = state.runs.map(run => ({ run, value: valueOf(run, key) })).filter(item => finite(item.value)).sort((a, b) => b.value - a.value);
-    const panel = el('article', { class: 'panel' }, el('div', { class: 'panel-head' }, el('div', {}, [el('h3', { text: title }), el('p', { text: `单次运行排序 · ${unit} · ${all.length}/${state.runs.length} 已知` })])));
-    if (!all.length) { panel.append(empty('unknown', '当前筛选缺少此项计量，不绘制零值。')); return panel; }
+    const [title, unit] = metricDefs[key], all = state.runs.map(run => ({ run, value: comparisonValue(run, key) })).filter(item => finite(item.value)).sort((a, b) => b.value - a.value);
+    const excluded = state.runs.filter(run => speedExcluded(run, key) && finite(valueOf(run, key))).length;
+    const unreported = state.runs.filter(run => !finite(valueOf(run, key))).length;
+    const coverageText = `${all.length}/${state.runs.length} 纳入 · ${excluded} 已排除（操作员协助耗时） · ${unreported} 未上报`;
+    const panel = el('article', { class: 'panel' }, el('div', { class: 'panel-head' }, el('div', {}, [el('h3', { text: title }), el('p', { text: `单次运行排序 · ${unit} · ${coverageText}` })])));
+    if (!all.length) { panel.append(empty(excluded ? '耗时已排除速度比较' : 'unknown', `${coverageText}。原始计量仍见运行表 / 详情；不绘制零值。`)); return panel; }
     if (all.length === 1) {
       panel.append(el('p', { class: 'value-label', text: metricFormat(all[0].value, key) }), el('p', { class: 'footnote', text: text(all[0].run.model) }));
     } else {
@@ -404,13 +417,13 @@
       panel.append(el('div', { class: 'chart-scroll' }, svg));
     }
     panel.append(tableDisclosure(['运行 / 日期', '工具 / 模型 / 条件', `${title} · ${unit}`, '来源'], all.map(({ run, value }) => [el('div', {}, [detailButton(run), el('small', { text: dateOf(run) })]), `${text(run.tool)} / ${text(run.model)} / ${text(run.task_id)} / ${text(run.prompt_version)} / ${text(run.purpose)} / ${effortText(run)}`, `${metricFormat(value, key)}${key.includes('duration') ? ` (${number(value)} ms)` : ''}`, key === 'cost_usd' ? text(run.metrics?.cost_source) : key === 'duration_ms' ? 'manifest.duration_ms' : key === 'evaluation_duration_ms' ? 'evaluation.duration_ms' : text(run.metrics_source || run.metrics?.source || 'manifest.metrics')])));
-    panel.append(el('p', { class: 'footnote', text: `图与表均包含全部 ${all.length} 个已知值；${state.runs.length - all.length} 个 unknown 不绘为 0。不作为质量排名。` }));
+    panel.append(el('p', { class: 'footnote', text: `图与表均包含 ${all.length} 个纳入值；${excluded} 个操作员协助耗时已排除速度比较（原值仍见运行表 / 详情）；${unreported} 个未上报不绘为 0。不作为质量排名。` }));
     return panel;
   }
   function renderBatch(root) {
     const costs = state.runs.map(run => valueOf(run, 'cost_usd')).filter(finite);
     const failedCosts = state.runs.filter(run => generationStatus(run) === 'failed').map(run => valueOf(run, 'cost_usd')).filter(finite);
-    root.append(el('div', { class: 'section-heading' }, [el('div', {}, [el('h2', { text: '费用、时间，各自衡量。' }), el('p', { text: `已知费用小计 ${costs.length ? metricFormat(costs.reduce((sum, value) => sum + value, 0), 'cost_usd') : 'unknown'} · ${costs.length}/${state.runs.length} 已知（${coverage(costs.length, state.runs.length)}），包含 ${failedCosts.length} 次生成失败尝试的已知费用。报告值不等于账单。` })]), el('button', { text: '同条件日期趋势', onclick: () => setView('trend') })]), el('p', { class: 'blind-note', text: '生成会话耗时不包含完整评估流水线；评估耗时仅显示 evaluation.duration_ms，缺失不推算。首 CLI 事件不是供应商 TTFT；源码体积不是质量分。各图展示全部已知运行，不跨条件合并排名。' }), el('div', { class: 'charts efficiency-charts' }, ['cost_usd', 'duration_ms', 'total_tokens', 'evaluation_duration_ms'].map(barPanel)), el('div', { class: 'section-heading' }, [el('h2', { text: '计量对应运行' }), el('span', { class: 'chip', text: '费用 / 时间 / Token 独立单位' })]), runTable());
+    root.append(el('div', { class: 'section-heading' }, [el('div', {}, [el('h2', { text: '费用、时间，各自衡量。' }), el('p', { text: `已知费用小计 ${costs.length ? metricFormat(costs.reduce((sum, value) => sum + value, 0), 'cost_usd') : 'unknown'} · ${costs.length}/${state.runs.length} 已知（${coverage(costs.length, state.runs.length)}），包含 ${failedCosts.length} 次生成失败尝试的已知费用。报告值不等于账单。` })]), el('button', { text: '同条件日期趋势', onclick: () => setView('trend') })]), el('p', { class: 'blind-note', text: '生成会话耗时不包含完整评估流水线；评估耗时仅显示 evaluation.duration_ms，缺失不推算。首 CLI 事件不是供应商 TTFT；源码体积不是质量分。操作员协助记录的生成会话 / API 耗时不纳入普通速度图；原值仍保留，Token、费用与评估计量不受影响。不跨条件合并排名。' }), el('div', { class: 'charts efficiency-charts' }, ['cost_usd', 'duration_ms', 'total_tokens', 'evaluation_duration_ms'].map(barPanel)), el('div', { class: 'section-heading' }, [el('h2', { text: '计量对应运行' }), el('span', { class: 'chip', text: '费用 / 时间 / Token 独立单位' })]), runTable());
   }
   function statusChip(status) {
     const cls = status === 'completed' ? '' : ['failed', 'blocked'].includes(status) ? 'bad' : ['running', 'queued', 'interrupted', 'generated'].includes(status) ? 'warn' : '';
@@ -431,7 +444,7 @@
   function runTable(runs = state.runs) {
     const rows = runs.map(run => {
       const checkbox = el('input', { type: 'checkbox', 'data-select-run': run.id, 'aria-label': `选择运行 ${run.id}`, checked: state.selected.has(run.id), onchange: () => toggleSelection(run) });
-      return [checkbox, el('td', { class: 'run-name' }, [detailButton(run), el('small', { text: attemptText(run) }), el('small', { text: `批次 ${text(run.batch_id)}` })]), dateOf(run) || 'unknown', text(run.tool), text(run.model), text(run.task_name || run.task_id), text(run.prompt_version), statusChip(generationStatus(run)), entrypointStatus(run), text(run.evaluation?.status), checksText(run), snapshot ? `${includedPaths(run).length} / ${evidencePaths(run).length}` : `登记 ${evidencePaths(run).length} · 按需读取`, ...['cost_usd', 'duration_ms', 'evaluation_duration_ms', 'total_tokens'].map(key => el('td', { class: 'numeric', text: metricFormat(valueOf(run, key), key) }))];
+      return [checkbox, el('td', { class: 'run-name' }, [detailButton(run), el('small', { text: attemptText(run) }), el('small', { text: `批次 ${text(run.batch_id)}` }), ...operatorNotice(run)]), dateOf(run) || 'unknown', text(run.tool), text(run.model), text(run.task_name || run.task_id), text(run.prompt_version), statusChip(generationStatus(run)), entrypointStatus(run), text(run.evaluation?.status), checksText(run), snapshot ? `${includedPaths(run).length} / ${evidencePaths(run).length}` : `登记 ${evidencePaths(run).length} · 按需读取`, ...['cost_usd', 'duration_ms', 'evaluation_duration_ms', 'total_tokens'].map(key => el('td', { class: 'numeric', text: metricText(run, key) }))];
     });
     return table(['选择', '运行 / 尝试 / 批次', '日期', '工具', '模型', '任务', 'Prompt', '生成会话', '入口检查', '评估状态', 'Checks', snapshot ? '公开包含 / 登记' : '证据', '费用 USD', '生成会话耗时', '评估耗时', '总 Token'], rows, 'run-table');
   }
@@ -525,7 +538,7 @@
     const selector = el('select', { 'aria-label': '趋势指标', onchange: event => { state.trendMetric = event.target.value; render(); } }, Object.entries(metricDefs).map(([key, [name]]) => el('option', { value: key, text: name })));
     selector.value = state.trendMetric;
     const controls = el('div', { class: 'trend-controls' }, [el('label', {}, ['指标', selector]), el('button', { text: '上一组', disabled: !state.trendPage, onclick: () => { state.trendPage--; render(); } }), el('button', { text: '下一组', disabled: (state.trendPage + 1) * 3 >= groups.length, onclick: () => { state.trendPage++; render(); } })]);
-    root.append(el('div', { class: 'section-heading' }, [el('div', {}, [el('h2', { text: '同条件，才有可比趋势。' }), el('p', { text: `按指纹 + 工具 / 模型 / 任务 / 版本 / purpose 分面，每页最多 3 组（${state.trendPage + 1}/${Math.max(1, Math.ceil(groups.length / 3))}）。每日仅对已完成且计量已知的运行取均值。` })]), controls]));
+    root.append(el('div', { class: 'section-heading' }, [el('div', {}, [el('h2', { text: '同条件，才有可比趋势。' }), el('p', { text: `按指纹 + 工具 / 模型 / 任务 / 版本 / purpose 分面，每页最多 3 组（${state.trendPage + 1}/${Math.max(1, Math.ceil(groups.length / 3))}）。每日仅对已完成且计量已知、可纳入当前指标的运行取均值。` })]), controls]));
     root.append(el('p', { class: 'blind-note', text: '缺失日期或计量会断线；失败不当作零值。指纹缺失的运行单独成组。耗时和费用变化不是质量退化；不生成综合质量分。' }));
     const dates = dailyDates(state.runs);
     root.append(el('div', { class: 'charts' }, groups.slice(state.trendPage * 3, state.trendPage * 3 + 3).map(([key, runs]) => trendPanel(key, runs, dates))));
@@ -535,11 +548,16 @@
     const metric = state.trendMetric, [name, unit] = metricDefs[metric], run = runs[0];
     const values = dates.map(date => {
       const atDate = runs.filter(item => dateOf(item) === date && item.status === 'completed');
-      const valid = atDate.map(item => valueOf(item, metric)).filter(finite);
-      return { date, value: valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null, count: valid.length, total: atDate.length };
+      const valid = atDate.map(item => comparisonValue(item, metric)).filter(finite);
+      const excluded = atDate.filter(item => speedExcluded(item, metric) && finite(valueOf(item, metric))).length;
+      const unreported = atDate.filter(item => !finite(valueOf(item, metric))).length;
+      return { date, value: valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null, count: valid.length, total: atDate.length, excluded, unreported };
     });
     const panel = el('article', { class: 'panel' }, [el('h3', { text: `${text(run.model)} · ${text(run.task_name || run.task_id)}` }), el('p', { class: 'condition-key', text: `${text(run.tool)} · ${text(run.prompt_version)} · ${text(run.purpose)}` }), el('p', { class: 'condition-key mono', text: `指纹 ${text(run.condition_fingerprint)}`, title: key }), el('p', { class: 'condition-key', text: `推理强度 ${effortText(run)}` }), el('p', { class: 'footnote', text: `${name} · ${unit} · 单条件每日均值` })]);
-    if (!values.some(item => finite(item.value))) { panel.append(empty('暂无可绘制计量', '当前条件没有已完成且指标已知的运行。')); return panel; }
+    const eligibilityText = item => `${item.count}/${item.total} 完成运行纳入 · ${item.excluded} 已排除（操作员协助耗时） · ${item.unreported} 未上报`;
+    const dataTable = () => tableDisclosure(['日期', `${name}均值`, '纳入 / 完成 · 排除 / 未上报'], values.map(item => [item.date, finite(item.value) ? metricFormat(item.value, metric) : item.excluded ? '无纳入值（已排除，非未上报）' : '无纳入值', eligibilityText(item)]));
+    panel.append(el('p', { class: 'footnote', text: `已排除 ${values.reduce((sum, item) => sum + item.excluded, 0)} 个操作员协助耗时；未上报 ${values.reduce((sum, item) => sum + item.unreported, 0)} 个。原始计量仍见运行表 / 详情。` }));
+    if (!values.some(item => finite(item.value))) { panel.append(empty('暂无可绘制计量', '当前条件没有已完成且可纳入均值的计量；已排除与未上报分别列示，不绘为零。'), dataTable()); return panel; }
     const svg = chartShell(420, 240, `${text(run.model)}，${name}每日均值`), max = Math.max(...values.map(item => item.value || 0)) * 1.15 || 1;
     const x = i => 56 + (values.length > 1 ? i / (values.length - 1) : .5) * 332, y = value => 190 - value / max * 150;
     for (const ratio of [0, .5, 1]) {
@@ -559,12 +577,12 @@
     const hitWidth = Math.max(2, 332 / Math.max(1, values.length - 1));
     values.forEach((item, i) => {
       const hit = svgEl('rect', { x: x(i) - hitWidth / 2, y: 24, width: hitWidth, height: 174, class: 'hit' });
-      attachTooltip(hit, `${metricFormat(item.value, metric)}\n${item.date} · ${text(run.model)}\n${item.count}/${item.total} 完成运行计量已知`, crosshair, x(i)); svg.append(hit);
+      attachTooltip(hit, `${finite(item.value) ? metricFormat(item.value, metric) : item.excluded ? '无纳入值（已排除，非未上报）' : '无纳入值'}\n${item.date} · ${text(run.model)}\n${eligibilityText(item)}`, crosshair, x(i)); svg.append(hit);
     });
     for (const i of [...new Set([0, Math.floor((values.length - 1) / 2), values.length - 1])]) if (values[i]) svg.append(svgEl('text', { x: x(i), y: 219, 'text-anchor': 'middle' }, values[i].date.slice(5)));
     const last = values.findLastIndex(item => finite(item.value));
     if (last >= 0) svg.append(svgEl('text', { x: Math.min(382, x(last)), y: Math.max(18, y(values[last].value) - 12), 'text-anchor': 'end', class: 'value-label' }, metricFormat(values[last].value, metric)));
-    panel.append(el('div', { class: 'chart-scroll' }, svg), tableDisclosure(['日期', `${name}均值`, '已知 / 完成'], values.map(item => [item.date, metricFormat(item.value, metric), `${item.count}/${item.total}`])));
+    panel.append(el('div', { class: 'chart-scroll' }, svg), dataTable());
     return panel;
   }
   // ── Timeline ────────────────────────────────────────────────────────────
@@ -988,10 +1006,10 @@
     const path = stagePath(run, state.galleryStage);
     return el('article', { class: `evidence-card${evidencePaths(run).length ? '' : ' no-registered-media'}`, 'data-run-id': run.id }, [
       el('div', { class: 'card-heading' }, el('div', { class: 'card-title' }, [el('h3', { text: text(run.model) }), el('span', { class: 'chip', text: `${text(run.tool)} · ${text(run.prompt_version)}` })])),
-      scoreSummary(run), media(run, path),
+      ...operatorNotice(run), scoreSummary(run), media(run, path),
       el('div', { class: 'caption' }, [el('div', { class: 'card-actions' }, [originalButton(run), selectButton(run), el('button', { 'data-open-stage': run.id, text: '放大', disabled: !path || state.galleryStage === 'video' || !mediaURI(run, path), onclick: () => openZoom(run, path) }), el('button', { 'data-open-video': run.id, text: '看录像', disabled: !stagePath(run, 'video'), onclick: () => openDetail(run.id, 'video') }), detailButton(run, '本次详情 / 全部证据')]),
         el('details', { class: 'score-record card-record' }, [el('summary', { text: '本次运行 / 条件 / 计量' }), el('p', { class: 'run-identity', text: `${dateOf(run) || 'unknown'} · ${text(run.task_name || run.task_id)}` }), el('p', { class: 'mono run-id', text: text(run.id) }), el('p', { class: 'attempt-label', text: attemptText(run) }), el('p', { class: 'effort-label', text: `Effort ${effortText(run)}` }),
-          el('div', { class: 'run-facts' }, [el('span', {}, ['会话 ', statusChip(generationStatus(run))]), el('span', { text: `入口 ${entrypointStatus(run)}` }), el('span', { text: `评估 ${text(run.evaluation?.status)}` }), el('span', { text: checksText(run) })]), metadata(['duration_ms', 'cost_usd', 'total_tokens', 'evaluation_duration_ms'].map(key => [metricDefs[key][0], metricFormat(valueOf(run, key), key)]))])])
+          el('div', { class: 'run-facts' }, [el('span', {}, ['会话 ', statusChip(generationStatus(run))]), el('span', { text: `入口 ${entrypointStatus(run)}` }), el('span', { text: `评估 ${text(run.evaluation?.status)}` }), el('span', { text: checksText(run) })]), metadata(['duration_ms', 'cost_usd', 'total_tokens', 'evaluation_duration_ms'].map(key => [metricDefs[key][0], metricText(run, key)]))])])
     ]);
   }
   function renderGallery(root) {
@@ -1147,13 +1165,13 @@
     try {
       const run = await getRun(id); if (!dialog.open || request !== state.detailRequest) return;
       $('#detail-title').textContent = `${text(run.model)} · 本次详情`;
-      const blocks = [detailBlock('本次效果评分', [scoreSummary(run, true)], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), el('div', { class: 'card-actions' }, [originalButton(run), selectButton(run)])], true)];
+      const blocks = [...operatorNotice(run), detailBlock('本次效果评分', [scoreSummary(run, true)], true), detailBlock('本次证据 · 按阶段查看', [stageViewer(run, stage), el('div', { class: 'card-actions' }, [originalButton(run), selectButton(run)])], true)];
       if (snapshot) blocks.push(snapshotHistory(run));
       blocks.push(detailBlock('实验条件 / Prompt', [metadata([
         ['运行 ID', run.id], ['运行状态', statusNames[run.status] || run.status], ['生成结论', run.generation_status || run.status], ['已记录 attempt（缺失为 unknown）', run.attempt], ['重试来源', run.retry_of], ['归档完整性', run.archive_status], ['评估结束', run.evaluation_finished_at], ['批次', run.batch_id], ['日期', dateOf(run)], ['工具 / 模型', `${text(run.tool)} / ${text(run.model)}`], ['任务', `${text(run.task_name)} (${text(run.task_id)})`], ['Purpose', run.purpose], ['Prompt 版本', run.prompt_version], ['条件指纹', run.condition_fingerprint], ['推理强度', effortText(run)], ['Prompt hash', run.prompt_hash || run.prompt?.sha256 || run.prompt?.hash], ['归档路径', run.archive_dir], ['开始 / 结束', `${text(run.started_at)} / ${text(run.finished_at)}`], ['故障摘要（白名单类别）', diagnosticText(run)]
       ]), el('details', {}, [el('summary', { text: 'Prompt 原文 / 元信息（如 manifest 提供）' }), el('div', { class: 'pre-scroll' }, el('pre', { text: text(run.prompt || run.prompt_text) }))]) ]));
       const metrics = run.metrics || {};
-      blocks.push(detailBlock('计量与来源', [metadata([...Object.entries(metricDefs).map(([key, [label]]) => [label, metricFormat(valueOf(run, key), key)]), ['评估耗时来源', 'evaluation.duration_ms（不从时间戳 / 捕获时长推算）'], ['首 CLI 事件（非供应商 TTFT）', metricFormat(run.first_model_event_ms, 'duration_ms')], ['缓存读取', number(metrics.cache_read_tokens)], ['缓存写入', number(metrics.cache_write_tokens)], ['推理 Token', number(metrics.reasoning_tokens)], ['轮数', number(metrics.num_turns)], ['费用来源', metrics.cost_source], ['Metrics 来源', run.metrics_source || metrics.source || 'manifest.metrics（来源未声明）']]), el('p', { class: 'footnote', text: '生成会话耗时不是完整评估的端到端耗时。计量缺失为“未上报”；零值仅在来源明确记录为 0 时展示。input_tokens 是不含缓存的输入，input_total 是已采集的含缓存总输入；不自行相加补齐，也不改 total_tokens / 费用定义。CLI 报告费用未核验，非账单、非实际免费。源码体积与帧变化均不是质量分。' })]));
+      blocks.push(detailBlock('计量与来源', [metadata([...Object.entries(metricDefs).map(([key, [label]]) => [label, metricText(run, key)]), ['评估耗时来源', 'evaluation.duration_ms（不从时间戳 / 捕获时长推算）'], ['首 CLI 事件（非供应商 TTFT）', metricFormat(run.first_model_event_ms, 'duration_ms')], ['缓存读取', number(metrics.cache_read_tokens)], ['缓存写入', number(metrics.cache_write_tokens)], ['推理 Token', number(metrics.reasoning_tokens)], ['轮数', number(metrics.num_turns)], ['费用来源', metrics.cost_source], ['Metrics 来源', run.metrics_source || metrics.source || 'manifest.metrics（来源未声明）']]), el('p', { class: 'footnote', text: '生成会话耗时不是完整评估的端到端耗时。计量缺失为“未上报”；零值仅在来源明确记录为 0 时展示。input_tokens 是不含缓存的输入，input_total 是已采集的含缓存总输入；不自行相加补齐，也不改 total_tokens / 费用定义。CLI 报告费用未核验，非账单、非实际免费。源码体积与帧变化均不是质量分。' })]));
       const checks = runChecks(run);
       blocks.push(detailBlock('Checks / Evaluation', [el('p', { class: 'footnote', text: `评估：${evaluationNames[run.evaluation?.status] || '状态未核实'} · ${checksText(run)}。只展示已登记检查状态，不转为效果评分；任意错误文本不展示。` }), ...checks.map(check => el('p', {}, el('span', { class: 'chip', text: `${['pass', 'passed', 'ok'].includes(check.status) ? '通过' : ['fail', 'failed'].includes(check.status) ? '未通过' : '状态未核实'} · ${checkNames[check.name] || '其他已登记检查'}` }))), ...(!checks.length ? [el('p', { class: 'muted', text: '未提供 Checks；未验收。' })] : [])]));
       blocks.push(detailBlock('全部追加评分记录', [el('p', { class: 'footnote', text: reviewStatus(run) }), el('details', { class: 'score-record' }, [el('summary', { text: '逐条查看真实评审 · 不合并来源' }), reviewList(run.reviews || [], run)])]));
@@ -1215,11 +1233,11 @@
     } catch (error) { if (dialog.open && request === compareRequest) content.replaceChildren(el('p', { class: 'error', text: error.message })); }
   }
   function compareFacts(run) {
-    return metadata([
+    return el('div', {}, [...operatorNotice(run), metadata([
       ['生成会话', text(generationStatus(run))], ['入口检查 / 评估', `${entrypointStatus(run)} / ${text(run.evaluation?.status)}`], ['检查', checksText(run)],
-      ['生成会话耗时', metricFormat(run.duration_ms, 'duration_ms')], ['评估耗时', metricFormat(run.evaluation?.duration_ms, 'evaluation_duration_ms')],
+      ['生成会话耗时', metricText(run, 'duration_ms')], ['评估耗时', metricText(run, 'evaluation_duration_ms')],
       ['费用 / 来源', `${metricFormat(valueOf(run, 'cost_usd'), 'cost_usd')} / ${text(run.metrics?.cost_source)}`], ['总 Token', metricFormat(valueOf(run, 'total_tokens'), 'total_tokens')], ['评分状态', reviewStatus(run)]
-    ]);
+    ])]);
   }
   function showCompareSide(index) {
     state.compareIndex = index;

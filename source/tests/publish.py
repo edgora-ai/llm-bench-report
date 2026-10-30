@@ -341,10 +341,15 @@ def run(cmd, cwd=None, check=True):
     return result
 
 
-def publish_site(site, workspace, repo_name, branch, stats):
+def publish_site(site, workspace, repo_name, branch, stats, *, ssh=False):
     run(["git", "check-ref-format", "--branch", branch])
     repo = workspace / "repo"
-    run(["gh", "repo", "clone", repo_name, str(repo)])
+    if ssh:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_name):
+            raise RuntimeError("SSH publication requires an owner/repository name")
+        run(["git", "clone", "git@github.com:" + repo_name + ".git", str(repo)])
+    else:
+        run(["gh", "repo", "clone", repo_name, str(repo)])
     run(["git", "-C", str(repo), "fetch", "origin", f"{branch}:refs/remotes/origin/{branch}"])
     publish_branch = "report-publish-" + uuid.uuid4().hex[:12]
     run(["git", "-C", str(repo), "checkout", "-b", publish_branch, "origin/" + branch])
@@ -387,6 +392,7 @@ def main():
     parser.add_argument("--branch", default="main")
     parser.add_argument("--include-source", action="store_true", help="include separately validated source, never local configuration or archives")
     parser.add_argument("--dry-run", action="store_true", help="stage and verify without cloning or pushing")
+    parser.add_argument("--ssh", action="store_true", help="clone and push through existing GitHub SSH credentials, without gh authentication")
     args = parser.parse_args()
     target = Path(args.snapshot)
     if target.is_dir():
@@ -409,7 +415,7 @@ def main():
             print(json.dumps({"staged": str(site), "files": sorted(path.relative_to(site).as_posix()
                              for path in site.rglob("*") if path.is_file())}, ensure_ascii=False))
             return
-        print(json.dumps(publish_site(site, workspace, args.repo, args.branch, stats), ensure_ascii=False))
+        print(json.dumps(publish_site(site, workspace, args.repo, args.branch, stats, ssh=args.ssh), ensure_ascii=False))
     finally:
         shutil.rmtree(workspace)
 

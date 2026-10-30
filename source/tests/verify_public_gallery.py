@@ -233,7 +233,9 @@ class GalleryHTML(HTMLParser):
                 self.score_field = 'label' if tag == 'dt' else 'value'
             if 'work-name' in attrs.get('class', '').split():
                 self.name_attrs[self.card] = attrs
-            for field in ('work-name', 'work-meta', 'work-status'):
+            if 'public-annotation' in classes and self.detail_depth:
+                self.unsafe.append('folded public annotation')
+            for field in ('work-name', 'work-meta', 'work-status', 'public-annotation'):
                 if field in attrs.get('class', '').split():
                     self.field = (tag, field)
                     self.card_details[self.card][field] = []
@@ -311,7 +313,14 @@ def project_runs(data):
             if asset['mime'].startswith('image/'):
                 image = {'thumb': thumb, 'full': full, 'width': asset['width'], 'height': asset['height'], 'label': 'desktop.png'}
         summaries = v2.score_summaries(r)
+        if 'public_annotation' in r:
+            annotation = r['public_annotation']
+            require(isinstance(annotation, dict) and set(annotation) == {'kind', 'reason', 'duration_comparable'}
+                    and annotation['kind'] == 'operator_assisted'
+                    and annotation['reason'] == 'stalled_npm_playwright_selfcheck_sigterm'
+                    and annotation['duration_comparable'] is False, 'Invalid public_annotation')
         rows.append({**({'scores': summaries} if summaries else {}), 'meter': v2.meter(r),
+                     **({'public_annotation': dict(r['public_annotation'])} if 'public_annotation' in r else {}),
                      **{k: r.get(k) for k in ('id', 'task_id', 'prompt_version', 'started_at')},
                      **{k: r.get(k) or 'unknown' for k in ('model', 'tool', 'purpose')},
                      'date': str(r.get('date') or r.get('started_at') or '')[:10] or None,
@@ -457,6 +466,10 @@ def audit_gallery(html, data, bootstrap, css, full_info, runtime_info, trusted_p
     require(all(i in thumbnails or (i.get('id') == 'public-zoom-image' and not i.get('data-src')) for i in parsed.images), 'Undeclared initial image')
     for row in expected:
         fields = {key: ''.join(value).strip() for key, value in parsed.card_details[row['id']].items()}
+        expected_annotation = ('操作员协助：操作员向停滞的 npm exec playwright --version 自检发送 SIGTERM；'
+                               '原始交付未修改。原始耗时包含停滞，不作正常速度比较。未标注不代表已证实无人协助。')
+        require(fields.get('public-annotation') == (expected_annotation if 'public_annotation' in row else None),
+                'Visible operator-assistance disclosure differs')
         short_model = row['model'][9:] if row['model'].startswith('opencode/') else row['model']
         require(fields.get('work-name') == short_model and parsed.card_attrs[row['id']].get('data-model-route') == row['model']
                 and parsed.name_attrs[row['id']].get('aria-label') == row['model'] and parsed.name_attrs[row['id']].get('title') == row['model']

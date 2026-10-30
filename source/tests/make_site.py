@@ -312,6 +312,14 @@ def audit_snapshot(html: str, viewer_script: Path, *, static=False, preview_runt
         run_id = _relative(run["id"])
         _require("/" not in run_id and run_id not in ids, "duplicate or invalid run ID")
         ids.add(run_id)
+        if "public_annotation" in run:
+            annotation = run["public_annotation"]
+            _require(isinstance(annotation, dict)
+                     and set(annotation) == {"kind", "reason", "duration_comparable"}
+                     and annotation["kind"] == "operator_assisted"
+                     and annotation["reason"] == "stalled_npm_playwright_selfcheck_sigterm"
+                     and annotation["duration_comparable"] is False,
+                     "invalid public_annotation")
         evaluation = run.get("evaluation") or {}
         _require(isinstance(evaluation, dict), "invalid evaluation")
         paths = evaluation.get("evidence") or []

@@ -119,6 +119,41 @@ class StaticSiteTests(unittest.TestCase):
         self.assertEqual(make_site.verify_site(self.site, self.viewer)["stats"], stats)
         self.assertEqual(set(self.manifest()["files"]), {"index.html", "offline.html", *data["assets"]})
 
+    def test_optional_public_annotation_roundtrips_without_changing_raw_metrics(self):
+        annotation = {"kind": "operator_assisted", "reason": "stalled_npm_playwright_selfcheck_sigterm",
+                      "duration_comparable": False}
+        self.data["runs"][0]["public_annotation"] = annotation
+        before = copy.deepcopy(self.data)
+        self.write_input()
+        self.build()
+        for data in (self.audit(), self.audit("offline.html")):
+            self.assertEqual(data["runs"], before["runs"])
+            self.assertEqual(data["runs"][0]["public_annotation"], annotation)
+        self.assertEqual(self.data, before)
+        make_site.verify_site(self.site, self.viewer)
+
+    def test_public_annotation_requires_exact_keys_enums_and_boolean_false(self):
+        valid = {"kind": "operator_assisted", "reason": "stalled_npm_playwright_selfcheck_sigterm",
+                 "duration_comparable": False}
+        invalid = [None, [], False, "operator_assisted", {},
+                   *({key: value for key, value in valid.items() if key != omitted} for omitted in valid),
+                   {**valid, "extra": "not allowed"}]
+        for key, values in {"kind": [None, True, 1, [], {}, "unassisted"],
+                            "reason": [None, True, 1, [], {}, "arbitrary text"],
+                            "duration_comparable": [None, True, 0, 1, "false", [], {}]}.items():
+            invalid.extend({**valid, key: value} for value in values)
+        for annotation in invalid:
+            with self.subTest(annotation=annotation):
+                data = copy.deepcopy(self.data)
+                data["runs"][0]["public_annotation"] = annotation
+                self.write_input(data)
+                with self.assertRaisesRegex(RuntimeError, "invalid public_annotation"):
+                    make_site.audit_snapshot(self.snapshot.read_text(), self.old_viewer)
+        self.write_input()
+        audited = make_site.audit_snapshot(self.snapshot.read_text(), self.old_viewer)
+        self.assertEqual(audited, self.data)
+        self.assertNotIn("public_annotation", audited["runs"][0])
+
     def test_complete_viewer_budget_is_two_mib(self):
         self.build()
         manifest = self.manifest()

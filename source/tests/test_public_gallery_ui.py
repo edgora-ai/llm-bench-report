@@ -278,7 +278,7 @@ const preview=makeRepair('f'.repeat(32));delete seed.repairs;
 const elements=flatten(card(preview.run));assert.equal(elements.some(element=>element.attrs['data-preview-mode']),false);
 assert.equal(elements.find(element=>element.attrs['data-run-original']).attrs.text,'运行原作');
 assert.equal(elements.find(element=>element.attrs['data-zoom-run']).attrs.text,'放大原作');
-""", [('card', False), ('repairNotice', False), ('previewModes', False)])
+""", [('card', False), ('operatorAssisted', False), ('repairNotice', False), ('previewModes', False)])
 
     def test_repair_modal_mode_events_stop_close_and_late_sdk_do_not_resurrect_sandbox(self):
         self.repair_preview_javascript(r"""

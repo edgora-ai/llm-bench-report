@@ -129,7 +129,7 @@ class PublicationFlowTests(unittest.TestCase):
         self.assertFalse(any(command[:3] == ["gh", "repo", "create"] for command in commands))
         self.assertFalse(any("commit" in command or "push" in command for command in commands))
 
-    def exercise_publication(self, branch="main", staged="index.html\0README.md\0.nojekyll\0"):
+    def exercise_publication(self, branch="main", staged="index.html\0README.md\0.nojekyll\0", ssh=False):
         commands = []
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -137,7 +137,7 @@ class PublicationFlowTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 commands.append(command)
-                if command[:3] == ["gh", "repo", "clone"]:
+                if command[:3] == ["gh", "repo", "clone"] or command[:2] == ["git", "clone"]:
                     repo = Path(command[-1])
                     repo.mkdir()
                     (repo / "2026-09-30.html").write_text("old immutable dated bytes")
@@ -149,7 +149,7 @@ class PublicationFlowTests(unittest.TestCase):
                 return SimpleNamespace(stdout="", returncode=0)
 
             with mock.patch.object(publish, "run", side_effect=fake_run):
-                result = publish.publish_site(site, workspace, "owner/existing", branch, {"runs": 58})
+                result = publish.publish_site(site, workspace, "owner/existing", branch, {"runs": 58}, ssh=ssh)
             self.assertEqual((workspace / "repo/2026-09-30.html").read_text(), "old immutable dated bytes")
             self.assertEqual((workspace / "repo/unrelated.txt").read_text(), "unmanaged retained bytes")
         return result, commands
@@ -174,6 +174,36 @@ class PublicationFlowTests(unittest.TestCase):
                 self.assertNotIn("-A", add)
                 self.assertTrue(commit[-1].endswith("Co-Authored-By: Claude Code <noreply@anthropic.com>"))
                 self.assertEqual(result["commit"], "a" * 40)
+
+    def test_ssh_publication_uses_git_without_gh_or_global_config(self):
+        result, commands = self.exercise_publication(ssh=True)
+        clone = next(command for command in commands if command[:2] == ["git", "clone"])
+        self.assertEqual(clone[2], "git@github.com:owner/existing.git")
+        self.assertFalse(any(command[0] == "gh" or "--global" in command for command in commands))
+        push = next(command for command in commands if "push" in command)
+        self.assertEqual(push[-2:], ["origin", "HEAD:main"])
+        self.assertNotIn("--force", push)
+        self.assertTrue(result["pushed"])
+
+    def test_ssh_clone_failure_stops_without_fallback_or_push(self):
+        commands = []
+
+        def failed_clone(command, **kwargs):
+            commands.append(command)
+            if command[:2] == ["git", "clone"]:
+                raise RuntimeError("fixture SSH clone failure")
+            return SimpleNamespace(stdout="", returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(publish, "run", side_effect=failed_clone):
+            with self.assertRaisesRegex(RuntimeError, "SSH clone failure"):
+                publish.publish_site(Path(tmp) / "site", Path(tmp), "owner/existing", "main", {"runs": 58}, ssh=True)
+        self.assertFalse(any(command[0] == "gh" or "commit" in command or "push" in command for command in commands))
+
+    def test_ssh_publication_rejects_repository_urls(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(publish, "run") as command:
+            with self.assertRaisesRegex(RuntimeError, "owner/repository"):
+                publish.publish_site(Path(tmp) / "site", Path(tmp), "ssh://untrusted/repo", "main", {"runs": 0}, ssh=True)
+        self.assertEqual(command.call_count, 1)
 
     def test_run_preserves_stdout_only_error_diagnostics(self):
         result = SimpleNamespace(returncode=2, stderr="", stdout="report.html:19: trailing whitespace.\n")

@@ -269,6 +269,7 @@ def project_row(run, data):
                      "height": info["height"], "label": "desktop.png"}
     summaries = score_summaries(run)
     return {**({"scores": summaries} if summaries else {}), "meter": meter(run),
+            **({"public_annotation": copy.deepcopy(run["public_annotation"])} if "public_annotation" in run else {}),
             **({"termination": evaluation["generation_termination_reason"]}
                if str(run.get("prompt_version") or "").startswith("standalone-svg-")
                and evaluation.get("generation_termination_reason") in {"length", "stop"} else {}),
@@ -398,6 +399,10 @@ def render_repair(run_id, repair):
             + '</p><p>完整查看器和离线版仅含原始交付，不含修复版。</p></details></aside>')
 
 
+OPERATOR_WARNING = ("操作员协助：操作员向停滞的 npm exec playwright --version 自检发送 SIGTERM；"
+                    "原始交付未修改。原始耗时包含停滞，不作正常速度比较。未标注不代表已证实无人协助。")
+
+
 def render_card(run, score_source="", repair=None):
     """Server markup and bootstrap share six scores, exact scope and meter facts."""
     e = lambda value: escape(str(value if value is not None else "unknown"), quote=True)
@@ -433,6 +438,7 @@ def render_card(run, score_source="", repair=None):
                        + '">历次作品 ↗</button>') if int(run.get("history_count") or 0) > 0 else ''
     return ('<article class="evidence-card' + ('' if run["registered_media"] else ' no-registered-media') + '" data-run-id="' + run_id + '" data-model-route="' + e(run["model"]) + '">'
             '<div class="work-heading"><h2 class="work-name" title="' + e(run["model"]) + '" aria-label="' + e(run["model"]) + '">' + e(model) + '</h2></div>'
+            + ('<p class="public-annotation">' + e(OPERATOR_WARNING) + '</p>' if "public_annotation" in run else '')
             + score + (render_repair(run["id"], repair) if repair else '')
             + '<div class="work-cover' + ('' if image else ' empty-cover') + '"' + cover_style + '>' + cover + '</div>'
             '<div class="work-actions"><button type="button" data-run-original="' + run_id + '"' + disabled + '>' + start_label + '</button>'

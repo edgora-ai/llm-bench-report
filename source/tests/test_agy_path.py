@@ -172,6 +172,19 @@ class AgyRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "running")
         self.assertEqual(manifest["evaluation"]["status"], "pending")
 
+    def test_sonnet_thinking_does_not_claim_an_unrequested_effort(self):
+        task = {"id": "blackhole", "name": "黑洞", "version": "standard-v1", "rubric_version": "visual-v1", "prompt": "p"}
+        manifest, cli = agy_runner.build_manifest(Path(__file__).resolve().parent.parent, task, "benchmark",
+                                                   "claude-sonnet-4-6", "c" * 32, "2026-10-30", "batch", "p")
+        conditions = manifest["conditions"]
+        self.assertIsNone(conditions["reasoning_effort_requested"])
+        self.assertIsNone(conditions["reasoning_effort_applied"])
+        self.assertIsNone(conditions["reasoning_effort_supported"])
+        self.assertEqual(conditions["reasoning_effort_control"], "vendor_managed_thinking_no_explicit_effort")
+        self.assertNotIn("--effort", cli)
+        self.assertEqual(cli[cli.index("--model") + 1], "claude-sonnet-4-6")
+        self.assertEqual(manifest["reported_models"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

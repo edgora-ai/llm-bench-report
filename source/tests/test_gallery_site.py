@@ -928,6 +928,115 @@ console.log(JSON.stringify(eval(pure+';JSON.parse(fs.readFileSync(0,"utf8")).map
         self.assertIn('总 Token 0', json.loads(result.stdout)[1])
 
 
+class PublicAnnotationTests(unittest.TestCase):
+    annotation = {'kind': 'operator_assisted', 'reason': 'stalled_npm_playwright_selfcheck_sigterm',
+                  'duration_comparable': False}
+
+    def data(self):
+        run = {'id': 'a' * 32, 'model': 'Synthetic model', 'tool': 'cli', 'task_id': 'crocodile',
+               'purpose': 'benchmark', 'duration_ms': 900001,
+               'metrics': {'api_duration_ms': 800001, 'cost_usd': 1.25, 'total_tokens': 123},
+               'evaluation': {'duration_ms': 12001}}
+        return {'runs': [run], 'evidence': {}, 'thumbnails': {}, 'assets': {},
+                'originals': {run['id']: {'status': 'no_entrypoint'}}}
+
+    def test_optional_projection_is_exact_independent_and_does_not_mutate_history(self):
+        import verify_public_gallery as audit
+        data = self.data()
+        historical = copy.deepcopy(data)
+        baseline = make_gallery.project_runs(data)
+        self.assertEqual(baseline, audit.project_runs(data))
+        self.assertNotIn('public_annotation', baseline[0])
+        before_markup = make_gallery.render_card(baseline[0])
+        self.assertNotIn('public-annotation', before_markup)
+        data['runs'][0]['public_annotation'] = copy.deepcopy(self.annotation)
+        before = copy.deepcopy(data)
+        rows = make_gallery.project_runs(data)
+        self.assertEqual(rows, audit.project_runs(data))
+        self.assertEqual(data, before)
+        self.assertEqual(rows[0]['public_annotation'], self.annotation)
+        self.assertIsNot(rows[0]['public_annotation'], data['runs'][0]['public_annotation'])
+        stripped = copy.deepcopy(rows[0]); stripped.pop('public_annotation')
+        self.assertEqual(stripped, baseline[0])
+        self.assertEqual(rows[0]['meter'], [900001, 1.25, None, 123, 12001])
+        html = make_gallery.render_card(rows[0])
+        parsed = audit.GalleryHTML(); parsed.feed(html)
+        self.assertEqual(parsed.card_details[rows[0]['id']]['public-annotation'], [make_gallery.OPERATOR_WARNING])
+        self.assertFalse(parsed.unsafe)
+        self.assertLess(html.index('class="public-annotation"'), html.index('<details'))
+        self.assertIn('总 Token 123', html)
+        self.assertEqual(make_gallery.project_runs(historical), baseline)
+        self.assertEqual(make_gallery.render_card(baseline[0]), before_markup)
+
+    def test_independent_projection_also_refuses_invalid_annotations(self):
+        import verify_public_gallery as audit
+        for annotation in (None, {}, {**self.annotation, 'extra': 1},
+                           {**self.annotation, 'duration_comparable': 0},
+                           {**self.annotation, 'kind': 'unassisted'},
+                           {**self.annotation, 'reason': 'arbitrary text'}):
+            with self.subTest(annotation=annotation):
+                data = self.data(); data['runs'][0]['public_annotation'] = annotation
+                with self.assertRaises(Exception):
+                    audit.project_runs(data)
+
+    def test_actual_javascript_surfaces_keep_raw_values_and_exclude_only_speed(self):
+        program = r'''
+const fs=require('fs'),assert=require('node:assert/strict');
+const code=fs.readFileSync(process.argv[1],'utf8'),publicCode=fs.readFileSync(process.argv[2],'utf8');
+const cut=(a,b)=>code.slice(code.indexOf(a),code.indexOf(b,code.indexOf(a)));
+class N { constructor(tag,attrs={},children=[]){this.tagName=tag.toUpperCase();this.attrs=attrs;this.children=Array.isArray(children)?children:[children];this.style={setProperty(){}};} append(...xs){this.children.push(...xs);} replaceChildren(...xs){this.children=xs;} setAttribute(k,v){this.attrs[k]=v;} }
+const Node=N,el=(...args)=>new N(...args),svgEl=(tag,attrs={},text)=>el(tag,{...attrs,text});
+const {finite,valueOf,text,number,metricFormat,dateOf,operatorAssisted,operatorNotice,speedExcluded,comparisonValue,metricText,operatorWarning}=eval('"use strict";'+cut('  const finite = value =>','  const coverage')+';({finite,valueOf,text,number,metricFormat,dateOf,operatorAssisted,operatorNotice,speedExcluded,comparisonValue,metricText,operatorWarning})');
+const annotation=JSON.parse(process.argv[3]),warning=process.argv[4];
+assert.equal(operatorWarning,warning);
+const normal={id:'n',model:'M',task_id:'crocodile',status:'completed',date:'2026-01-01',duration_ms:1000,metrics:{api_duration_ms:500,cost_usd:1,total_tokens:100},evaluation:{duration_ms:100}},
+ assisted={...normal,id:'a',duration_ms:900000,metrics:{api_duration_ms:800000,cost_usd:3,total_tokens:300},evaluation:{duration_ms:300},public_annotation:annotation},
+ missing={...normal,id:'m',duration_ms:null,metrics:{},evaluation:{}};
+const before=JSON.stringify([normal,assisted,missing]);
+for(const key of ['duration_ms','api_duration_ms']){assert(speedExcluded(assisted,key));assert.equal(comparisonValue(assisted,key),null);assert.equal(valueOf(assisted,key),key==='duration_ms'?900000:800000);assert.match(metricText(assisted,key),/已排除速度比较/);assert.equal(comparisonValue(normal,key),valueOf(normal,key));}
+for(const key of ['cost_usd','total_tokens','evaluation_duration_ms']){assert(!speedExcluded(assisted,key));assert.equal(comparisonValue(assisted,key),valueOf(assisted,key));}
+assert.equal(operatorAssisted(normal),false);assert.deepEqual(operatorNotice(normal),[]);
+assert.equal(operatorAssisted({...assisted,public_annotation:{...annotation,duration_comparable:0}}),false);
+let state={runs:[normal,assisted,missing],trendMetric:'duration_ms',selected:new Set(),detailRequest:0};
+const metricDefs={duration_ms:['生成会话耗时','秒'],api_duration_ms:['API 耗时','秒'],cost_usd:['费用','USD'],total_tokens:['总 Token','token'],evaluation_duration_ms:['评估耗时','秒']};
+const dump=object=>JSON.stringify(object),empty=(title,detail)=>el('div',{title,detail}),detailButton=run=>el('button',{text:run.id}),effortText=()=>'',chartShell=()=>el('svg');
+const tableDisclosure=(headers,rows)=>el('details',{headers,rows}),table=(headers,rows)=>el('table',{headers,rows}),attachTooltip=()=>{};
+const barPanel=eval('('+cut('  function barPanel(', '  function renderBatch(')+')');
+for(const key of ['duration_ms','api_duration_ms']){const panel=dump(barPanel(key));assert.match(panel,/1 已排除/);assert.match(panel,/1 未上报/);assert(!panel.includes('900000'));assert(!panel.includes('800000'));}
+assert.match(dump(barPanel('cost_usd')),/3\.0000|USD 3/);
+state.runs=[assisted,missing];assert.match(dump(barPanel('duration_ms')),/耗时已排除速度比较/);
+const trendPanel=eval('('+cut('  function trendPanel(', '  // ── Timeline')+')');
+state.runs=[normal,assisted,missing];
+let panel=trendPanel('key',state.runs,['2026-01-01']);let rows=panel.children.at(-1).attrs.rows;
+assert.equal(rows[0][1],metricFormat(1000,'duration_ms'));assert.match(rows[0][2],/1\/3.*1 已排除.*1 未上报/);
+state.trendMetric='api_duration_ms';rows=trendPanel('key',state.runs,['2026-01-01']).children.at(-1).attrs.rows;assert.equal(rows[0][1],metricFormat(500,'api_duration_ms'));
+for(const [key,mean] of [['cost_usd',2],['total_tokens',200],['evaluation_duration_ms',200]]){state.trendMetric=key;rows=trendPanel('key',state.runs,['2026-01-01']).children.at(-1).attrs.rows;assert.equal(rows[0][1],metricFormat(mean,key));assert.match(rows[0][2],/2\/3.*0 已排除.*1 未上报/);}
+state.trendMetric='duration_ms';rows=trendPanel('key',[assisted,missing],['2026-01-01']).children.at(-1).attrs.rows;assert.equal(rows[0][1],'无纳入值（已排除，非未上报）');
+const statusChip=value=>el('span',{text:value}),reviewList=()=>el('ol');
+const snapshot=true,generationStatus=r=>r.status,entrypointStatus=()=>'',checksText=()=>'',includedPaths=()=>[],evidencePaths=()=>[],attemptText=()=>'',toggleSelection=()=>{},metadata=pairs=>el('dl',{pairs}),reviewStatus=()=>'',selectButton=()=>el('button'),originalButton=()=>el('button'),stagePath=()=>null,media=()=>el('figure'),scoreSummary=()=>el('section');
+const runTable=eval('('+cut('  function runTable(', '  function selectionLimit(')+')');
+assert.match(dump(runTable([assisted])),/public-annotation/);assert(dump(runTable([assisted])).includes(warning));assert.match(dump(runTable([assisted])),/15 分/);assert(!dump(runTable([normal])).includes('public-annotation'));
+const galleryCard=eval('('+cut('  function galleryCard(', '  function renderGallery(')+')');
+assert(dump(galleryCard(assisted)).includes(warning));assert(!dump(galleryCard(normal)).includes('public-annotation'));
+const compareFacts=eval('('+cut('  function compareFacts(', '  function showCompareSide(')+')');assert(dump(compareFacts(assisted)).includes(warning));assert.match(dump(compareFacts(assisted)),/15 分/);
+const publicHelpers=publicCode.slice(publicCode.indexOf('  function operatorAssisted('),publicCode.indexOf('  const s='));
+const pub=eval('"use strict";'+publicHelpers+';({operatorAssisted,operatorWarning})');assert.equal(pub.operatorWarning,warning);assert.equal(pub.operatorAssisted(assisted),true);
+const node=el,repairFor=()=>null,allowedOriginal=()=>false,o=()=>'',a=/^media\//,c=()=>'',shownScores=()=>[],scoreCard=()=>el('section');
+const card=eval('('+publicCode.slice(publicCode.indexOf('  function card('),publicCode.indexOf('  function d('))+')');
+const publicRun={...assisted,original:{status:'no_entrypoint'},meter:[900000,3,null,300,300]},meterText=()=> 'raw meter unchanged';
+assert(dump(card(publicRun)).includes(warning));assert(!dump(card({...publicRun,public_annotation:undefined})).includes('public-annotation'));
+const elements={'#detail-dialog':{open:true},'#detail-content':el('div'),'#detail-title':{}};
+const $=s=>elements[s],stopPreviews=()=>{},releaseMedia=()=>{},getRun=async()=>assisted,detailBlock=(title,children)=>el('section',{title},children),stageViewer=()=>el('figure'),snapshotHistory=()=>el('section'),runChecks=()=>[],evaluationNames={},statusNames={},diagnosticText=()=>'',attachments=()=>el('section'),logViewer=()=>el('section'),displayRecord=r=>r;
+const openDetail=eval('('+cut('  async function openDetail(', '  function reviewList(')+')');
+(async()=>{await openDetail(assisted.id);const detail=dump(elements['#detail-content']);assert(detail.includes(warning));assert.match(detail,/已排除速度比较/);assert.equal(JSON.stringify([normal,assisted,missing]),before);console.log('annotation surfaces, raw metrics, speed bars and trend eligibility passed');})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', program, str(make_snapshot.ROOT / 'web/app.js'),
+                                 str(make_snapshot.ROOT / 'web/public-gallery.js'), json.dumps(self.annotation),
+                                 make_gallery.OPERATOR_WARNING], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('trend eligibility passed', result.stdout)
+
+
 class ScoreFirstPresentationTests(unittest.TestCase):
     """Synthetic unit records only; not new benchmark reviews or UI evidence."""
     review = ScoreContractTests.review
