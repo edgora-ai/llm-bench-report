@@ -1,6 +1,6 @@
-# 模型能力基准 · 作品与原始记录
+# 模型能力基准 · 一次会话评测
 
-增补 AGY Claude Sonnet 4.6 (Thinking) 双任务。两份样本均由操作员终止卡住的 npm exec playwright --version 自检；原始交付未修改，生成及 CLI API 原始耗时包含停滞，不作正常速度比较；未新增正式六维评分。原有公开记录与48条评审保留。AGY 生成在主机独立工作目录运行，不等同 Docker 推理隔离，provider_route 未知。针对性复测发现鳄鱼移动端溢出、黑洞窄屏控件裁切及粒子减量缺陷，未修补原作。
+固定任务、固定隔离环境下的模型一次会话完成度对比。2026-11-02 新增 opencode/beam-free 两题样本：推理经记录在案的算子网关路由（batch route_override，非官方 zen/inference 路由），条件与既有 opencode free 样本不同，不直接排名；opencode-go/iceman-contributor-free 因本机无 OpenCode Go 凭据未运行。新增样本视觉评分待人工复核。
 
 本仓库的报告由 `llm-bench` 发布步骤自动生成，报告为只读脱敏合并快照，不含凭据、原始日志或本机路径。源码与运行配置分开，私有配置、二进制和完整运行归档不上传。
 index.html 随发布更新。日期命名文件是首次创建时的合并数据副本，不是该日期专属数据；旧版文件保留原字节，不重新包装成日快照。
@@ -23,8 +23,10 @@ index.html 随发布更新。日期命名文件是首次创建时的合并数据
 - [2026-10-12](index.html?purpose=benchmark&date_from=2026-10-12&date_to=2026-10-12)
 - [2026-10-13](index.html?purpose=benchmark&date_from=2026-10-13&date_to=2026-10-13)
 - [2026-10-14](index.html?purpose=benchmark&date_from=2026-10-14&date_to=2026-10-14)
+- [2026-10-16](index.html?purpose=benchmark&date_from=2026-10-16&date_to=2026-10-16)
 - [2026-10-17](index.html?purpose=benchmark&date_from=2026-10-17&date_to=2026-10-17)
 - [2026-10-30](index.html?purpose=benchmark&date_from=2026-10-30&date_to=2026-10-30)
+- [2026-11-02](index.html?purpose=benchmark&date_from=2026-11-02&date_to=2026-11-02)
 
 ## 结果解释
 

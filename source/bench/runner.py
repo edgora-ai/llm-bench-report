@@ -17,7 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from .adapters import claude_code, opencode
 from .discovery import CLAUDE_MODELS, claude_model_queue, discover_free
 from .effort import CEILING_ORDER, condition_fields as effort_condition, read_catalogue, resolve as resolve_effort
-from .egress import Gateway, connections, validate_generation_request_policy
+from .egress import Gateway, connections, opencode_route, route_record, validate_generation_request_policy
 from .isolation import generation_command, evaluate_command, image_id, preflight
 from .storage import Store
 from urllib.parse import urlsplit
@@ -457,6 +457,12 @@ def run_batch(root, config, purpose="benchmark", models=None, tasks=None, seed=N
     catalogue_dir = batch_dir / "catalogue"
     catalogue_dir.mkdir()
     raw_catalogue = json.loads(Path(config["paths"]["models_cache"]).read_text())
+    route = opencode_route(config)
+    if route is not None:
+        # The frozen directory describes the route actually used. The public
+        # catalogue's endpoint would otherwise claim an official route the
+        # batch never exercised.
+        raw_catalogue["opencode"]["api"] = route["base"]
     write_json(catalogue_dir / "models.json", {"opencode": raw_catalogue["opencode"]})
     seed = seed if seed is not None else random.SystemRandom().randrange(2**32)
     random.Random(seed).shuffle(entries)
@@ -465,6 +471,7 @@ def run_batch(root, config, purpose="benchmark", models=None, tasks=None, seed=N
     queue = [(entry["tool"], entry["model"], by_id[entry["task_id"]]) for entry in entries]
     batch = {"id": batch_id, "job_id": job_id, "purpose": purpose, "created_at": utcnow(),
              "seed": seed, "preflight": facts, "free_candidates": free, "tasks": tasks,
+             "route_override": route_record(config),
              "queue": entries, "run_ids": [], "status": "running", "concurrency": concurrency}
     batch_lock = threading.Lock()
     cancel_event = threading.Event()

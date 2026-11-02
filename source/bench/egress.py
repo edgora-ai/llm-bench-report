@@ -87,6 +87,65 @@ def resolve_egress(config_path, list_path):
     return proxy
 
 
+def opencode_route(config):
+    """Operator-declared alternative route for the OpenCode tool provider.
+
+    The default preserves the wrapper's own path: the frozen catalogue's
+    ``opencode.api`` reached through the selected egress. When a model is only
+    callable through an operator-run gateway (for example a subscription
+    route), the private config may declare one explicit base, credential
+    environment variable and proxy. This is recorded in the batch and in the
+    frozen catalogue, so the archive can never present a gateway sample as the
+    official route.
+    """
+    routes = config.get("routes")
+    if routes is None:
+        return None
+    if not isinstance(routes, dict):
+        raise ValueError("routes must be a table")
+    route = routes.get("opencode")
+    if route is None:
+        return None
+    if not isinstance(route, dict):
+        raise ValueError("routes.opencode must be a table")
+    base = route.get("base")
+    parsed = urllib.parse.urlsplit(base if isinstance(base, str) else "")
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("Invalid routes.opencode.base")
+    key_env = route.get("key_env")
+    if key_env is not None and (not isinstance(key_env, str) or not key_env.strip()):
+        raise ValueError("Invalid routes.opencode.key_env")
+    proxy_setting = route.get("proxy", "egress")
+    if proxy_setting == "egress":
+        proxy = resolve_egress(config["paths"]["opencode_egress_config"], config["paths"]["opencode_egress_list"])
+    elif proxy_setting in {"direct", None}:
+        proxy = None
+    elif isinstance(proxy_setting, str) and urllib.parse.urlsplit(proxy_setting).scheme:
+        proxy = proxy_setting
+    else:
+        raise ValueError("Invalid routes.opencode.proxy")
+    secret = None
+    if key_env:
+        secret = os.environ.get(key_env)
+        if not secret:
+            raise ValueError(f"OpenCode route credential {key_env} is not set")
+    return {"base": base.rstrip("/"), "secret": secret, "key_env": key_env, "proxy": proxy}
+
+
+def route_record(config):
+    """Recordable, credential-free description of an operator route override."""
+    route = opencode_route(config)
+    if route is None:
+        return None
+
+    def endpoint(value):
+        parsed = urllib.parse.urlsplit(value or "")
+        return {"scheme": parsed.scheme, "host": parsed.hostname, "port": parsed.port, "path": parsed.path}
+
+    return {"provider": "opencode", "base": endpoint(route["base"]),
+            "key_env": route["key_env"], "proxy": endpoint(route["proxy"])}
+
+
 def connections(config):
     settings = json.loads(Path(config["paths"]["claude_settings"]).read_text())
     env = settings.get("env", {})
@@ -98,15 +157,26 @@ def connections(config):
         raise ValueError("Invalid Claude provider URL")
     catalogue = json.loads(Path(config["paths"]["models_cache"]).read_text())
     zen = catalogue["opencode"]
-    free_key = os.environ.get("OPENCODE_API_KEY", "public")
-    auth_path = Path.home() / ".local/share/opencode/auth.json"
-    if free_key == "public" and auth_path.is_file():
-        auth = json.loads(auth_path.read_text()).get("opencode", {})
-        if auth.get("type") == "api" and auth.get("key"):
-            free_key = auth["key"]
+    route = opencode_route(config)
+    if route is not None:
+        # The operator route is explicit: no implicit fallback to the public
+        # free key or to the catalogue endpoint when it is misconfigured.
+        free_key = route["secret"]
+        if not free_key:
+            raise ValueError("OpenCode route requires key_env or a public key")
+        opencode = {"base": route["base"], "headers": {"Authorization": "Bearer " + free_key},
+                    "secret": free_key, "proxy": route["proxy"]}
+    else:
+        free_key = os.environ.get("OPENCODE_API_KEY", "public")
+        auth_path = Path.home() / ".local/share/opencode/auth.json"
+        if free_key == "public" and auth_path.is_file():
+            auth = json.loads(auth_path.read_text()).get("opencode", {})
+            if auth.get("type") == "api" and auth.get("key"):
+                free_key = auth["key"]
+        opencode = {"base": zen["api"].rstrip("/"), "headers": {"Authorization": "Bearer " + free_key}, "secret": free_key, "proxy": resolve_egress(config["paths"]["opencode_egress_config"], config["paths"]["opencode_egress_list"])}
     return {
         "claude-code": {"base": base.rstrip("/"), "headers": {"Authorization": "Bearer " + secret}, "secret": secret, "proxy": None},
-        "opencode": {"base": zen["api"].rstrip("/"), "headers": {"Authorization": "Bearer " + free_key}, "secret": free_key, "proxy": resolve_egress(config["paths"]["opencode_egress_config"], config["paths"]["opencode_egress_list"])},
+        "opencode": opencode,
     }
 
 

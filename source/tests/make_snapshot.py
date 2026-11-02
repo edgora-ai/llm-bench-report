@@ -98,6 +98,19 @@ def sanitize(run):
                                        if MEDIA_RE.search(str(e))]}
     if "error" in kept["evaluation"]:
         kept["evaluation"]["error"] = _error_class(kept["evaluation"]["error"])
+    # Operator review text sometimes cites evidence by its project-relative
+    # archive location. The report publishes the same note without the
+    # archive prefix (the run id already identifies the archive in-page), and
+    # the host path guard below rejects the raw form, so normalize it here.
+    prefix = str(run.get("archive_dir") or "").rstrip("/")
+    if prefix:
+        cleaned = []
+        for review in kept.get("reviews") or []:
+            if isinstance(review, dict) and isinstance(review.get("note"), str):
+                review = {**review, "note": review["note"].replace(prefix + "/", "")}
+            cleaned.append(review)
+        if cleaned:
+            kept["reviews"] = cleaned
     return kept
 
 
@@ -213,16 +226,22 @@ def collect_evidence(runs, root, budget=MAX_EVIDENCE_BYTES, cache=None):
                 if _inline(mapping, stats, root, run, path, "image", cache):
                     stats["screenshots"] += 1
             elif lowered.endswith(VIDEO_SUFFIXES):
-                # Encode first, then weigh it: the budget is about what lands
-                # in the page, and a trial encode just to measure it would
-                # cost a minute per recording for nothing.
+                # Weigh what would land before spending an encode. When the
+                # caller named a previously published site, that is the bytes
+                # already in that site; re-encoding only to measure them would
+                # cost minutes per recording for nothing.
                 try:
-                    encoded, _ = _encode(root, run, path, "video", cache)
+                    reused = _reuse_published(root, run, path, "video", cache)
+                    if reused is not None:
+                        encoded_size = reused.stat().st_size
+                    else:
+                        encoded, _ = _encode(root, run, path, "video", cache)
+                        encoded_size = encoded.stat().st_size
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
                     stats["missing"] += 1
                     print(f"  跳过 {run.get('id', '')[:8]}/{path}: {error}", file=sys.stderr)
                     continue
-                if stats["bytes"] + encoded.stat().st_size > budget:
+                if stats["bytes"] + encoded_size > budget:
                     stats["skipped_video"] += 1
                     continue
                 if _inline(mapping, stats, root, run, path, "video", cache):
