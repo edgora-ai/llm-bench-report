@@ -2,6 +2,8 @@
 
 固定任务、固定隔离环境下的模型一次会话完成度对比。2026-11-02 新增 opencode/beam-free 两题样本：推理经记录在案的算子网关路由（batch route_override，非官方 zen/inference 路由），条件与既有 opencode free 样本不同，不直接排名；opencode-go/iceman-contributor-free 因本机无 OpenCode Go 凭据未运行。新增样本视觉评分待人工复核。
 
+2026-11-09 Crouton Alpha Free：新增四条真实尝试，未挑选最佳结果。Claude Code + 既有 gateway 的鳄鱼、黑洞两题成功；OpenCode 官方 inference 入口的两题均因 HTTP 429 / FreeUsageLimitError 未交付，失败记录同样保留。两条路线和条件不同，不作等条件排名。命令分别显式指定 --effort max / --variant max；条件中的 applied=max 表示目录解析和 CLI 档位选择，不是后端独立确认，实际推理档位及底层权重仍未知。生成耗时包含模型自检，CLI 费用未经账单核验。补充浏览器验证发现：鳄鱼暂停仅停止骑行，云朵仍移动；黑洞在 400×800 手机视口中，控制面板遮挡黑洞主体，虽然无横向溢出检查通过。黑洞是艺术动画，未验证物理准确性。原作未修改；四条新记录均无正式视觉评分。
+
 本仓库的报告由 `llm-bench` 发布步骤自动生成，报告为只读脱敏合并快照，不含凭据、原始日志或本机路径。源码与运行配置分开，私有配置、二进制和完整运行归档不上传。
 index.html 随发布更新。日期命名文件是首次创建时的合并数据副本，不是该日期专属数据；旧版文件保留原字节，不重新包装成日快照。
 
@@ -27,6 +29,7 @@ index.html 随发布更新。日期命名文件是首次创建时的合并数据
 - [2026-10-17](index.html?purpose=benchmark&date_from=2026-10-17&date_to=2026-10-17)
 - [2026-10-30](index.html?purpose=benchmark&date_from=2026-10-30&date_to=2026-10-30)
 - [2026-11-02](index.html?purpose=benchmark&date_from=2026-11-02&date_to=2026-11-02)
+- [2026-11-09](index.html?purpose=benchmark&date_from=2026-11-09&date_to=2026-11-09)
 
 ## 结果解释
 
