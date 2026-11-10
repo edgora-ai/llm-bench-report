@@ -116,7 +116,7 @@ def _manifest(manifest: dict) -> dict:
         raise ValueError("Invalid run status")
     if result.get("purpose") not in ("smoke", "benchmark", "fixture"):
         raise ValueError("Invalid run purpose")
-    if result.get("tool") not in ("claude-code", "opencode", "agy"):
+    if result.get("tool") not in ("claude-code", "opencode", "agy", "zcode"):
         raise ValueError("Invalid tool")
     for field in ("model", "task_id", "task_name", "prompt_version"):
         if not isinstance(result.get(field), str):

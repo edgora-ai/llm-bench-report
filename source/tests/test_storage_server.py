@@ -83,6 +83,23 @@ class StorageTests(unittest.TestCase):
         data["extra"]["nested"].append("caller mutation")
         self.assertNotEqual(self.store.get_run(data["id"]), data)
 
+    def test_zcode_remote_model_preserves_conditions_and_is_searchable(self):
+        data = manifest("zcode-remote", tool="zcode", model="GLM-5.3-Flash",
+                        conditions={"profile": "remote-macos-sandbox", "cli_version": "0.17.1",
+                                    "reasoning_effort_requested": "max",
+                                    "reasoning_effort_provider_confirmed": None})
+        self.store.upsert_run(data)
+        with sqlite3.connect(self.db_path) as db:
+            stored = json.loads(db.execute("SELECT manifest_json FROM runs WHERE id=?", (data["id"],)).fetchone()[0])
+        self.assertEqual(stored, data)
+        self.assertEqual(self.store.get_run(data["id"]), data)
+        self.assertEqual(self.store.list_runs({"tool": "zcode", "q": "GLM-5.3-Flash"}), [data])
+        self.assertEqual(self.store.list_runs({"q": data["id"]}), [data])
+        with self.assertRaises(RunConflict):
+            self.store.upsert_run(dict(data, tool="agy"))
+        with self.assertRaises(ValueError):
+            self.store.upsert_run(manifest("unknown-tool", tool="unregistered-cli"))
+
     def test_unknown_cost_and_known_subtotal_coverage(self):
         for data in (manifest("unknown"), manifest("known", cost=1.25), manifest("free", cost=0)):
             self.store.upsert_run(data)
